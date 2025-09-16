@@ -2,7 +2,7 @@ export default [
   {
     files: ["src/**/*.js", "src/Verter.user.js"],
     languageOptions: {
-      ecmaVersion: 5,
+      ecmaVersion: 2020,     // ← было 5, из-за этого "const is reserved"
       sourceType: "script",
       globals: {
         window: "readonly",
