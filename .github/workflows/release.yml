@@ -1,10 +1,12 @@
-name: Release ZIP
+name: Auto Release on push to main
 
 on:
   push:
-    tags:
-      - 'v*'
-  workflow_dispatch:
+    branches:
+      - main
+    # (опционально) чтобы триггерить релиз только если менялся код бота:
+    # paths:
+    #   - 'src/Verter.user.js'
 
 jobs:
   build-and-release:
@@ -16,7 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0     # на всякий случай подтянуть теги
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -36,12 +38,28 @@ jobs:
           name: Verter_SAFE.zip
           path: build/Verter_SAFE.zip
 
+      # Сгенерируем уникальный тег и имя релиза
+      - name: Compute tag & name
+        id: meta
+        run: |
+          TS=$(date -u +'%Y%m%d-%H%M%S')
+          # Номер запуска в репозитории (монотонно растёт)
+          RUN=${GITHUB_RUN_NUMBER}
+          # Короткий SHA коммита
+          SHA=$(git rev-parse --short HEAD)
+          TAG="auto-${TS}-r${RUN}-${SHA}"
+          NAME="Verter ${TAG}"
+          echo "tag=${TAG}"   >> $GITHUB_OUTPUT
+          echo "name=${NAME}" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release and attach ZIP
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}     # например v1.2.3
-          name: Verter ${{ github.ref_name }}
-          body: "Automated release from CI."
+          tag_name: ${{ steps.meta.outputs.tag }}   # автоматически создаст тег
+          name:     ${{ steps.meta.outputs.name }}
+          body: |
+            Automated release from CI.
+            Commit: ${{ github.sha }}
           draft: false
           prerelease: false
           files: |
