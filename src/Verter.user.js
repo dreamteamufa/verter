@@ -1,4 +1,3 @@
-// ci check
 (function(){
   try{
     if (window.top !== window) { return; }             // do not run in iframes
@@ -10,7 +9,7 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.11.1";
+const appversion = "Verter ver. 5.11.1 x10";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
 var BOT_BUILD = "5.11.1-CAN CHS AllStages";
@@ -28,11 +27,11 @@ const reverse = false;
 const mode = 'DEMO';
 const cyclesToPlayDefault = 21;
 let cyclesToPlay = cyclesToPlayDefault;
-const limitWin1  = 100;
-const limitLoss1 = -200;
-const limitWin2  = 200;
-const limitLoss2 = -400;
-const limitWin3  = 600;
+const limitWin1  = 500;
+const limitLoss1 = -800;
+const limitWin2  = 1000;
+const limitLoss2 = -2000;
+const limitWin3  = 2000;
 const limitLoss3 = -4000;
 
 let limitWin = limitWin1;
@@ -46,27 +45,25 @@ const redColor   = '#B90000';
 const greenColor = '#009500';
 
 const betArray1 = [
-    {step: 0, value: 3, pressCount: 2 },
-    {step: 1, value: 8, pressCount: 7 },
-    {step: 2, value: 20, pressCount: 11 },
-    {step: 3, value: 45, pressCount: 16 },
-    {step: 4, value: 90, pressCount: 21 }
+    {step: 0, value: 10, pressCount: 9 },
+    {step: 1, value: 30, pressCount: 13 },
+    {step: 2, value: 80, pressCount: 20 },
+    {step: 3, value: 200, pressCount: 24 },
+    {step: 4, value: 450, pressCount: 111 }
 ];
 const betArray2 = [
-    {step: 0, value: 8, pressCount: 7 },
-    {step: 1, value: 20, pressCount: 11 },
-    {step: 2, value: 45, pressCount: 16 },
-    {step: 3, value: 90, pressCount: 21 },
-    {step: 4, value: 200, pressCount: 24 }
+    {step: 0, value: 30, pressCount: 13 },
+    {step: 1, value: 80, pressCount: 20 },
+    {step: 2, value: 200, pressCount: 24 },
+    {step: 3, value: 400, pressCount: 27 },
+    {step: 4, value: 900, pressCount: 33 }
 ];
 const betArray3 = [
-    {step: 0, value: 20, pressCount: 11 },
-    {step: 1, value: 45, pressCount: 16 },
-    {step: 2, value: 90, pressCount: 21 },
-    {step: 3, value: 200, pressCount: 24 },
-    {step: 4, value: 400, pressCount: 27 },
-    {step: 5, value: 900, pressCount: 33 },
-    {step: 6, value: 2000, pressCount: 44 }
+    {step: 0, value: 80, pressCount: 20 },
+    {step: 1, value: 200, pressCount: 24 },
+    {step: 2, value: 400, pressCount: 27 },
+    {step: 3, value: 900, pressCount: 33 },
+    {step: 4, value: 1800, pressCount: 42 }
 ];
 
 
