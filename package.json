@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "PCS pipeline for Verter SAFE trading bot",
   "main": "src/Verter.user.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "syntax": "node scripts/syntax-check.js src/Verter.user.js",
     "lint": "eslint src/Verter.user.js --quiet",
