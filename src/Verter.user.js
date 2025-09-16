@@ -28,11 +28,11 @@ const reverse = false;
 const mode = 'DEMO';
 const cyclesToPlayDefault = 21;
 let cyclesToPlay = cyclesToPlayDefault;
-const limitWin1  = 100;
-const limitLoss1 = -200;
-const limitWin2  = 200;
-const limitLoss2 = -400;
-const limitWin3  = 600;
+const limitWin1  = 500;
+const limitLoss1 = -800;
+const limitWin2  = 1000;
+const limitLoss2 = -2000;
+const limitWin3  = 2000;
 const limitLoss3 = -4000;
 
 let limitWin = limitWin1;
@@ -46,31 +46,33 @@ const redColor   = '#B90000';
 const greenColor = '#009500';
 
 const betArray1 = [
-    {step: 0, value: 3, pressCount: 2 },
-    {step: 1, value: 8, pressCount: 7 },
-    {step: 2, value: 20, pressCount: 11 },
-    {step: 3, value: 45, pressCount: 16 },
-    {step: 4, value: 90, pressCount: 21 }
+    {step: 0, value: 10,  pressCount: 9},
+    {step: 1, value: 30,  pressCount: 13},
+    {step: 2, value: 80,  pressCount: 20},
+    {step: 3, value: 200, pressCount: 24},
+    {step: 4, value: 450, pressCount: 111}
 ];
 const betArray2 = [
-    {step: 0, value: 8, pressCount: 7 },
-    {step: 1, value: 20, pressCount: 11 },
-    {step: 2, value: 45, pressCount: 16 },
-    {step: 3, value: 90, pressCount: 21 },
-    {step: 4, value: 200, pressCount: 24 }
+    {step: 0, value: 30,  pressCount: 13},
+    {step: 1, value: 80,  pressCount: 20},
+    {step: 2, value: 200, pressCount: 24},
+    {step: 3, value: 400, pressCount: 27},
+    {step: 4, value: 900, pressCount: 33}
 ];
 const betArray3 = [
-    {step: 0, value: 20, pressCount: 11 },
-    {step: 1, value: 45, pressCount: 16 },
-    {step: 2, value: 90, pressCount: 21 },
-    {step: 3, value: 200, pressCount: 24 },
-    {step: 4, value: 400, pressCount: 27 },
-    {step: 5, value: 900, pressCount: 33 },
-    {step: 6, value: 2000, pressCount: 44 }
+    {step: 0, value: 80,   pressCount: 20},
+    {step: 1, value: 200,  pressCount: 24},
+    {step: 2, value: 400,  pressCount: 27},
+    {step: 3, value: 900,  pressCount: 33},
+    {step: 4, value: 1800, pressCount: 42}
 ];
 
+function logActiveBetArray(name){
+  try{ console.log("[DEBUG] Active bet array:", name); }catch(_){ }
+}
 
 let betArray = betArray1;
+logActiveBetArray("betArray1");
 
 /* ====== STATE ====== */
 let priceBuffer = [];
@@ -154,18 +156,38 @@ let lastMax = startPrice;
 
 /* ====== Cycle chips ====== */
 const winCycle = document.createElement("div");
+winCycle.className = 'cycle-chip';
 winCycle.style.backgroundColor = greenColor;
-winCycle.style.padding = "5px";
-winCycle.style.margin = "15px 10px 0 0";
-winCycle.style.display = "inline-block";
-winCycle.style.borderRadius = "3px";
+winCycle.style.color = '#fff';
+winCycle.style.display = 'flex';
+winCycle.style.flexDirection = 'column';
+winCycle.style.alignItems = 'center';
+winCycle.style.justifyContent = 'center';
+winCycle.style.padding = '2px 4px';
+winCycle.style.margin = '0';
+winCycle.style.borderRadius = '4px';
+winCycle.style.minWidth = '48px';
+winCycle.style.height = '40px';
+winCycle.style.fontSize = '11px';
+winCycle.style.lineHeight = '1.1';
+winCycle.style.flex = '0 0 auto';
 
 const loseCycle = document.createElement("div");
+loseCycle.className = 'cycle-chip';
 loseCycle.style.backgroundColor = redColor;
-loseCycle.style.padding = "5px";
-loseCycle.style.margin = "15px 10px 0 0";
-loseCycle.style.display = "inline-block";
-loseCycle.style.borderRadius = "3px";
+loseCycle.style.color = '#fff';
+loseCycle.style.display = 'flex';
+loseCycle.style.flexDirection = 'column';
+loseCycle.style.alignItems = 'center';
+loseCycle.style.justifyContent = 'center';
+loseCycle.style.padding = '2px 4px';
+loseCycle.style.margin = '0';
+loseCycle.style.borderRadius = '4px';
+loseCycle.style.minWidth = '48px';
+loseCycle.style.height = '40px';
+loseCycle.style.fontSize = '11px';
+loseCycle.style.lineHeight = '1.1';
+loseCycle.style.flex = '0 0 auto';
 
 /* ====== Keyboard emulation ====== */
 const buyButton = document.getElementsByClassName("btn btn-call")[0];
@@ -864,24 +886,53 @@ function addSensitivityControl(){
       <label for="auto-trading-toggle">Auto Trading:</label>
       <input type="checkbox" id="auto-trading-toggle" ${autoTradingEnabled ? 'checked' : ''}>
     </div>
-    <hr style="border-color:#333; margin:6px 0;">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+  `;
+  document.getElementById('sensitivity-slider').addEventListener('input', e=>{ signalSensitivity=parseInt(e.target.value); document.getElementById('sensitivity-value').textContent=signalSensitivity; });
+  document.getElementById('auto-trading-toggle').addEventListener('change', e=>{ autoTradingEnabled=e.target.checked; });
+}
+
+function renderPauseFooter(){
+  const footer = document.getElementById('trading-footer'); if (!footer) return;
+  footer.innerHTML = `
+    <div class="footer-title">Pause</div>
+    <div class="pause-controls">
       <label>
         <input type="checkbox" id="pause-enabled" ${pauseEnabled ? 'checked' : ''}>
-        Pause <input type="number" id="pause-losses" min="1" max="10" value="${pauseAfterLosses}" style="width:50px;"> losses
+        Enabled
       </label>
       <label>
-        for <input type="number" id="pause-minutes" min="1" max="240" value="${pauseMinutes}" style="width:60px;"> min
+        after <input type="number" id="pause-losses" min="1" max="10" value="${pauseAfterLosses}"> losses
+      </label>
+      <label>
+        for <input type="number" id="pause-minutes" min="1" max="240" value="${pauseMinutes}"> min
       </label>
       <button id="pause-resume-btn">Reset</button>
     </div>
   `;
-  document.getElementById('sensitivity-slider').addEventListener('input', e=>{ signalSensitivity=parseInt(e.target.value); document.getElementById('sensitivity-value').textContent=signalSensitivity; });
-  document.getElementById('auto-trading-toggle').addEventListener('change', e=>{ autoTradingEnabled=e.target.checked; });
-  document.getElementById('pause-enabled').addEventListener('change', e=>{ pauseEnabled = e.target.checked; if (!pauseEnabled) clearPause(); });
-  document.getElementById('pause-losses').addEventListener('change', e=>{ pauseAfterLosses=Math.max(1,parseInt(e.target.value||'3')); e.target.value=pauseAfterLosses; });
-  document.getElementById('pause-minutes').addEventListener('change', e=>{ pauseMinutes=Math.max(1,parseInt(e.target.value||'15')); e.target.value=pauseMinutes; });
-  document.getElementById('pause-resume-btn').addEventListener('click', ()=>{ clearPause(); });
+
+  const enabledEl = document.getElementById('pause-enabled');
+  const lossesEl = document.getElementById('pause-losses');
+  const minutesEl = document.getElementById('pause-minutes');
+  const resetBtn = document.getElementById('pause-resume-btn');
+
+  if (enabledEl){
+    enabledEl.addEventListener('change', e=>{ pauseEnabled = e.target.checked; if (!pauseEnabled) clearPause(); });
+  }
+  if (lossesEl){
+    lossesEl.addEventListener('change', e=>{
+      pauseAfterLosses = Math.max(1, parseInt(e.target.value || '3', 10));
+      e.target.value = pauseAfterLosses;
+    });
+  }
+  if (minutesEl){
+    minutesEl.addEventListener('change', e=>{
+      pauseMinutes = Math.max(1, parseInt(e.target.value || '15', 10));
+      e.target.value = pauseMinutes;
+    });
+  }
+  if (resetBtn){
+    resetBtn.addEventListener('click', ()=>{ clearPause(); });
+  }
 }
 
 function createIndicatorPanels(){
@@ -969,6 +1020,7 @@ function addUI(){
   const TRADING_WIDTH_PX = 320; // ← измените тут, если нужна другая фиксированная ширина
 
   const newDiv = document.createElement("div");
+  newDiv.classList.add('bot-root');
   newDiv.style.position = "fixed";
   newDiv.style.left = "20px";
   newDiv.style.bottom = "20px";
@@ -981,10 +1033,10 @@ function addUI(){
   newDiv.style.boxShadow = "0 8px 24px rgba(0,0,0,0.5)";
   newDiv.style.fontFamily = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
   newDiv.style.color = "#ddd";
-  newDiv.style.display = "inline-flex";
-  newDiv.style.flexDirection = "row";
+  newDiv.style.display = "flex";
+  newDiv.style.flexDirection = "column";
   newDiv.style.gap = "6px";
-  newDiv.style.alignItems = "flex-start";
+  newDiv.style.alignItems = "stretch";
   newDiv.style.zIndex = "100500";
 
   const dragHandle = document.createElement('div');
@@ -1002,6 +1054,61 @@ function addUI(){
 
   const style = document.createElement('style');
   style.textContent = `
+    .bot-root{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      align-items:stretch;
+    }
+    .bot-main-row{
+      display:flex;
+      gap:6px;
+      align-items:flex-start;
+      width:100%;
+    }
+    .panel-footer{
+      background-color:#0f0f10;
+      border-radius:6px;
+      padding:6px;
+      font-size:11px;
+      color:#dcdcdc;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      margin-top:4px;
+    }
+    .panel-footer .footer-title{
+      font-weight:600;
+      color:#bdbdbd;
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:0.04em;
+    }
+    .pause-controls{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      font-size:11px;
+    }
+    .pause-controls label{
+      display:flex;
+      align-items:center;
+      gap:4px;
+      white-space:nowrap;
+    }
+    .pause-controls input[type="number"]{
+      width:52px;
+      padding:2px 4px;
+      font-size:11px;
+    }
+    .pause-controls button{
+      padding:2px 6px;
+      font-size:11px;
+    }
+    .global-footer{
+      width:100%;
+    }
     /* Карточки панелей */
     .bot-trading-panel{
       background-color:#0b0b0c;
@@ -1057,8 +1164,33 @@ function addUI(){
 
     /* История циклов */
     .cycles-history{
-      margin-top:4px;padding:2px;background-color:#0f0f10;border-radius:4px;
-      max-height:60px;overflow-x:auto;overflow-y:hidden;font-size:12px;white-space:nowrap;display:flex;gap:2px;
+      padding:4px 2px;
+      background-color:#09090a;
+      border-radius:4px;
+      height:48px;
+      display:flex;
+      flex-wrap:nowrap;
+      gap:2px;
+      overflow-x:auto;
+      overflow-y:hidden;
+      font-size:11px;
+      align-items:stretch;
+    }
+    .cycle-chip{
+      display:flex;
+      flex-direction:column;
+      justify-content:center;
+      align-items:center;
+      padding:2px 4px;
+      border-radius:4px;
+      min-width:48px;
+      flex:0 0 auto;
+      font-size:11px;
+      line-height:1.1;
+    }
+    .cycle-chip .max-cycle{
+      font-size:9px;
+      opacity:0.75;
     }
 
     /* Индикаторы */
@@ -1101,6 +1233,9 @@ function addUI(){
   `;
   document.head.appendChild(style);
 
+  const contentRow = document.createElement('div');
+  contentRow.className = 'bot-main-row';
+
   /* Trading */
   const tradingPanel = document.createElement('div');
   tradingPanel.className = 'bot-trading-panel fixed-trading';
@@ -1127,6 +1262,7 @@ function addUI(){
 
     <div class="info-item full-width"><span class="info-label">Signal:</span><span class="info-value" id="signal">none</span></div>
     <div class="info-item full-width"><span class="info-label">Direction:</span><span class="info-value" id="trade-dir">flat</span></div>
+    <div class="panel-footer trading-footer" id="trading-footer"></div>
   `;
 
   /* Top Signals */
@@ -1170,16 +1306,24 @@ function addUI(){
       <button id="live-btn">Live</button>
     </div>
     <div style="background:#0c0c0d;border-radius:4px;"><canvas id="chart-canvas" width="400" height="130"></canvas></div>
-    <div class="panel-header" style="margin-top:4px;"><span>Cycles History</span></div>
-    <div class="cycles-history" id="cycles-history"></div>
   `;
 
   /* Сборка */
-  newDiv.appendChild(tradingPanel);
-  newDiv.appendChild(topPanel);
-  newDiv.appendChild(accPanel);
-  newDiv.appendChild(techPanel);
-  newDiv.appendChild(chartContainer);
+  contentRow.appendChild(tradingPanel);
+  contentRow.appendChild(topPanel);
+  contentRow.appendChild(accPanel);
+  contentRow.appendChild(techPanel);
+  contentRow.appendChild(chartContainer);
+  newDiv.appendChild(contentRow);
+
+  const globalFooter = document.createElement('div');
+  globalFooter.className = 'panel-footer global-footer';
+  globalFooter.innerHTML = `
+    <div class="footer-title">Cycles History</div>
+    <div class="cycles-history" id="cycles-history"></div>
+  `;
+  newDiv.appendChild(globalFooter);
+
   document.body.appendChild(newDiv);
   enableDrag(newDiv, dragHandle);
 
@@ -1208,6 +1352,7 @@ function addUI(){
 
   // компактные контролы и индикаторные панели
   addSensitivityControl();
+  renderPauseFooter();
   createIndicatorPanels();
 
   // авто-обновление списков (Top/Accuracy) — без изменений
@@ -1653,17 +1798,35 @@ function tradeLogic(){
 
   // лимиты/профили (как было у тебя)
   if (currentProfit > limitWin){
-    limitWin = limitWin1; limitLoss = limitLoss1; betArray = betArray1;
-    const chip = winCycle.cloneNode(); chip.style.height='30px';
+    limitWin = limitWin1;
+    limitLoss = limitLoss1;
+    betArray = betArray1;
+    logActiveBetArray("betArray1");
+    const chip = winCycle.cloneNode();
     chip.innerHTML = currentProfit + '<div class="max-cycle">' + maxStepInCycle + '</div>';
     cyclesHistoryDiv.appendChild(chip);
     resetCycle('win');
     return;
   } else if (currentProfit - getBetValue(currentBetStep) < limitLoss){
-    if (limitWin === limitWin1){ limitWin=limitWin2; limitLoss=limitLoss2; betArray=betArray2; }
-    else if (limitWin === limitWin2){ limitWin=limitWin3; limitLoss=limitLoss3; betArray=betArray3; }
-    else { limitWin=limitWin1; limitLoss=limitLoss1; betArray=betArray1; }
-    const chip = loseCycle.cloneNode(); chip.style.height='30px';
+    if (limitWin === limitWin1){
+      limitWin = limitWin2;
+      limitLoss = limitLoss2;
+      betArray = betArray2;
+      logActiveBetArray("betArray2");
+    }
+    else if (limitWin === limitWin2){
+      limitWin = limitWin3;
+      limitLoss = limitLoss3;
+      betArray = betArray3;
+      logActiveBetArray("betArray3");
+    }
+    else {
+      limitWin = limitWin1;
+      limitLoss = limitLoss1;
+      betArray = betArray1;
+      logActiveBetArray("betArray1");
+    }
+    const chip = loseCycle.cloneNode();
     chip.innerHTML = currentProfit + '<div class="max-cycle">' + maxStepInCycle + '</div>';
     cyclesHistoryDiv.appendChild(chip);
     resetCycle('lose');

@@ -13,7 +13,6 @@
   },
   "devDependencies": {
     "eslint": "^9.0.0",
-    "esprima": "^4.0.1",
-    "archiver": "^6.0.0"
+    "esprima": "^4.0.1"
   }
 }
