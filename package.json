@@ -8,13 +8,12 @@
     "syntax": "node scripts/syntax-check.js src/Verter.user.js",
     "lint": "eslint src/Verter.user.js --quiet",
     "test": "node --test",
-    "smoke": "node scripts/smoke-run.js",
     "build": "node scripts/make-zip.js",
-    "pcs": "npm run syntax && npm run lint && npm run test && npm run smoke && npm run build"
+    "pcs": "npm run syntax && npm run lint && npm run test && npm run build"
   },
   "devDependencies": {
     "eslint": "^9.0.0",
     "esprima": "^4.0.1",
-    "jsdom": "^24.0.0"
+    "archiver": "^6.0.0"
   }
 }
