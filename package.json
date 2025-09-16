@@ -1,0 +1,20 @@
+{
+  "name": "verter-bot",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "syntax": "node scripts/syntax-check.js src/Verter.user.js",
+    "lint": "eslint --max-warnings=0 src/Verter.user.js",
+    "test": "node --test",
+    "smoke": "node scripts/smoke-run.js",
+    "build": "node scripts/make-zip.js",
+    "pcs": "npm run syntax && npm run lint && npm run test && npm run smoke && npm run build"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0",
+    "eslint-plugin-es": "^4.1.0",
+    "esprima": "^4.0.1",
+    "jsdom": "^24.0.0",
+    "archiver": "^6.0.0"
+  }
+}
