@@ -229,7 +229,7 @@ function logCandleClose(c){
 // Trade open (neutral)
 function logTradeOpen(tr){
   try{
-    const payout = parseInt(percentProfitDiv?.innerHTML || '0',10);
+    const payout = parseInt((percentProfitDiv && percentProfitDiv.innerHTML) || '0',10);
     console.log(
       "%c📥 [TRADE-OPEN] %s | %s | step:%d | bet:%s | payout:%d%% | score B:%s S:%s diff:%s/%s | EMA9:%s EMA21:%s | RSI14:%s | price:%s",
       "color:#e0e0e0;", tr.time, tr.betDirection.toUpperCase(), tr.step, cur(tr.betValue), payout,
@@ -517,7 +517,7 @@ function calculateAwesomeOscillatorOHLC(candles){
   return sma(tp,5) - sma(tp,34);
 }
 function calculateParabolicSAR_OHLC(candles, acc=0.02, max=0.2){
-  if (!candles || candles.length < 2) return {sar:candles?.[0]?.close||0, isUpTrend:true};
+  if (!candles || candles.length < 2) return {sar:((candles && candles[0]) ? candles[0].close : 0)||0, isUpTrend:true};
   let isUp = candles[1].close > candles[0].close;
   let ep = isUp ? candles[1].high : candles[1].low;
   let sar = isUp ? candles[0].low  : candles[0].high;
@@ -580,8 +580,8 @@ function buildMTF(candlesM1, factor){
     const g = candlesM1.slice(i, i+factor);
     if (!g.length) break;
     out.push({
-      tOpen: g[0].tOpen ?? g[0].time ?? g[0].ts ?? 0,
-      tClose: g[g.length-1].tClose ?? g[g.length-1].time ?? g[g.length-1].ts ?? Date.now(),
+      tOpen: ((g[0].tOpen )!=null ? (g[0].tOpen ) : (((g[0].time )!=null ? (g[0].time ) : (((g[0].ts )!=null ? (g[0].ts ) : (0)))))),
+      tClose: ((g[g.length-1].tClose )!=null ? (g[g.length-1].tClose ) : (((g[g.length-1].time )!=null ? (g[g.length-1].time ) : (((g[g.length-1].ts )!=null ? (g[g.length-1].ts ) : (Date.now())))))),
       open:  g[0].open,
       high:  Math.max(...g.map(c=>c.high)),
       low:   Math.min(...g.map(c=>c.low)),
@@ -1683,7 +1683,7 @@ function tradeLogic(){
         betDirection: tradeDirection,
         shortEMA: window.currentShortEMA,
         longEMA: window.currentLongEMA,
-        emaDiff: (window.currentShortEMA ?? 0) - (window.currentLongEMA ?? 0),
+        emaDiff: (((window.currentShortEMA)!=null ? (window.currentShortEMA) : (0))) - (((window.currentLongEMA)!=null ? (window.currentLongEMA) : (0))),
         rsi: window.currentRSI,
         bullishScore,
         bearishScore,
@@ -1735,11 +1735,11 @@ const observer = new MutationObserver(muts=>{
     if (m.type!=='childList' || !m.addedNodes || m.addedNodes.length===0) return;
     const newDeal = m.addedNodes[0];
     try{
-      const row=newDeal?.childNodes?.[0];
-      const col=row?.children?.[0];
-      const right=col?.children?.[1];
-      const centerDiv=right?.children?.[1];
-      const lastDiv=right?.children?.[2];
+      const row=(newDeal && newDeal.childNodes && newDeal.childNodes[0]);
+      const col=(row && row.children && row.children[0]);
+      const right=(col && col.children && col.children[1]);
+      const centerDiv=(right && right.children && right.children[1]);
+      const lastDiv=(right && right.children && right.children[2]);
 
       const centerUp=_hasClass(centerDiv,'price-up');
       const lastUp=_hasClass(lastDiv,'price-up');
@@ -1749,7 +1749,7 @@ const observer = new MutationObserver(muts=>{
       else if (centerUp && !lastUp) tradeStatus='returned';
       else tradeStatus='lost';
 
-      const betProfit = _parseProfit(lastDiv?.textContent);
+      const betProfit = _parseProfit((lastDiv && lastDiv.textContent));
 
       if (betHistory.length>0){
         const last = betHistory[betHistory.length-1];
