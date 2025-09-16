@@ -1,10 +1,14 @@
-import test from "node:test";
-import assert from "node:assert/strict";
+// tests/ema.test.js  — CommonJS
+const test = require("node:test");
+const assert = require("node:assert/strict");
 
+// простая EMA для проверки
 function ema(values, period) {
   const k = 2 / (period + 1);
   let prev = values[0];
-  for (let i = 1; i < values.length; i++) prev = values[i] * k + prev * (1 - k);
+  for (let i = 1; i < values.length; i++) {
+    prev = values[i] * k + prev * (1 - k);
+  }
   return +prev.toFixed(6);
 }
 
