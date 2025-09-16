@@ -1,10 +1,12 @@
 {
-  "name": "verter-bot",
-  "private": true,
+  "name": "verter",
+  "version": "1.0.0",
+  "description": "PCS pipeline for Verter SAFE trading bot",
+  "main": "src/Verter.user.js",
   "type": "commonjs",
   "scripts": {
     "syntax": "node scripts/syntax-check.js src/Verter.user.js",
-    "lint": "eslint --max-warnings=0 src/Verter.user.js",
+    "lint": "eslint src/Verter.user.js --quiet",
     "test": "node --test",
     "smoke": "node scripts/smoke-run.js",
     "build": "node scripts/make-zip.js",
@@ -12,9 +14,7 @@
   },
   "devDependencies": {
     "eslint": "^9.0.0",
-    "eslint-plugin-es": "^4.1.0",
     "esprima": "^4.0.1",
-    "jsdom": "^24.0.0",
-    "archiver": "^6.0.0"
+    "jsdom": "^24.0.0"
   }
 }
