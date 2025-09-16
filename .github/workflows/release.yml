@@ -2,11 +2,8 @@ name: Auto Release on push to main
 
 on:
   push:
-    branches:
-      - main
-    # (опционально) чтобы триггерить релиз только если менялся код бота:
-    # paths:
-    #   - 'src/Verter.user.js'
+    branches: [ main ]
+  workflow_dispatch: {}  # позволяет запускать вручную из вкладки Actions
 
 jobs:
   build-and-release:
@@ -24,7 +21,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
+          # ВАЖНО: убрали cache:'npm', чтобы не требовался package-lock.json
 
       - name: Install deps
         run: npm install
@@ -38,14 +35,12 @@ jobs:
           name: Verter_SAFE.zip
           path: build/Verter_SAFE.zip
 
-      # Сгенерируем уникальный тег и имя релиза
+      # Генерим уникальный тег и имя релиза
       - name: Compute tag & name
         id: meta
         run: |
           TS=$(date -u +'%Y%m%d-%H%M%S')
-          # Номер запуска в репозитории (монотонно растёт)
           RUN=${GITHUB_RUN_NUMBER}
-          # Короткий SHA коммита
           SHA=$(git rev-parse --short HEAD)
           TAG="auto-${TS}-r${RUN}-${SHA}"
           NAME="Verter ${TAG}"
@@ -55,8 +50,8 @@ jobs:
       - name: Create GitHub Release and attach ZIP
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}   # автоматически создаст тег
-          name:     ${{ steps.meta.outputs.name }}
+          tag_name:  ${{ steps.meta.outputs.tag }}
+          name:      ${{ steps.meta.outputs.name }}
           body: |
             Automated release from CI.
             Commit: ${{ github.sha }}
