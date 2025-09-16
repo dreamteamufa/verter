@@ -1,0 +1,29 @@
+name: PR CI (lint + test + build)
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [ main ]  # пуши в фиче-ветки
+
+jobs:
+  pr-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'        # без cache:'npm', чтобы не требовался lock
+      - name: Install deps
+        run: npm install
+
+      - name: Run PCS (syntax + lint + test + build)
+        run: npm run pcs
+
+      - name: Upload build artifact (ZIP for reviewers)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Verter_SAFE.zip
+          path: build/Verter_SAFE.zip
