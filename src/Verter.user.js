@@ -1062,8 +1062,8 @@ function addUI(){
     }
     .bot-main-row{
       display:flex;
+      align-items:stretch;
       gap:6px;
-      align-items:flex-start;
       width:100%;
     }
     .right-col{
@@ -1078,14 +1078,29 @@ function addUI(){
       gap:6px;
       align-items:stretch;
       width:100%;
+      flex-wrap:nowrap;
     }
     .cycles-strip{
       background:#0f0f10;
       border-radius:6px;
       padding:6px;
+      margin-top:6px;
+      display:flex;
+      flex-direction:column;
     }
-    .cycles-strip .footer-title{
-      display:none;
+    .cycles-title{
+      font-size:12px;
+      opacity:0.7;
+      text-transform:uppercase;
+      margin-bottom:4px;
+    }
+    .cycles-history{
+      height:48px;
+      display:flex;
+      gap:2px;
+      overflow-x:auto;
+      overflow-y:hidden;
+      align-items:center;
     }
     .panel-footer{
       background-color:#0f0f10;
@@ -1096,7 +1111,7 @@ function addUI(){
       display:flex;
       flex-direction:column;
       gap:4px;
-      margin-top:4px;
+      margin-top:auto;
     }
     .panel-footer .footer-title{
       font-weight:600;
@@ -1129,6 +1144,8 @@ function addUI(){
     }
     /* Карточки панелей */
     .bot-trading-panel{
+      display:flex;
+      flex-direction:column;
       background-color:#0b0b0c;
       border-radius:6px;
       padding:6px;
@@ -1336,7 +1353,10 @@ function addUI(){
 
   const cyclesStrip = document.createElement('div');
   cyclesStrip.className = 'cycles-strip';
-  cyclesStrip.innerHTML = '<div class="cycles-history" id="cycles-history"></div>';
+  cyclesStrip.innerHTML = `
+    <div class="cycles-title">Cycles History</div>
+    <div class="cycles-history" id="cycles-history"></div>
+  `;
 
   rightCol.appendChild(cardsRow);
   rightCol.appendChild(cyclesStrip);
