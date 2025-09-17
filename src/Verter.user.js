@@ -1066,6 +1066,27 @@ function addUI(){
       align-items:flex-start;
       width:100%;
     }
+    .right-col{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+      flex:1;
+      min-width:400px;
+    }
+    .cards-row{
+      display:flex;
+      gap:6px;
+      align-items:stretch;
+      width:100%;
+    }
+    .cycles-strip{
+      background:#0f0f10;
+      border-radius:6px;
+      padding:6px;
+    }
+    .cycles-strip .footer-title{
+      display:none;
+    }
     .panel-footer{
       background-color:#0f0f10;
       border-radius:6px;
@@ -1105,9 +1126,6 @@ function addUI(){
     .pause-controls button{
       padding:2px 6px;
       font-size:11px;
-    }
-    .global-footer{
-      width:100%;
     }
     /* Карточки панелей */
     .bot-trading-panel{
@@ -1164,9 +1182,6 @@ function addUI(){
 
     /* История циклов */
     .cycles-history{
-      padding:4px 2px;
-      background-color:#09090a;
-      border-radius:4px;
       height:48px;
       display:flex;
       flex-wrap:nowrap;
@@ -1309,20 +1324,26 @@ function addUI(){
   `;
 
   /* Сборка */
-  contentRow.appendChild(tradingPanel);
-  contentRow.appendChild(topPanel);
-  contentRow.appendChild(accPanel);
-  contentRow.appendChild(techPanel);
-  contentRow.appendChild(chartContainer);
-  newDiv.appendChild(contentRow);
+  const rightCol = document.createElement('div');
+  rightCol.className = 'right-col';
 
-  const globalFooter = document.createElement('div');
-  globalFooter.className = 'panel-footer global-footer';
-  globalFooter.innerHTML = `
-    <div class="footer-title">Cycles History</div>
-    <div class="cycles-history" id="cycles-history"></div>
-  `;
-  newDiv.appendChild(globalFooter);
+  const cardsRow = document.createElement('div');
+  cardsRow.className = 'cards-row';
+  cardsRow.appendChild(topPanel);
+  cardsRow.appendChild(accPanel);
+  cardsRow.appendChild(techPanel);
+  cardsRow.appendChild(chartContainer);
+
+  const cyclesStrip = document.createElement('div');
+  cyclesStrip.className = 'cycles-strip';
+  cyclesStrip.innerHTML = '<div class="cycles-history" id="cycles-history"></div>';
+
+  rightCol.appendChild(cardsRow);
+  rightCol.appendChild(cyclesStrip);
+
+  contentRow.appendChild(tradingPanel);
+  contentRow.appendChild(rightCol);
+  newDiv.appendChild(contentRow);
 
   document.body.appendChild(newDiv);
   enableDrag(newDiv, dragHandle);
