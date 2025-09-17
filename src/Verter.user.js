@@ -10,10 +10,10 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.11.1";
+const appversion = "Verter ver. 5.11.2_ARMed";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
-var BOT_BUILD = "5.11.1-CAN CHS AllStages";
+var BOT_BUILD = "5.11.2-ARMED PCS";
 var QUIET_CONSOLE = true; // only errors by default
 try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 }
@@ -21,6 +21,766 @@ try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 
 // Martingale warm-up trades before stepping (0 = off)
 const MG_WARMUP_TRADES = 0;
+
+
+/* ====== SAFE KEYS CONFIGURATION ====== */
+var SAFE_KEYS_CONFIG = {
+  amountSelectors: [
+    'input.trade-input__value',
+    '.trade-input input',
+    '.trade-amount input',
+    '.trade-amount__value input',
+    'input[name="amount"]',
+    'input[data-name="amount"]',
+    '.amount-input input',
+    '.amount-input__value',
+    '.trade-amount__input',
+    '.trade-amount__field input',
+    '.input-amount input'
+  ],
+  balanceSelectors: [
+    '.js-hd.js-balance-real-USD',
+    '.js-hd.js-balance-demo',
+    '.balance .amount',
+    '.balance-value',
+    '.header-balance__value'
+  ],
+  buySelectors: [
+    'button.trade-button--buy',
+    'button[data-test="trade-button-buy"]',
+    '.trade-button-buy',
+    '.deal-button--up'
+  ],
+  sellSelectors: [
+    'button.trade-button--sell',
+    'button[data-test="trade-button-sell"]',
+    '.trade-button-sell',
+    '.deal-button--down'
+  ],
+  STEP_DELAY_MS: 55,
+  PHASE_PAUSE_MS: 130,
+  USE_SHIFT_FOR_RESET: true,
+  USE_SHIFT_FOR_GROSS_SET: true,
+  MAX_BALANCE_PCT: 0.10,
+  MAX_ABS_BET: 500,
+  RESET_MAX_TICKS: 400,
+  SET_MAX_TICKS: 500,
+  READ_RETRIES: 6,
+  SET_RETRIES: 4,
+  STALE_TIMEOUT_SEC: 30,
+  MICRO_ADJUST_MAX_MS: 150,
+  TOLERANCE: 0.05,
+  SHIFT_BUFFER_STEPS: 3,
+  BALANCE_DIRTY_THRESHOLD: 0.0075,
+  RESET_SHIFT_BATCH: 6,
+  GROSS_SHIFT_BATCH: 4,
+  WATCHDOG_MS: 15000,
+  MONITOR_INTERVAL_MS: 1200,
+  DEV_EXPORT: true
+};
+
+
+/* ====== SAFE KEY PIPELINE (ARMED PREPARATION) ====== */
+var SafeKeyPipeline = (function(){
+  var defaults = {
+    amountSelectors: [],
+    balanceSelectors: [],
+    buySelectors: [],
+    sellSelectors: [],
+    STEP_DELAY_MS: 55,
+    PHASE_PAUSE_MS: 130,
+    USE_SHIFT_FOR_RESET: true,
+    USE_SHIFT_FOR_GROSS_SET: true,
+    RESET_SHIFT_BATCH: 6,
+    GROSS_SHIFT_BATCH: 4,
+    MAX_BALANCE_PCT: 0.10,
+    MAX_ABS_BET: 500,
+    RESET_MAX_TICKS: 400,
+    SET_MAX_TICKS: 500,
+    READ_RETRIES: 6,
+    SET_RETRIES: 4,
+    STALE_TIMEOUT_SEC: 30,
+    MICRO_ADJUST_MAX_MS: 150,
+    TOLERANCE: 0.05,
+    SHIFT_BUFFER_STEPS: 3,
+    BALANCE_DIRTY_THRESHOLD: 0.0075,
+    WATCHDOG_MS: 15000,
+    MONITOR_INTERVAL_MS: 1200,
+    DEV_EXPORT: false
+  };
+
+  function assignDefaults(cfg){
+    var merged = {};
+    var key;
+    for (key in defaults){
+      if (defaults.hasOwnProperty(key)) merged[key] = defaults[key];
+    }
+    if (!cfg) return merged;
+    for (key in cfg){
+      if (cfg.hasOwnProperty(key)) merged[key] = cfg[key];
+    }
+    return merged;
+  }
+
+  var config = assignDefaults(typeof SAFE_KEYS_CONFIG !== 'undefined' ? SAFE_KEYS_CONFIG : null);
+
+  var detection = {
+    amountEl: null,
+    balanceEl: null,
+    buyEl: null,
+    sellEl: null
+  };
+
+  var calibration = {
+    calibrated: false,
+    stepNormal: null,
+    stepShift: null,
+    lastCalibratedAt: 0
+  };
+
+  var state = {
+    status: 'IDLE',
+    armedAmount: null,
+    preparedAt: 0,
+    lastTarget: null,
+    dirtyReason: null,
+    isSettingBet: false,
+    throttleUntil: 0,
+    lastBalance: null,
+    lastAmount: null
+  };
+
+  var indicatorUpdater = null;
+  var monitorTimer = null;
+  var watchdogTimer = null;
+
+  function now(){ return Date.now(); }
+
+  function once(fn){
+    var called = false;
+    return function(){
+      if (called) return;
+      called = true;
+      fn.apply(null, arguments);
+    };
+  }
+
+  function clamp(value, min, max){
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+  }
+
+  function detectFirst(list){
+    if (!list) return null;
+    for (var i = 0; i < list.length; i++){
+      try{
+        var el = document.querySelector(list[i]);
+        if (el) return el;
+      }catch(e){}
+    }
+    return null;
+  }
+
+  function parseDomNumber(val){
+    if (val === null || val === undefined) return null;
+    if (typeof val === 'number'){
+      if (isNaN(val)) return null;
+      return val;
+    }
+    var str = String(val);
+    str = str.replace(/[^0-9,.-]/g, '');
+    if (str.indexOf(',') > -1 && str.indexOf('.') > -1){
+      if (str.lastIndexOf('.') < str.lastIndexOf(',')){
+        str = str.replace(/\./g, '').replace(',', '.');
+      } else {
+        str = str.replace(/,/g, '');
+      }
+    } else if (str.indexOf(',') > -1){
+      str = str.replace(/,/g, '.');
+    }
+    var num = parseFloat(str);
+    if (isNaN(num)) return null;
+    return num;
+  }
+
+  function readElementNumber(el){
+    if (!el) return null;
+    var val = null;
+    try{
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') val = el.value;
+      else val = el.textContent || el.innerText;
+    }catch(e){ return null; }
+    return parseDomNumber(val);
+  }
+
+  function ensureDetection(){
+    if (!detection.amountEl) detection.amountEl = detectFirst(config.amountSelectors);
+    if (!detection.balanceEl) detection.balanceEl = detectFirst(config.balanceSelectors);
+    if (!detection.buyEl) detection.buyEl = detectFirst(config.buySelectors);
+    if (!detection.sellEl) detection.sellEl = detectFirst(config.sellSelectors);
+  }
+
+  function readAmount(){
+    ensureDetection();
+    var amount = readElementNumber(detection.amountEl);
+    if (amount === null){
+      detection.amountEl = null;
+      return null;
+    }
+    state.lastAmount = amount;
+    return amount;
+  }
+
+  function readBalance(){
+    ensureDetection();
+    var balance = readElementNumber(detection.balanceEl);
+    if (balance === null){
+      detection.balanceEl = null;
+      return null;
+    }
+    state.lastBalance = balance;
+    return balance;
+  }
+
+  function pressKey(key, opts){
+    if (!opts) opts = {};
+    var ev = { shiftKey: !!opts.shift };
+    var upper = key && key.toUpperCase ? key.toUpperCase() : key;
+    try{
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: upper,
+        code: 'Key'+upper,
+        keyCode: upper.charCodeAt(0),
+        which: upper.charCodeAt(0),
+        shiftKey: ev.shiftKey,
+        bubbles: true,
+        cancelable: true
+      }));
+      document.dispatchEvent(new KeyboardEvent('keyup', {
+        key: upper,
+        code: 'Key'+upper,
+        keyCode: upper.charCodeAt(0),
+        which: upper.charCodeAt(0),
+        shiftKey: ev.shiftKey,
+        bubbles: true,
+        cancelable: true
+      }));
+    }catch(e){
+      try{ emulateKey(key, { shiftKey: ev.shiftKey }); }catch(err){}
+    }
+  }
+
+  function updateIndicator(){
+    if (typeof indicatorUpdater === 'function'){
+      try{ indicatorUpdater(getStateSnapshot()); }catch(e){}
+    }
+  }
+
+  function setStatus(newStatus, meta){
+    state.status = newStatus;
+    if (meta){
+      if (typeof meta.amount === 'number') state.armedAmount = meta.amount;
+      if (typeof meta.preparedAt === 'number') state.preparedAt = meta.preparedAt;
+      if (meta.dirtyReason) state.dirtyReason = meta.dirtyReason;
+    }
+    if (newStatus !== 'DIRTY') state.dirtyReason = null;
+    updateIndicator();
+  }
+
+  function log(tag, msg){
+    var args = [];
+    args.push(tag);
+    for (var i=1;i<arguments.length;i++) args.push(arguments[i]);
+    try{ console.log.apply(console, args); }catch(e){}
+  }
+
+  function setAbort(reason){
+    log('[ABORT]', 'reason='+reason);
+    setStatus('ABORT', { dirtyReason: reason });
+  }
+
+  function markDirty(reason){
+    if (state.status === 'DIRTY' && state.dirtyReason === reason) return;
+    log('[BET][DIRTY]', 'reason='+reason);
+    setStatus('DIRTY', { dirtyReason: reason });
+    try{
+      window.dispatchEvent(new CustomEvent('safe-keys-dirty', { detail: { reason: reason, state: getStateSnapshot() } }));
+    }catch(e){}
+  }
+
+  function startWatchdog(label, done){
+    stopWatchdog();
+    watchdogTimer = setTimeout(function(){
+      watchdogTimer = null;
+      log('[ABORT]', 'reason=watchdog.'+label);
+      state.isSettingBet = false;
+      setStatus('ABORT', { dirtyReason: 'watchdog' });
+      if (typeof done === 'function') done(new Error('watchdog '+label));
+    }, config.WATCHDOG_MS);
+  }
+
+  function stopWatchdog(){
+    if (watchdogTimer){
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+
+  function getStateSnapshot(){
+    return {
+      status: state.status,
+      armedAmount: state.armedAmount,
+      preparedAt: state.preparedAt,
+      lastTarget: state.lastTarget,
+      dirtyReason: state.dirtyReason,
+      isSettingBet: state.isSettingBet,
+      throttleUntil: state.throttleUntil,
+      lastBalance: state.lastBalance,
+      lastAmount: state.lastAmount,
+      calibration: {
+        calibrated: calibration.calibrated,
+        stepNormal: calibration.stepNormal,
+        stepShift: calibration.stepShift,
+        lastCalibratedAt: calibration.lastCalibratedAt
+      }
+    };
+  }
+
+  function setIndicatorUpdater(fn){ indicatorUpdater = fn; updateIndicator(); }
+
+  function doubleVerify(target, cb){
+    var first = readAmount();
+    if (first === null) return cb(new Error('amount-unreadable'));
+    setTimeout(function(){
+      var second = readAmount();
+      if (second === null) return cb(new Error('amount-unreadable'));
+      var diff1 = Math.abs(first - target);
+      var diff2 = Math.abs(second - target);
+      if (diff1 <= config.TOLERANCE && diff2 <= config.TOLERANCE){
+        log('[BET][SET_OK]', 'final=$'+target.toFixed(2), 'tol='+config.TOLERANCE);
+        state.armedAmount = second;
+        state.preparedAt = now();
+        setStatus('ARMED', { amount: second, preparedAt: state.preparedAt });
+        log('[ARMED]', 'amount=$'+second.toFixed(2), 't='+new Date(state.preparedAt).toISOString());
+        cb(null, second);
+      } else {
+        cb(new Error('double-verify-failed'));
+      }
+    }, config.PHASE_PAUSE_MS);
+  }
+
+  function calibrateSteps(cb){
+    if (calibration.calibrated && now() - calibration.lastCalibratedAt < 60000){
+      if (typeof cb === 'function') cb(null, calibration);
+      return;
+    }
+    var initial = readAmount();
+    if (initial === null){
+      if (typeof cb === 'function') cb(new Error('amount-unreadable'));
+      return;
+    }
+    var result = { stepNormal: null, stepShift: null };
+    function revertToInitial(next){
+      setTimeout(function(){
+        var current = readAmount();
+        if (current === null){ next(new Error('amount-unreadable')); return; }
+        var diff = current - initial;
+        if (Math.abs(diff) < 0.0001){ next(null); return; }
+        if (diff > 0){
+          var useShift = config.USE_SHIFT_FOR_RESET && calibration.stepShift && diff > (calibration.stepNormal||1) * config.SHIFT_BUFFER_STEPS;
+          pressKey('a', useShift ? { shift: true } : {});
+        } else {
+          var useShiftGrow = config.USE_SHIFT_FOR_GROSS_SET && calibration.stepShift && Math.abs(diff) > (calibration.stepNormal||1) * config.SHIFT_BUFFER_STEPS;
+          pressKey('d', useShiftGrow ? { shift: true } : {});
+        }
+        setTimeout(function(){ revertToInitial(next); }, config.STEP_DELAY_MS);
+      }, config.STEP_DELAY_MS);
+    }
+    function measureNormal(next){
+      pressKey('d');
+      setTimeout(function(){
+        var val = readAmount();
+        if (val === null){ next(new Error('amount-unreadable')); return; }
+        result.stepNormal = val - initial;
+        if (result.stepNormal < 0) result.stepNormal = Math.abs(result.stepNormal);
+        revertToInitial(next);
+      }, config.PHASE_PAUSE_MS);
+    }
+    function measureShift(next){
+      if (!config.USE_SHIFT_FOR_GROSS_SET){ next(null); return; }
+      pressKey('d', { shift: true });
+      setTimeout(function(){
+        var val = readAmount();
+        if (val === null){ next(new Error('amount-unreadable')); return; }
+        result.stepShift = val - initial;
+        if (result.stepShift < 0) result.stepShift = Math.abs(result.stepShift);
+        revertToInitial(next);
+      }, config.PHASE_PAUSE_MS);
+    }
+    measureNormal(function(err){
+      if (err){ if (typeof cb === 'function') cb(err); return; }
+      measureShift(function(err2){
+        if (err2){ if (typeof cb === 'function') cb(err2); return; }
+        calibration.stepNormal = result.stepNormal || calibration.stepNormal || 1;
+        calibration.stepShift = result.stepShift || calibration.stepShift || (calibration.stepNormal ? calibration.stepNormal*10 : null);
+        calibration.calibrated = true;
+        calibration.lastCalibratedAt = now();
+        if (typeof cb === 'function') cb(null, calibration);
+      });
+    });
+  }
+
+  function resetToMin(opts, cb){
+    if (!cb) cb = function(){};
+    var useShift = config.USE_SHIFT_FOR_RESET;
+    if (opts && typeof opts.useShift === 'boolean') useShift = opts.useShift;
+    var ticks = 0;
+    var stableReads = 0;
+    var lastVal = null;
+    var done = once(function(err, info){
+      stopWatchdog();
+      cb(err, info);
+    });
+    startWatchdog('reset', done);
+
+    function finish(amount){
+      log('[BET][RESET_OK]', 'amount=$'+amount.toFixed(2), 'ticks='+ticks);
+      done(null, { amount: amount, ticks: ticks });
+    }
+
+    function preciseLoop(){
+      if (ticks >= config.RESET_MAX_TICKS){ done(new Error('reset-max-ticks')); return; }
+      setTimeout(function(){
+        var current = readAmount();
+        if (current === null){ done(new Error('amount-unreadable')); return; }
+        if (lastVal !== null && current === lastVal){
+          stableReads++;
+          if (stableReads >= 2){ finish(current); return; }
+        } else {
+          stableReads = 0;
+        }
+        lastVal = current;
+        pressKey('a');
+        ticks++;
+        preciseLoop();
+      }, config.STEP_DELAY_MS);
+    }
+
+    function shiftBatch(batchLeft){
+      if (batchLeft <= 0){
+        setTimeout(function(){
+          var current = readAmount();
+          if (current === null){ done(new Error('amount-unreadable')); return; }
+          lastVal = current;
+          preciseLoop();
+        }, config.PHASE_PAUSE_MS);
+        return;
+      }
+      if (ticks >= config.RESET_MAX_TICKS){ done(new Error('reset-max-ticks')); return; }
+      pressKey('a', { shift: true });
+      ticks++;
+      setTimeout(function(){ shiftBatch(batchLeft-1); }, config.STEP_DELAY_MS);
+    }
+
+    function start(){
+      var current = readAmount();
+      if (current === null){ done(new Error('amount-unreadable')); return; }
+      lastVal = current;
+      if (!useShift){ preciseLoop(); return; }
+      shiftBatch(config.RESET_SHIFT_BATCH);
+    }
+
+    start();
+  }
+
+  function setToTarget(target, opts, cb){
+    if (typeof opts === 'function'){ cb = opts; opts = null; }
+    if (!cb) cb = function(){};
+    var useShift = config.USE_SHIFT_FOR_GROSS_SET;
+    if (opts && typeof opts.useShift === 'boolean') useShift = opts.useShift;
+    var ticks = 0;
+    var overShootGuard = false;
+    var done = once(function(err, amount){
+      stopWatchdog();
+      cb(err, amount);
+    });
+    startWatchdog('set', done);
+
+    function checkTarget(){
+      var val = readAmount();
+      if (val === null){ done(new Error('amount-unreadable')); return; }
+      if (val - target > config.TOLERANCE){ overShootGuard = true; done(new Error('overshoot')); return; }
+      if (Math.abs(val - target) <= config.TOLERANCE){
+        doubleVerify(target, function(err){
+          if (err){ done(err); return; }
+          done(null, target);
+        });
+        return;
+      }
+      adjust(val);
+    }
+
+    function adjust(current){
+      if (ticks >= config.SET_MAX_TICKS){ done(new Error('set-max-ticks')); return; }
+      var diff = target - current;
+      if (diff < 0){ done(new Error('overshoot')); return; }
+      var useShiftNow = false;
+      if (useShift && calibration.stepShift){
+        if (diff > calibration.stepShift * 0.8){ useShiftNow = true; }
+      } else if (useShift && !calibration.stepShift){
+        useShiftNow = diff > (calibration.stepNormal ? calibration.stepNormal * config.SHIFT_BUFFER_STEPS : 1);
+      }
+      if (useShiftNow){
+        performShiftIncrease();
+      } else {
+        performNormalIncrease();
+      }
+    }
+
+    function performNormalIncrease(){
+      pressKey('d');
+      ticks++;
+      setTimeout(checkTarget, config.PHASE_PAUSE_MS);
+    }
+
+    function performShiftIncrease(){
+      var batch = config.GROSS_SHIFT_BATCH;
+      function loop(batchLeft){
+        if (batchLeft <= 0){
+          setTimeout(checkTarget, config.PHASE_PAUSE_MS);
+          return;
+        }
+        if (ticks >= config.SET_MAX_TICKS){ done(new Error('set-max-ticks')); return; }
+        pressKey('d', { shift: true });
+        ticks++;
+        setTimeout(function(){ loop(batchLeft-1); }, config.STEP_DELAY_MS);
+      }
+      loop(batch);
+    }
+
+    setTimeout(function(){ calibrateSteps(function(){ checkTarget(); }); }, config.PHASE_PAUSE_MS);
+  }
+
+  function clampTarget(target){
+    var balance = readBalance();
+    if ((balance === null || balance === undefined) && typeof currentBalance === 'number'){
+      balance = currentBalance;
+    }
+    var balLimit = balance ? balance * config.MAX_BALANCE_PCT : target;
+    var limit = Math.min(config.MAX_ABS_BET, balLimit);
+    return clamp(target, 0, limit);
+  }
+
+  function prepareArmed(target, cb){
+    if (!cb) cb = function(){};
+    if (state.isSettingBet){
+      cb(new Error('busy'));
+      return;
+    }
+    state.isSettingBet = true;
+    var clampedTarget = clampTarget(target);
+    state.lastTarget = clampedTarget;
+    if (clampedTarget !== target){
+      log('[BET][NEXT]', 'calc=$'+target.toFixed(2), 'clamped=$'+clampedTarget.toFixed(2));
+    } else {
+      log('[BET][NEXT]', 'calc=$'+target.toFixed(2));
+    }
+    setStatus('PREPARING');
+    log('[BET][PREP_START]', 'target=$'+clampedTarget.toFixed(2), 'useShift='+config.USE_SHIFT_FOR_GROSS_SET);
+    resetToMin(null, function(err){
+      if (err){
+        state.isSettingBet = false;
+        setAbort('reset-failed');
+        cb(err);
+        return;
+      }
+      calibrateSteps(function(){
+        setToTarget(clampedTarget, function(err2){
+          state.isSettingBet = false;
+          if (err2){
+            setAbort('set-failed');
+            cb(err2);
+            return;
+          }
+          updateIndicator();
+          cb(null, clampedTarget);
+        });
+      });
+    });
+  }
+
+  function quickReverifyOrMicroAdjust(cb){
+    if (!cb) cb = function(){};
+    if (state.status === 'ABORT'){ cb(new Error('abort')); return; }
+    if (!state.armedAmount){ cb(new Error('no-armed')); return; }
+    var elapsed = now() - state.preparedAt;
+    if (elapsed > config.STALE_TIMEOUT_SEC * 1000){
+      log('[BET][STALE]', 'reverify');
+    }
+    var startTs = now();
+    var target = state.lastTarget || state.armedAmount;
+    var current = readAmount();
+    if (current === null){ markDirty('amount-unreadable'); cb(new Error('amount-unreadable')); return; }
+    var diff = target - current;
+    if (Math.abs(diff) <= config.TOLERANCE){
+      doubleVerify(target, function(err){
+        if (err){ markDirty('reverify-failed'); cb(err); return; }
+        cb(null, target);
+      });
+      return;
+    }
+    var maxDuration = config.MICRO_ADJUST_MAX_MS;
+    var normalStep = calibration.stepNormal || 1;
+    var maxSteps = Math.max(1, Math.floor(maxDuration / config.STEP_DELAY_MS));
+    var stepsDone = 0;
+
+    function microAdjust(){
+      if (Math.abs(target - current) <= config.TOLERANCE){
+        doubleVerify(target, function(err){
+          if (err){ markDirty('reverify-failed'); cb(err); return; }
+          cb(null, target);
+        });
+        return;
+      }
+      if (now() - startTs > maxDuration || stepsDone >= maxSteps){
+        markDirty('micro-failed');
+        cb(new Error('micro-adjust-failed'));
+        return;
+      }
+      var delta = target - current;
+      if (delta < 0){
+        pressKey('a');
+      } else {
+        pressKey('d');
+      }
+      stepsDone++;
+      setTimeout(function(){
+        current = readAmount();
+        if (current === null){ markDirty('amount-unreadable'); cb(new Error('amount-unreadable')); return; }
+        microAdjust();
+      }, config.STEP_DELAY_MS);
+    }
+
+    if (Math.abs(diff) > normalStep * 4){
+      markDirty('diff-too-large');
+      cb(new Error('diff-too-large'));
+      return;
+    }
+    microAdjust();
+  }
+
+  function startMonitor(){
+    if (monitorTimer) return;
+    monitorTimer = setInterval(function(){
+      if (state.status === 'ARMED'){
+        var age = now() - state.preparedAt;
+        if (age > config.STALE_TIMEOUT_SEC * 1000){
+          markDirty('stale');
+        }
+      }
+      var amount = readAmount();
+      if (amount !== null && state.status === 'ARMED'){
+        if (Math.abs(amount - state.armedAmount) > config.TOLERANCE){
+          markDirty('amount-changed');
+        }
+      }
+      var balance = readBalance();
+      if (balance !== null && state.status === 'ARMED'){
+        if (state.lastBalance){
+          var delta = Math.abs(balance - state.lastBalance) / state.lastBalance;
+          if (delta > config.BALANCE_DIRTY_THRESHOLD){
+            markDirty('balance-changed');
+          }
+        }
+      }
+    }, config.MONITOR_INTERVAL_MS);
+  }
+
+  function setThrottle(ms){
+    state.throttleUntil = now() + ms;
+  }
+
+  function clearAbort(){
+    if (state.status === 'ABORT'){
+      setStatus('IDLE');
+    }
+  }
+
+  function init(){
+    ensureDetection();
+    startMonitor();
+  }
+
+  init();
+
+  var api = {
+    readAmount: readAmount,
+    readBalance: readBalance,
+    pressKey: pressKey,
+    resetToMin: resetToMin,
+    calibrateSteps: calibrateSteps,
+    setToTarget: setToTarget,
+    prepareArmed: prepareArmed,
+    quickReverifyOrMicroAdjust: quickReverifyOrMicroAdjust,
+    getState: getStateSnapshot,
+    setIndicatorUpdater: setIndicatorUpdater,
+    markDirty: markDirty,
+    clearAbort: clearAbort,
+    setThrottle: setThrottle
+  };
+
+  try{
+    if (config.DEV_EXPORT){
+      window.__SAFE_KEYS__ = api;
+    }
+  }catch(e){}
+
+  return api;
+})();
+
+function updateArmedIndicator(state){
+  if (!armedIndicatorDiv){ return; }
+  if (!state) state = {};
+  var valueEl = armedIndicatorDiv.querySelector('#armed-status-value');
+  var labelEl = armedIndicatorDiv.querySelector('#armed-status-label');
+  if (labelEl){ labelEl.textContent = 'ARMED'; }
+  var status = state.status || 'IDLE';
+  var bg = '#2a2a2a';
+  var text = 'IDLE';
+  if (status === 'ARMED'){
+    var amt = typeof state.armedAmount === 'number' ? state.armedAmount : state.lastTarget;
+    var sec = state.preparedAt ? Math.max(0, Math.floor((Date.now() - state.preparedAt)/1000)) : 0;
+    text = '$' + (amt ? amt.toFixed(2) : '—') + ' • ' + sec + 's ago';
+    bg = '#1f6f2d';
+  } else if (status === 'PREPARING'){
+    text = 'Preparing…';
+    bg = '#1d4b9b';
+  } else if (status === 'DIRTY'){
+    var reason = state.dirtyReason ? String(state.dirtyReason) : 'dirty';
+    text = 'Dirty (' + reason + ')';
+    bg = '#b38f1d';
+  } else if (status === 'ABORT'){
+    var r = state.dirtyReason ? String(state.dirtyReason) : 'abort';
+    text = 'Abort (' + r + ')';
+    bg = '#9a1f1f';
+  } else {
+    text = status;
+    bg = '#444';
+  }
+  armedIndicatorDiv.style.background = bg;
+  if (valueEl){ valueEl.textContent = text; }
+}
+
+try{ SafeKeyPipeline.setIndicatorUpdater(updateArmedIndicator); }catch(e){}
+try{
+  window.addEventListener('safe-keys-dirty', function(ev){
+    var reason = ev && ev.detail && ev.detail.reason ? ev.detail.reason : 'auto';
+    setTimeout(function(){
+      prepareArmedForStep(currentBetStep, 'dirty-'+reason);
+    }, 300);
+  });
+}catch(e){}
 
 
 /* ====== CONFIG / LIMITS / ARRAYS ====== */
@@ -67,7 +827,10 @@ const betArray3 = [
     {step: 4, value: 1800, pressCount: 42}
 ];
 
+let activeBetArrayName = 'betArray1';
+
 function logActiveBetArray(name){
+  activeBetArrayName = name;
   try{ console.log("[DEBUG] Active bet array:", name); }catch(_){ }
 }
 
@@ -84,6 +847,7 @@ let maxStepInCycle = 0;
 let cyclesStats = [];
 let tradingAllowed = true;
 let isTradeOpen = false;
+let enteringTrade = false;
 let currentBetStep = 0;
 let betHistory = [];
 let priceHistory = [];
@@ -125,7 +889,7 @@ window.activeSignalsSnapshot  = [];
 window.activeSignalsThisTrade = null;
 
 /* ====== DOM references (set later in addUI) ====== */
-let profitDiv, signalDiv, timeDiv, wonDiv, wagerDiv, tradingSymbolDiv, cyclesHistoryDiv, totalProfitDiv, tradeDirectionDiv, maxStepDiv, profitPercentDivAdvisor;
+let profitDiv, signalDiv, timeDiv, wonDiv, wagerDiv, tradingSymbolDiv, cyclesHistoryDiv, totalProfitDiv, tradeDirectionDiv, maxStepDiv, profitPercentDivAdvisor, armedIndicatorDiv;
 let lossStreakDiv, pauseUntilDiv; // NEW for pause UI
 
 /* ====== Platform DOM ====== */
@@ -1251,6 +2015,21 @@ function addUI(){
       accent-color:#fff;background:#111;border-radius:2px;width:110px;height:3px;cursor:pointer;
     }
 
+    .armed-indicator{
+      font-size:11px;
+      padding:4px 6px;
+      border-radius:4px;
+      background:#2a2a2a;
+      color:#f0f0f0;
+      display:flex;
+      justify-content:space-between;
+      gap:6px;
+      align-items:center;
+      line-height:1.2;
+      min-width:0;
+    }
+    .armed-indicator span{ min-width:0; }
+
     /* Управляющие кнопки графика */
     #tf-m1,#tf-m5,#live-btn{ padding:2px 6px; margin-right:4px; font-size:11px; }
 
@@ -1296,6 +2075,14 @@ function addUI(){
     <div class="info-item full-width"><span class="info-label">Direction:</span><span class="info-value" id="trade-dir">flat</span></div>
     <div class="panel-footer trading-footer" id="trading-footer"></div>
   `;
+
+  const tradingFooter = tradingPanel.querySelector('#trading-footer');
+  const armedBox = document.createElement('div');
+  armedBox.className = 'armed-indicator';
+  armedBox.innerHTML = '<span id="armed-status-label">ARMED</span><span id="armed-status-value">IDLE</span>';
+  if (tradingFooter){ tradingFooter.appendChild(armedBox); }
+  armedIndicatorDiv = armedBox;
+  try{ updateArmedIndicator(SafeKeyPipeline.getState()); }catch(e){}
 
   /* Top Signals */
   const topPanel = document.createElement('div');
@@ -1552,6 +2339,14 @@ function queryPrice(){
     calculateIndicators();
   }
 
+  var newSymbolName = symbolDiv.textContent.replace("/", " ");
+  if (symbolName !== newSymbolName){
+    symbolName = newSymbolName;
+    if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
+    try{ SafeKeyPipeline.markDirty('symbol-change'); }catch(e){}
+    try{ prepareArmedForStep(currentBetStep, 'symbol-change'); }catch(e){}
+  }
+
   priceString = balanceDiv.innerHTML.replace(/,/g,'');
   currentBalance = parseFloat(priceString);
   currentProfit = Math.round((currentBalance - startBalance)*100)/100;
@@ -1574,33 +2369,78 @@ function getBetValue(step){
   return 1;
 }
 
-function smartBet(step, direction){
-  // вернём true, если реально отправили ордер; иначе false
+function prepareArmedForStep(step, reason){
+  try{ SafeKeyPipeline.clearAbort(); }catch(e){}
+  const target = getBetValue(step);
+  const cycleIndex = cyclesStats.length + 1;
+  let summary = '[BET][NEXT] calc=$' + target.toFixed(2) + ' | step=' + step + ' | array=' + activeBetArrayName + ' | cycle=' + cycleIndex;
+  if (reason){ summary += ' | reason=' + reason; }
+  console.log(summary);
+  SafeKeyPipeline.prepareArmed(target, function(err){
+    if (err){
+      const msg = err && err.message ? err.message : String(err);
+      console.warn('[BET][PREP_FAIL]', msg);
+      if (msg && msg.indexOf('busy')>-1){
+        setTimeout(function(){ prepareArmedForStep(step, reason || 'retry'); }, 250);
+      } else {
+        setTimeout(function(){ prepareArmedForStep(step, (reason ? reason+'-retry' : 'retry')); }, 1000);
+      }
+    }
+  });
+}
+
+function smartBet(step, direction, onDone){
+  if (typeof onDone !== 'function') onDone = function(){};
+
   const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
   profitPercentDivAdvisor.innerHTML = currentProfitPercent;
 
   if (currentProfitPercent < 90){
-    // сигнализируем в UI и чётко возвращаем «неуспех»
     profitPercentDivAdvisor.style.background = redColor;
     profitPercentDivAdvisor.style.color = "#fff";
     profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => ' + currentProfitPercent;
-    return false;
+    onDone(false, { reason: 'low-profit-percent' });
+    return;
   }
 
-  // найти pressCount по шагу
-  let pressCount = 0;
-  for (let i = 0; i < betArray.length; i++){
-    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
+  const pipelineState = SafeKeyPipeline.getState();
+  if (pipelineState.status === 'DIRTY' || pipelineState.status === 'ABORT'){
+    console.warn('[ABORT] reason=pipeline-status', pipelineState.status, pipelineState.dirtyReason);
+    onDone(false, { reason: 'pipeline-'+pipelineState.status });
+    return;
+  }
+  if (pipelineState.status !== 'ARMED'){
+    console.warn('[ABORT] reason=pipeline-not-armed', pipelineState.status);
+    onDone(false, { reason: 'not-armed' });
+    return;
+  }
+  if (pipelineState.throttleUntil && Date.now() < pipelineState.throttleUntil){
+    onDone(false, { reason: 'throttled' });
+    return;
   }
 
-  // сброс ставки и установка нужного размера
-  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
-  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
+  const targetValue = getBetValue(step);
+  if (typeof pipelineState.lastTarget === 'number' && Math.abs(pipelineState.lastTarget - targetValue) > (SAFE_KEYS_CONFIG.TOLERANCE||0.05)*2){
+    console.warn('[ABORT] reason=target-mismatch', pipelineState.lastTarget, targetValue);
+    onDone(false, { reason: 'target-mismatch' });
+    try{ prepareArmedForStep(step, 'target-mismatch'); }catch(e){}
+    return;
+  }
 
-  // отправка ордера
-  setTimeout(() => { if (direction === 'buy') buy(); else sell(); }, 100);
+  SafeKeyPipeline.quickReverifyOrMicroAdjust(function(err){
+    if (err){
+      console.warn('[ABORT] reason=reverify', err && err.message);
+      onDone(false, { reason: 'reverify-failed', error: err });
+      return;
+    }
 
-  return true;
+    profitPercentDivAdvisor.style.background = 'inherit';
+    profitPercentDivAdvisor.style.color = '#fff';
+    if (direction === 'buy') buy(); else sell();
+    console.log('[TRADE][CLICK]', 'side=' + direction.toUpperCase(), 'amount=$' + targetValue.toFixed(2));
+    SafeKeyPipeline.setThrottle(400);
+    onDone(true, { amount: targetValue, direction: direction });
+  });
 }
 
 function resetCycle(winStatus){
@@ -1612,6 +2452,7 @@ function resetCycle(winStatus){
     totalProfitDiv.innerHTML = totalProfit;
     totalProfitDiv.style.background = totalProfit<0?redColor:(totalProfit>0?greenColor:'inherit');
   }
+  try{ prepareArmedForStep(currentBetStep, 'cycle-reset'); }catch(e){}
 }
 
 function tradeLogic(){
@@ -1898,11 +2739,13 @@ function tradeLogic(){
         signalKeys: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : []
       };
 
-      // пытаемся реально поставить
-      const placed = smartBet(currentBetStep, tradeDirection);
+      if (enteringTrade) return;
+      enteringTrade = true;
 
-      if (placed){
-        // отмечаем открытие, время троттлинга, логируем и пушим В ИСТОРИЮ
+      smartBet(currentBetStep, tradeDirection, function(placed){
+        enteringTrade = false;
+        if (!placed){ return; }
+
         isTradeOpen = true;
         lastTradeTime = time;
 
@@ -1915,11 +2758,8 @@ function tradeLogic(){
         maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
         maxStepDiv.innerHTML = maxStepInCycle;
 
-        // NEW: фиксируем список активных сигналов конкретно для этой сделки
         window.activeSignalsThisTrade = currentTrade.signalKeys.slice(0);
-      } else {
-        // ничего не делаем (не ставим isTradeOpen/lastTradeTime), чтобы не было фантомных входов
-      }
+      });
     }
   }
 
@@ -2002,9 +2842,7 @@ const observer = new MutationObserver(muts=>{
       isTradeOpen=false;
       if (tradeStatus==='won') currentBetStep=0;
       else if (tradeStatus==='lost') currentBetStep=Math.min(currentBetStep+1, betArray.length-1);
-
-      symbolName = symbolDiv.textContent.replace("/", " ");
-      if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
+      try{ prepareArmedForStep(currentBetStep, 'result-'+tradeStatus); }catch(e){}
       betTime = betTimeDiv.textContent;
 
     }catch(e){ console.warn('[DealsObserver] parse error:', e); }
@@ -2038,6 +2876,7 @@ initChart();
 setInterval(renderChart, 1000);
 setInterval(queryPrice, 100);
 _attachDealsObserver();
+try{ prepareArmedForStep(currentBetStep, 'startup'); }catch(e){}
 
 })();
 
