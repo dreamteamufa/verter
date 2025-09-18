@@ -10,6 +10,20 @@
   }catch(e){}
 'use strict';
 
+// === Firebase CloudStats configuration ===
+const firebaseConfig = {
+  apiKey: "AIzaSyC1KqNekr6GGtsBEHvvU_3Ou1TmHVQPOX4",
+  authDomain: "tradebot-71c75.firebaseapp.com",
+  projectId: "tradebot-71c75",
+  appId: "1:12759618797:web:8a0ef77e64d56197814334"
+};
+
+const recaptchaKey = "6LdPEs4rAAAAAFWk1leiOkAhJRog6Jv6sw1lrhB";
+
+let firebaseBootstrapPromise = null;
+let firebaseDbInstance = null;
+let firebaseAuthWatcherSet = false;
+
 // === CloudStats module inline copy (kept in sync with src/cloudstats_s1.js) ===
 (function(global){
   'use strict';
@@ -178,7 +192,7 @@
     ensureInit().then(function(){ return runQueueEntry(); }).catch(function(err){
       processingQueue = false;
       writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
-      console.warn('[CLOUD] queue error', err && err.message ? err.message : err);
+      console.warn('[CLOUD ERROR] queue error', err && err.message ? err.message : err);
     });
   }
 
@@ -193,7 +207,7 @@
       if (writeQueue.length){ setTimeout(processQueue, DEFAULTS.writeCooldownMs); }
     }).catch(function(err){
       processingQueue = false;
-      console.warn('[CLOUD] write failed', err && err.message ? err.message : err);
+      console.warn('[CLOUD ERROR] write failed', err && err.message ? err.message : err);
       writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
     });
   }
@@ -282,29 +296,38 @@
       initPromise = waitFirebaseReady().then(function(){
         var firebase = global.firebase;
         if (!firebase) throw new Error('Firebase SDK missing');
+        var baseCfg = clone(cfg || {});
+        if (baseCfg && baseCfg.recaptchaKey) delete baseCfg.recaptchaKey;
         if (firebase.apps && firebase.apps.length && firebase.apps[0]){
           firebaseApp = firebase.apps[0];
         } else {
-          firebaseApp = firebase.initializeApp(cfg);
+          firebaseApp = firebase.initializeApp(baseCfg);
         }
         firestoreDb = firebase.firestore();
         firebaseAuth = firebase.auth();
         firebaseAppCheck = firebase.appCheck ? firebase.appCheck() : null;
 
         if (firebaseAppCheck && cfg && cfg.recaptchaKey){
-          firebaseAppCheck.activate(cfg.recaptchaKey, true);
+          try{
+            firebaseAppCheck.activate(cfg.recaptchaKey, true);
+          }catch(err){
+            console.warn('[CLOUD ERROR] AppCheck activate skipped', err && err.message ? err.message : err);
+          }
         }
 
         if (firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.isAnonymous){
           return firebaseAuth.currentUser;
         }
         if (!firebaseAuth) return null;
-        return firebaseAuth.signInAnonymously();
+        return firebaseAuth.signInAnonymously().catch(function(err){
+          console.warn('[CLOUD ERROR] Anonymous auth init failed', err && err.message ? err.message : err);
+          throw err;
+        });
       }).then(function(){
         processQueue();
         return true;
       }).catch(function(err){
-        console.warn('[CLOUD] init failed', err && err.message ? err.message : err);
+        console.warn('[CLOUD ERROR] init failed', err && err.message ? err.message : err);
         throw err;
       });
       return initPromise;
@@ -334,7 +357,7 @@
             return clone(doc);
           });
         }).catch(function(err){
-          console.warn('[CLOUD] read failed', err && err.message ? err.message : err);
+          console.warn('[CLOUD ERROR] read failed', err && err.message ? err.message : err);
           if (c) return clone(c.data);
           return null;
         });
@@ -413,17 +436,20 @@ const CLOUD_MAX_TRADE_PER_HOUR = 6;
 const CLOUD_EXPLORE_RATE = 0.15;
 
 function loadCloudConfig(){
-  var cfg = null;
+  var overrides = null;
   try{
-    if (window.__VERTER_FIREBASE_CONFIG__) cfg = window.__VERTER_FIREBASE_CONFIG__;
+    if (window.__VERTER_FIREBASE_CONFIG__) overrides = window.__VERTER_FIREBASE_CONFIG__;
   }catch(_){ }
-  if (!cfg){
+  if (!overrides){
     try{
       var raw = localStorage.getItem('verter_cloud_config');
-      if (raw) cfg = JSON.parse(raw);
-    }catch(_){ }
+      if (raw) overrides = JSON.parse(raw);
+    }catch(_){ overrides = null; }
   }
-  return cfg || null;
+  var cfg = shallowAssign({}, firebaseConfig);
+  if (overrides) cfg = shallowAssign(cfg, overrides);
+  cfg.recaptchaKey = recaptchaKey;
+  return cfg;
 }
 
 var botState = {
@@ -439,6 +465,9 @@ var botState = {
     nextFetch: 0,
     perf: null,
     topSignals: [],
+    trades: 0,
+    wins: 0,
+    losses: 0,
     ewmaLive: 0.5,
     lossStreak: 0,
     cloudAge: null,
@@ -916,6 +945,70 @@ function loadFirebaseCompat(){
   return cloudSdkLoading;
 }
 
+function bootstrapFirebaseCore(){
+  if (firebaseBootstrapPromise) return firebaseBootstrapPromise;
+  firebaseBootstrapPromise = loadFirebaseCompat().then(function(){
+    var firebase = window.firebase;
+    if (!firebase) throw new Error('Firebase SDK missing');
+
+    if (!firebase.apps || !firebase.apps.length){
+      firebase.initializeApp(firebaseConfig); // 1) Firebase SDK
+    }
+
+    try {
+      if (firebase.appCheck){
+        var appCheckInstance = firebase.appCheck();
+        if (appCheckInstance && typeof appCheckInstance.activate === 'function'){
+          appCheckInstance.activate(recaptchaKey, true); // 2) App Check (reCAPTCHA v3)
+        }
+      }
+    } catch (err){
+      console.warn('[CLOUD ERROR] Firebase AppCheck activate failed', err && err.message ? err.message : err);
+    }
+
+    var auth = null;
+    try {
+      auth = firebase.auth();
+      if (auth && !firebaseAuthWatcherSet){
+        firebaseAuthWatcherSet = true;
+        auth.onAuthStateChanged(function(u){ // 3) Anonymous Auth
+          if (!u){
+            auth.signInAnonymously().catch(function(err){
+              console.warn('[CLOUD ERROR] Anonymous auth failed', err && err.message ? err.message : err);
+            });
+          }
+        }, function(err){
+          console.warn('[CLOUD ERROR] Auth state listener error', err && err.message ? err.message : err);
+        });
+        if (!auth.currentUser){
+          auth.signInAnonymously().catch(function(err){
+            console.warn('[CLOUD ERROR] Anonymous auth bootstrap failed', err && err.message ? err.message : err);
+          });
+        }
+      }
+    } catch (err){
+      console.warn('[CLOUD ERROR] Firebase auth init failed', err && err.message ? err.message : err);
+    }
+
+    try {
+      const db = firebase.firestore(); // 4) Firestore
+      firebaseDbInstance = db;
+      try{ window.__VERTER_FIRESTORE__ = db; }catch(_){ }
+    } catch (err){
+      console.warn('[CLOUD ERROR] Firestore init failed', err && err.message ? err.message : err);
+      throw err;
+    }
+
+    try{ window.__VERTER_FIREBASE__ = firebase; }catch(_){ }
+    return { firebase: firebase, db: firebaseDbInstance };
+  }).catch(function(err){
+    console.warn('[CLOUD ERROR] Firebase bootstrap failed', err && err.message ? err.message : err);
+    firebaseBootstrapPromise = null;
+    throw err;
+  });
+  return firebaseBootstrapPromise;
+}
+
 function ensureCloudReady(){
   if (!enableCloud){ return Promise.reject(new Error('Cloud disabled')); }
   if (cloudInitPromise) return cloudInitPromise;
@@ -924,7 +1017,7 @@ function ensureCloudReady(){
   var normalized = shallowAssign({}, cfg);
   if (!normalized.projectId && normalized.project_id) normalized.projectId = normalized.project_id;
   if (!normalized.apiKey && normalized.api_key) normalized.apiKey = normalized.api_key;
-  cloudInitPromise = loadFirebaseCompat()
+  cloudInitPromise = bootstrapFirebaseCore()
     .then(function(){ return CloudStats.init(normalized); })
     .then(function(){
       if (CloudStats && CloudStats.defaults && CloudStats.defaults.weights){
@@ -933,7 +1026,7 @@ function ensureCloudReady(){
       }
       return true;
     }).catch(function(err){
-      console.warn('[CLOUD] init error', err);
+      console.warn('[CLOUD ERROR] init error', err && err.message ? err.message : err);
       botState.cloud.enabled = false;
       throw err;
     });
@@ -997,26 +1090,57 @@ function getCurrentAssetKey(){
   return asset + '__' + tf;
 }
 
+function normalizeTimeframeName(tf){
+  return String(tf || 'M1').toUpperCase();
+}
+
+function cloudDirectionLabel(dir){
+  var val = String(dir || '').toUpperCase();
+  if (val === 'BUY' || val === 'CALL' || val === 'UP') return 'BUY';
+  if (val === 'SELL' || val === 'PUT' || val === 'DOWN') return 'SELL';
+  return 'FLAT';
+}
+
+function toIsoStringSafe(ts){
+  try{
+    if (!ts) return new Date().toISOString();
+    var d = ts instanceof Date ? ts : new Date(ts);
+    if (isNaN(d.getTime())) return new Date().toISOString();
+    return d.toISOString();
+  }catch(_){
+    return new Date().toISOString();
+  }
+}
+
 function updateCloudMode(perf){
   var c = botState.cloud;
-  var mode = 'COLD';
-  if (perf){
-    var hasEligible = false;
-    var signals = perf.signals || {};
-    for (var key in signals){
-      if (!signals.hasOwnProperty(key)) continue;
+  var prevMode = c.mode;
+  var trades = perf && isFinite(perf.trades) ? perf.trades : 0;
+  var hasEligible = false;
+  if (perf && perf.signals){
+    for (var key in perf.signals){
+      if (!Object.prototype.hasOwnProperty.call(perf.signals, key)) continue;
       if (CloudStats.shouldTrade(key, perf, c.policy)){
         hasEligible = true;
         break;
       }
     }
-    mode = hasEligible ? 'HOT' : 'WARMUP';
+  }
+  var mode = 'COLD';
+  if (perf){
+    mode = (trades >= 50 && hasEligible) ? 'HOT' : 'WARMUP';
+  } else {
+    c.driftTriggered = false;
   }
   if (c.driftTriggered) mode = 'DRIFT';
-  if (!perf) c.driftTriggered = false;
-  c.lastMode = c.mode;
+  c.lastMode = prevMode;
   c.mode = mode;
   updateCloudLambda();
+  if (prevMode !== mode){
+    try{
+      console.log('[CLOUD] mode=' + mode + ' trades=' + trades + (perf && perf.ewma != null ? ' ewma=' + (perf.ewma*100).toFixed(1) + '%' : ''));
+    }catch(_){ }
+  }
 }
 
 function updateCloudUi(){
@@ -1025,6 +1149,7 @@ function updateCloudUi(){
     var lambdaEl = document.getElementById('cloud-lambda');
     var topEl = document.getElementById('cloud-top');
     var updEl = document.getElementById('cloud-updated');
+    var tradesEl = document.getElementById('cloud-trades');
     if (badge){
       badge.textContent = 'Cloud: ' + botState.cloud.mode;
       var color = '#9e9e9e';
@@ -1035,6 +1160,7 @@ function updateCloudUi(){
       badge.style.background = color;
     }
     if (lambdaEl){ lambdaEl.textContent = 'λ=' + botState.cloud.lambda.toFixed(2); }
+    if (tradesEl){ tradesEl.textContent = 'Trades: ' + (botState.cloud.trades || 0); }
     if (updEl){
       if (botState.cloud.cloudAge != null){
         var hrs = botState.cloud.cloudAge;
@@ -1067,6 +1193,9 @@ function updateCloudUi(){
 function updateCloudState(perf){
   botState.cloud.perf = perf;
   botState.cloud.topSignals = perf ? CloudStats.rankSignals(perf, botState.cloud.weights, 5) : [];
+  botState.cloud.trades = perf && isFinite(perf.trades) ? perf.trades : 0;
+  botState.cloud.wins = perf && isFinite(perf.wins) ? perf.wins : 0;
+  botState.cloud.losses = perf && isFinite(perf.losses) ? perf.losses : 0;
   if (perf && perf.updatedAt){
     botState.cloud.cloudAge = (Date.now() - perf.updatedAt) / 3600000;
   }else{
@@ -1081,7 +1210,10 @@ function refreshCloudPerf(force){
   ensureCloudReady().then(function(){
     var assetKey = getCurrentAssetKey();
     var nowTs = Date.now();
-    if (!assetKey) return;
+    if (!assetKey){
+      updateCloudState(null);
+      return;
+    }
     if (!force && nowTs < botState.cloud.nextFetch && assetKey === botState.cloud.lastAssetKey){ return; }
     botState.cloud.lastAssetKey = assetKey;
     botState.cloud.lastFetch = nowTs;
@@ -1091,10 +1223,12 @@ function refreshCloudPerf(force){
     CloudStats.readPerf(asset, tf).then(function(perf){
       updateCloudState(perf);
     }).catch(function(err){
-      console.warn('[CLOUD] readPerf failed', err);
+      console.warn('[CLOUD ERROR] readPerf failed', err && err.message ? err.message : err);
+      updateCloudState(null);
     });
   }).catch(function(err){
-    console.warn('[CLOUD] ensure ready failed', err);
+    console.warn('[CLOUD ERROR] ensure ready failed', err && err.message ? err.message : err);
+    updateCloudState(null);
   });
 }
 
@@ -1105,7 +1239,10 @@ function scheduleCloudRefresh(immediate){
     if (!cloudRefreshTimer){
       cloudRefreshTimer = setInterval(function(){ refreshCloudPerf(false); }, CLOUD_REFRESH_MINUTES * 60000);
     }
-  }).catch(function(err){ console.warn('[CLOUD] schedule failed', err); });
+  }).catch(function(err){
+    console.warn('[CLOUD ERROR] schedule failed', err && err.message ? err.message : err);
+    updateCloudState(null);
+  });
 }
 
 function recordCloudLiveResult(result){
@@ -1130,7 +1267,7 @@ function evaluateCloudDrift(){
   var perf = c.perf;
   var ewmaCloud = (perf && isFinite(perf.ewma)) ? perf.ewma : 0.5;
   var triggers = 0;
-  if (c.ewmaLive < 0.5) triggers++;
+  if (c.ewmaLive < 0.48) triggers++;
   if ((c.ewmaLive - ewmaCloud) < -0.06) triggers++;
   if (c.lossStreak >= 3) triggers++;
   if (c.cloudAge != null && c.cloudAge > 48) triggers++;
@@ -2429,6 +2566,7 @@ function addUI(){
         <span id="cloud-lambda">λ=0.00</span>
         <span id="cloud-updated">Age: —</span>
       </div>
+      <div id="cloud-trades">Trades: 0</div>
       <div id="cloud-top" style="display:flex;flex-direction:column;gap:2px;"></div>
     </div>
   `;
@@ -2678,15 +2816,46 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
         ewmaCloud: botState.cloud.perf && botState.cloud.perf.ewma != null ? botState.cloud.perf.ewma : null
       };
       if (linkedTrade && Array.isArray(linkedTrade.signalKeys)) tradeRecord.signalKeys = linkedTrade.signalKeys.slice(0, 10);
-      if (!isFinite(tradeRecord.bet)) tradeRecord.bet = 0;
-      if (!tradeRecord.asset) tradeRecord.asset = symbolName;
-      if (!tradeRecord.timeframe) tradeRecord.timeframe = currentTF;
-      if (!tradeRecord.entryDir) tradeRecord.entryDir = (tradeRecord.bet >= 0 ? (linkedTrade && linkedTrade.betDirection) : 'flat') || 'flat';
+      tradeRecord.asset = normalizeAssetName(tradeRecord.asset || symbolName);
+      if (!tradeRecord.asset) tradeRecord.asset = 'UNKNOWN';
+      tradeRecord.timeframe = normalizeTimeframeName(tradeRecord.timeframe || currentTF);
+      tradeRecord.signalKey = String(tradeRecord.signalKey || 'unknown').trim() || 'unknown';
+      var derivedDir = tradeRecord.entryDir;
+      if (!derivedDir && tradeRecord.bet >= 0){ derivedDir = linkedTrade && linkedTrade.betDirection; }
+      tradeRecord.entryDir = cloudDirectionLabel(derivedDir);
+      tradeRecord.step = Number.isFinite(tradeRecord.step) ? tradeRecord.step : 0;
+      var betVal = Number(tradeRecord.bet);
+      tradeRecord.bet = isFinite(betVal) ? Math.abs(betVal) : 0;
+      var pnlVal = Number(tradeRecord.pnl);
+      tradeRecord.pnl = isFinite(pnlVal) ? pnlVal : 0;
+      if (tradeRecord.payout != null){
+        var payoutRaw = tradeRecord.payout;
+        if (typeof payoutRaw === 'string'){ payoutRaw = payoutRaw.replace(/[^0-9.\-]/g, ''); }
+        var payoutVal = Number(payoutRaw);
+        if (!isFinite(payoutVal)) payoutVal = null;
+        else if (payoutVal > 1.5) payoutVal = payoutVal / 100;
+        tradeRecord.payout = payoutVal;
+      } else {
+        tradeRecord.payout = null;
+      }
+      if (tradeRecord.priceEntry != null){
+        var pe = Number(tradeRecord.priceEntry);
+        tradeRecord.priceEntry = isFinite(pe) ? pe : null;
+      }
+      if (tradeRecord.priceExit != null){
+        var px = Number(tradeRecord.priceExit);
+        tradeRecord.priceExit = isFinite(px) ? px : null;
+      }
+      tradeRecord.result = resultKey === 'win' ? 'WIN' : (resultKey === 'loss' ? 'LOSS' : 'DRAW');
+      tradeRecord.tsOpen = toIsoStringSafe(tradeRecord.tsOpen);
+      tradeRecord.tsClose = toIsoStringSafe(tradeRecord.tsClose);
 
       try{ recordCloudLiveResult(st === 'lost' ? 'lost' : (st === 'won' ? 'won' : 'returned')); }catch(_){ }
 
       if (!cloudReadOnly && CloudStats && typeof CloudStats.updateAfterTrade === 'function'){
-        CloudStats.updateAfterTrade(tradeRecord).catch(function(err){ console.warn('[CLOUD] updateAfterTrade failed', err); });
+        CloudStats.updateAfterTrade(tradeRecord).catch(function(err){
+          console.warn('[CLOUD ERROR] updateAfterTrade failed', err && err.message ? err.message : err);
+        });
       }
     }
   } catch (err) {
