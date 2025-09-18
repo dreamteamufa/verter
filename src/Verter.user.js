@@ -10,6 +10,388 @@
   }catch(e){}
 'use strict';
 
+// === CloudStats module inline copy (kept in sync with src/cloudstats_s1.js) ===
+(function(global){
+  'use strict';
+
+  var DEFAULTS = {
+    T_min: 30,
+    ewmaMin: 0.52,
+    weights: { w1: 0.5, w2: 0.3, w3: 0.1, w4: 0.1, Tcap: 200 },
+    alpha: 0.2,
+    readCooldownMs: 30000,
+    writeCooldownMs: 5000,
+    cacheTtlMs: 180000
+  };
+
+  var CLOUD_LOCAL_KEY = 'cloudstats_s1_cache';
+  var CLOUD_QUEUE_KEY = 'cloudstats_s1_queue';
+
+  var firebaseApp = null;
+  var firestoreDb = null;
+  var firebaseAuth = null;
+  var firebaseAppCheck = null;
+
+  var initPromise = null;
+  var cachePerf = {};
+  var readThrottles = {};
+  var writeThrottleUntil = 0;
+  var writeQueue = [];
+  var processingQueue = false;
+  var lastInitCfg = null;
+
+  function now(){ return Date.now(); }
+
+  function clone(obj){
+    if (!obj || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)){ return obj.slice(); }
+    var out = {};
+    for (var k in obj){ if (obj.hasOwnProperty(k)) out[k] = clone(obj[k]); }
+    return out;
+  }
+
+  function getLocalStorage(){
+    try{ if (typeof window !== 'undefined' && window.localStorage) return window.localStorage; }catch(_){ }
+    return null;
+  }
+
+  function loadQueueFromStorage(){
+    var ls = getLocalStorage();
+    if (!ls) return;
+    try{
+      var raw = ls.getItem(CLOUD_QUEUE_KEY);
+      if (!raw) return;
+      var arr = JSON.parse(raw);
+      if (Array.isArray(arr)) writeQueue = arr.concat(writeQueue);
+    }catch(_){ }
+  }
+
+  function persistQueue(){
+    var ls = getLocalStorage();
+    if (!ls) return;
+    try{
+      if (!writeQueue.length){ ls.removeItem(CLOUD_QUEUE_KEY); return; }
+      ls.setItem(CLOUD_QUEUE_KEY, JSON.stringify(writeQueue.slice(0, 30)));
+    }catch(_){ }
+  }
+
+  function savePerfToCache(key, perf){
+    cachePerf[key] = { ts: now(), data: clone(perf) };
+    var ls = getLocalStorage();
+    if (!ls) return;
+    try{
+      var data = ls.getItem(CLOUD_LOCAL_KEY);
+      var store = data ? JSON.parse(data) : {};
+      store[key] = { ts: cachePerf[key].ts, data: cachePerf[key].data };
+      ls.setItem(CLOUD_LOCAL_KEY, JSON.stringify(store));
+    }catch(_){ }
+  }
+
+  function loadCache(){
+    var ls = getLocalStorage();
+    if (!ls) return;
+    try{
+      var raw = ls.getItem(CLOUD_LOCAL_KEY);
+      if (!raw) return;
+      var parsed = JSON.parse(raw);
+      for (var key in parsed){
+        if (parsed.hasOwnProperty(key)){
+          cachePerf[key] = parsed[key];
+        }
+      }
+    }catch(_){ }
+  }
+
+  function waitFirebaseReady(){
+    return new Promise(function(resolve, reject){
+      var checks = 0;
+      (function verify(){
+        checks++;
+        try{
+          if (global.firebase && global.firebase.app && global.firebase.app.App){ resolve(); return; }
+        }catch(_){ }
+        if (checks > 60){ reject(new Error('Firebase compat SDK missing')); return; }
+        setTimeout(verify, 250);
+      })();
+    });
+  }
+
+  function withRetry(fn){
+    var attempt = 0;
+    function exec(){
+      attempt++;
+      return fn().catch(function(err){
+        var delay = Math.min(30000, Math.pow(2, attempt - 1) * 1000);
+        if (delay >= 30000 && attempt > 6){ throw err; }
+        return new Promise(function(resolve){
+          setTimeout(function(){ resolve(exec()); }, delay);
+        });
+      });
+    }
+    return exec();
+  }
+
+  function ensureInit(){
+    if (initPromise) return initPromise;
+    return Promise.reject(new Error('CloudStats.init not called'));
+  }
+
+  function buildPerfKey(asset, tf){
+    var a = String(asset || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
+    var t = String(tf || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
+    if (!a) a = 'UNKNOWN';
+    if (!t) t = 'TF';
+    return 's1__' + a + '__' + t;
+  }
+
+  function computeEwma(prev, outcome, alpha){
+    if (!isFinite(prev)) prev = 0.5;
+    if (!isFinite(outcome)) outcome = 0.5;
+    if (!isFinite(alpha) || alpha <= 0 || alpha >= 1) alpha = DEFAULTS.alpha;
+    return prev + alpha * (outcome - prev);
+  }
+
+  function normalizePerf(doc){
+    if (!doc) return null;
+    var perf = clone(doc);
+    if (perf && perf.updatedAt && perf.updatedAt.toMillis){
+      perf.updatedAt = perf.updatedAt.toMillis();
+    } else if (perf && perf.updatedAt && perf.updatedAt.seconds){
+      perf.updatedAt = perf.updatedAt.seconds * 1000;
+    }
+    if (!perf.signals) perf.signals = {};
+    return perf;
+  }
+
+  function pushQueue(entry){
+    writeQueue.push(entry);
+    if (writeQueue.length > 60) writeQueue = writeQueue.slice(-60);
+    persistQueue();
+    processQueue();
+  }
+
+  function processQueue(){
+    if (processingQueue) return;
+    if (!writeQueue.length) return;
+    if (now() < writeThrottleUntil) return;
+    processingQueue = true;
+    ensureInit().then(function(){ return runQueueEntry(); }).catch(function(err){
+      processingQueue = false;
+      writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
+      console.warn('[CLOUD] queue error', err && err.message ? err.message : err);
+    });
+  }
+
+  function runQueueEntry(){
+    if (!writeQueue.length){ processingQueue = false; persistQueue(); return Promise.resolve(); }
+    var entry = writeQueue[0];
+    return withRetry(function(){ return applyWrite(entry); }).then(function(){
+      writeQueue.shift();
+      persistQueue();
+      writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
+      processingQueue = false;
+      if (writeQueue.length){ setTimeout(processQueue, DEFAULTS.writeCooldownMs); }
+    }).catch(function(err){
+      processingQueue = false;
+      console.warn('[CLOUD] write failed', err && err.message ? err.message : err);
+      writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
+    });
+  }
+
+  function applyWrite(entry){
+    if (!firestoreDb) return Promise.reject(new Error('Firestore not ready'));
+    var trade = entry.trade || {};
+    var perfKey = buildPerfKey(trade.asset, trade.timeframe);
+    var perfRef = firestoreDb.collection('signals_perf').doc(perfKey);
+    var tradeDate = new Date(trade.tsClose || trade.tsOpen || now());
+    var y = tradeDate.getUTCFullYear();
+    var m = tradeDate.getUTCMonth() + 1;
+    var d = tradeDate.getUTCDate();
+    var bucket = String(y) + String(m < 10 ? '0' + m : m) + String(d < 10 ? '0' + d : d);
+    var tradeRef = firestoreDb.collection('trade_logs').doc(bucket).collection('items').doc();
+
+    return firestoreDb.runTransaction(function(tx){
+      return tx.get(perfRef).then(function(doc){
+        var data = doc.exists ? doc.data() : { schema: 's1', trades: 0, wins: 0, losses: 0, ewma: 0.5, avgROI: 0, signals: {} };
+        var signalKey = trade.signalKey || 'unknown';
+        if (!data.signals) data.signals = {};
+        if (!data.signals[signalKey]){
+          data.signals[signalKey] = { trades: 0, wins: 0, losses: 0, ewma: 0.5, avgROI: 0, lastTs: 0 };
+        }
+        var sig = data.signals[signalKey];
+        var result = String(trade.result || '').toLowerCase();
+        var win = result === 'win' || result === 'won';
+        var loss = result === 'loss' || result === 'lost';
+        var roi = 0;
+        if (isFinite(trade.pnl) && isFinite(trade.bet) && trade.bet !== 0){
+          roi = trade.pnl / Math.abs(trade.bet);
+        }
+        data.trades = (data.trades || 0) + 1;
+        data.wins = (data.wins || 0) + (win ? 1 : 0);
+        data.losses = (data.losses || 0) + (loss ? 1 : 0);
+        data.ewma = computeEwma(data.ewma, win ? 1 : (loss ? 0 : 0.5), entry.alpha || DEFAULTS.alpha);
+        data.avgROI = data.avgROI == null ? roi : ((data.avgROI * (data.trades - 1) + roi) / data.trades);
+        data.asset = trade.asset;
+        data.timeframe = trade.timeframe;
+        data.updatedAt = new Date(now());
+        data.schema = 's1';
+
+        sig.trades = (sig.trades || 0) + 1;
+        sig.wins = (sig.wins || 0) + (win ? 1 : 0);
+        sig.losses = (sig.losses || 0) + (loss ? 1 : 0);
+        sig.ewma = computeEwma(sig.ewma, win ? 1 : (loss ? 0 : 0.5), entry.alpha || DEFAULTS.alpha);
+        sig.avgROI = sig.avgROI == null ? roi : ((sig.avgROI * (sig.trades - 1) + roi) / sig.trades);
+        sig.lastTs = trade.tsClose || trade.tsOpen || now();
+
+        var payload = clone(data);
+        var signalsClone = clone(data.signals);
+        payload.signals = signalsClone;
+
+        tx.set(perfRef, payload, { merge: true });
+        tx.set(tradeRef, clone(trade));
+
+        savePerfToCache(perfKey, payload);
+      });
+    });
+  }
+
+  function projectScore(sig, weights){
+    if (!sig) return 0;
+    var w = weights || DEFAULTS.weights;
+    var trades = sig.trades || 0;
+    var wins = sig.wins || 0;
+    var losses = sig.losses || 0;
+    var wr = trades > 0 ? wins / trades : 0.5;
+    var ewma = isFinite(sig.ewma) ? sig.ewma : wr;
+    var roi = isFinite(sig.avgROI) ? sig.avgROI : 0;
+    var cappedTrades = Math.min(trades, w.Tcap || DEFAULTS.weights.Tcap || 200);
+    var tradeRatio = (w.Tcap ? (cappedTrades / w.Tcap) : (trades / 200));
+    if (!isFinite(tradeRatio)) tradeRatio = 0;
+    var stability = trades > 0 ? 1 - (Math.abs(wins - losses) / trades) : 0.5;
+    var score = (ewma * (w.w1 || 0)) + (wr * (w.w2 || 0)) + (roi * (w.w3 || 0)) + (tradeRatio * (w.w4 || 0));
+    score += stability * 0.05;
+    return score;
+  }
+
+  var CloudStats = {
+    init: function(cfg){
+      if (initPromise) return initPromise;
+      loadCache();
+      loadQueueFromStorage();
+      lastInitCfg = cfg || {};
+      initPromise = waitFirebaseReady().then(function(){
+        var firebase = global.firebase;
+        if (!firebase) throw new Error('Firebase SDK missing');
+        if (firebase.apps && firebase.apps.length && firebase.apps[0]){
+          firebaseApp = firebase.apps[0];
+        } else {
+          firebaseApp = firebase.initializeApp(cfg);
+        }
+        firestoreDb = firebase.firestore();
+        firebaseAuth = firebase.auth();
+        firebaseAppCheck = firebase.appCheck ? firebase.appCheck() : null;
+
+        if (firebaseAppCheck && cfg && cfg.recaptchaKey){
+          firebaseAppCheck.activate(cfg.recaptchaKey, true);
+        }
+
+        if (firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.isAnonymous){
+          return firebaseAuth.currentUser;
+        }
+        if (!firebaseAuth) return null;
+        return firebaseAuth.signInAnonymously();
+      }).then(function(){
+        processQueue();
+        return true;
+      }).catch(function(err){
+        console.warn('[CLOUD] init failed', err && err.message ? err.message : err);
+        throw err;
+      });
+      return initPromise;
+    },
+
+    readPerf: function(asset, tf){
+      return ensureInit().then(function(){
+        var key = buildPerfKey(asset, tf);
+        var c = cachePerf[key];
+        var nowTs = now();
+        if (c && (nowTs - c.ts) < DEFAULTS.cacheTtlMs){
+          return clone(c.data);
+        }
+        var lastRead = readThrottles[key] || 0;
+        if ((nowTs - lastRead) < DEFAULTS.readCooldownMs && c){
+          return clone(c.data);
+        }
+        readThrottles[key] = nowTs;
+        return withRetry(function(){
+          return firestoreDb.collection('signals_perf').doc(key).get().then(function(snap){
+            if (!snap.exists){
+              if (c) return clone(c.data);
+              return null;
+            }
+            var doc = normalizePerf(snap.data());
+            savePerfToCache(key, doc);
+            return clone(doc);
+          });
+        }).catch(function(err){
+          console.warn('[CLOUD] read failed', err && err.message ? err.message : err);
+          if (c) return clone(c.data);
+          return null;
+        });
+      });
+    },
+
+    updateAfterTrade: function(trade){
+      return ensureInit().then(function(){
+        pushQueue({ trade: clone(trade), alpha: DEFAULTS.alpha, enqueuedAt: now() });
+      });
+    },
+
+    rankSignals: function(perf, weights, limit){
+      if (!perf || !perf.signals) return [];
+      var list = [];
+      var w = weights || DEFAULTS.weights;
+      var lim = typeof limit === 'number' && limit > 0 ? limit : 5;
+      for (var key in perf.signals){
+        if (!perf.signals.hasOwnProperty(key)) continue;
+        var sig = perf.signals[key];
+        var score = projectScore(sig, w);
+        list.push({ key: key, score: score, stats: clone(sig) });
+      }
+      list.sort(function(a, b){ return b.score - a.score; });
+      if (list.length > lim) list = list.slice(0, lim);
+      return list;
+    },
+
+    shouldTrade: function(key, perf, policy){
+      var cfg = policy || {};
+      var T_min = isFinite(cfg.T_min) ? cfg.T_min : DEFAULTS.T_min;
+      var ewmaMin = isFinite(cfg.ewmaMin) ? cfg.ewmaMin : DEFAULTS.ewmaMin;
+      if (!perf || !perf.signals) return false;
+      var sig = perf.signals[key];
+      if (!sig) return false;
+      if ((sig.trades || 0) < T_min) return false;
+      var ewma = isFinite(sig.ewma) ? sig.ewma : 0.5;
+      if (ewma < ewmaMin) return false;
+      return true;
+    },
+
+    defaults: clone(DEFAULTS),
+
+    _state: function(){
+      return {
+        queueLength: writeQueue.length,
+        cacheKeys: Object.keys(cachePerf || {}),
+        lastConfig: clone(lastInitCfg)
+      };
+    }
+  };
+
+  if (typeof module !== 'undefined' && module.exports){ module.exports = CloudStats; }
+  global.CloudStats = CloudStats;
+
+})(typeof window !== 'undefined' ? window : this);
+
 const appversion = "Verter ver. 5.11.2_ARMed";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
@@ -21,6 +403,55 @@ try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 
 // Martingale warm-up trades before stepping (0 = off)
 const MG_WARMUP_TRADES = 0;
+
+
+/* ====== CloudStats integration flags ====== */
+const enableCloud = true;
+const cloudReadOnly = false;
+const CLOUD_REFRESH_MINUTES = 3;
+const CLOUD_MAX_TRADE_PER_HOUR = 6;
+const CLOUD_EXPLORE_RATE = 0.15;
+
+function loadCloudConfig(){
+  var cfg = null;
+  try{
+    if (window.__VERTER_FIREBASE_CONFIG__) cfg = window.__VERTER_FIREBASE_CONFIG__;
+  }catch(_){ }
+  if (!cfg){
+    try{
+      var raw = localStorage.getItem('verter_cloud_config');
+      if (raw) cfg = JSON.parse(raw);
+    }catch(_){ }
+  }
+  return cfg || null;
+}
+
+var botState = {
+  cloud: {
+    enabled: enableCloud,
+    readOnly: cloudReadOnly,
+    lambdaStages: [0.8, 0.6, 0.4, 0.2, 0.0],
+    lambdaIndex: 0,
+    lambda: 0.8,
+    mode: 'COLD',
+    lastMode: 'COLD',
+    lastFetch: 0,
+    nextFetch: 0,
+    perf: null,
+    topSignals: [],
+    ewmaLive: 0.5,
+    lossStreak: 0,
+    cloudAge: null,
+    tradesHour: {},
+    exploreToggle: 0,
+    driftTriggered: false,
+    lastAssetKey: null,
+    recentResults: [],
+    recoveryStreak: 0,
+    policy: { T_min: 30, ewmaMin: 0.52 },
+    weights: { w1: 0.5, w2: 0.3, w3: 0.1, w4: 0.1, Tcap: 200 }
+  }
+};
 
 
 /* ====== SAFE KEYS BLIND CONFIGURATION ====== */
@@ -430,6 +861,338 @@ let signalWeights  = {};
 // снимок активных сигналов, сработавших в момент принятия решения
 window.activeSignalsSnapshot  = [];
 window.activeSignalsThisTrade = null;
+
+/* ====== Cloud Stats helpers ====== */
+var cloudSdkLoading = null;
+var cloudInitPromise = null;
+var cloudRefreshTimer = null;
+
+function shallowAssign(target){
+  var out = target || {};
+  for (var i = 1; i < arguments.length; i++){
+    var src = arguments[i];
+    if (!src) continue;
+    for (var k in src){
+      if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
+    }
+  }
+  return out;
+}
+
+function loadScriptOnce(url){
+  return new Promise(function(resolve, reject){
+    try{
+      var attr = 'data-cloudsrc';
+      var existing = document.querySelector('script[' + attr + '="' + url + '"]');
+      if (existing){
+        if (existing.getAttribute('data-loaded') === '1'){ resolve(); return; }
+        existing.addEventListener('load', function(){ existing.setAttribute('data-loaded', '1'); resolve(); });
+        existing.addEventListener('error', function(){ reject(new Error('Failed to load ' + url)); });
+        return;
+      }
+      var script = document.createElement('script');
+      script.type = 'text/javascript';
+      script.async = true;
+      script.setAttribute(attr, url);
+      script.addEventListener('load', function(){ script.setAttribute('data-loaded', '1'); resolve(); });
+      script.addEventListener('error', function(){ reject(new Error('Failed to load ' + url)); });
+      script.src = url;
+      (document.head || document.documentElement || document.body).appendChild(script);
+    }catch(e){ reject(e); }
+  });
+}
+
+function loadFirebaseCompat(){
+  if (cloudSdkLoading) return cloudSdkLoading;
+  var urls = [
+    'https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js',
+    'https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js',
+    'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js',
+    'https://www.gstatic.com/firebasejs/9.22.2/firebase-app-check-compat.js'
+  ];
+  cloudSdkLoading = urls.reduce(function(prev, url){
+    return prev.then(function(){ return loadScriptOnce(url); });
+  }, Promise.resolve());
+  return cloudSdkLoading;
+}
+
+function ensureCloudReady(){
+  if (!enableCloud){ return Promise.reject(new Error('Cloud disabled')); }
+  if (cloudInitPromise) return cloudInitPromise;
+  var cfg = loadCloudConfig();
+  if (!cfg){ return Promise.reject(new Error('Cloud config missing')); }
+  var normalized = shallowAssign({}, cfg);
+  if (!normalized.projectId && normalized.project_id) normalized.projectId = normalized.project_id;
+  if (!normalized.apiKey && normalized.api_key) normalized.apiKey = normalized.api_key;
+  cloudInitPromise = loadFirebaseCompat()
+    .then(function(){ return CloudStats.init(normalized); })
+    .then(function(){
+      if (CloudStats && CloudStats.defaults && CloudStats.defaults.weights){
+        botState.cloud.weights = shallowAssign({}, CloudStats.defaults.weights);
+        botState.cloud.policy = shallowAssign({}, { T_min: CloudStats.defaults.T_min, ewmaMin: CloudStats.defaults.ewmaMin });
+      }
+      return true;
+    }).catch(function(err){
+      console.warn('[CLOUD] init error', err);
+      botState.cloud.enabled = false;
+      throw err;
+    });
+  return cloudInitPromise;
+}
+
+function cloudEffectiveLambda(){
+  var c = botState.cloud;
+  var idx = c.lambdaIndex;
+  if (idx < 0) idx = 0;
+  if (idx >= c.lambdaStages.length) idx = c.lambdaStages.length - 1;
+  var base = c.lambdaStages[idx];
+  if (c.mode === 'COLD') return 0;
+  if (c.mode === 'WARMUP') return Math.min(base, 0.3);
+  return base;
+}
+
+function updateCloudLambda(){
+  botState.cloud.lambda = cloudEffectiveLambda();
+}
+
+function currentHourKey(){
+  var d = new Date();
+  return d.getUTCFullYear() + '-' + (d.getUTCMonth()+1) + '-' + d.getUTCDate() + '-' + d.getUTCHours();
+}
+
+function cloudRecordTradeOpen(){
+  var c = botState.cloud;
+  var key = currentHourKey();
+  if (!c.tradesHour[key]) c.tradesHour[key] = 0;
+  c.tradesHour[key] += 1;
+  var keys = Object.keys(c.tradesHour);
+  if (keys.length > 24){
+    keys.sort();
+    while (keys.length > 24){
+      var drop = keys.shift();
+      delete c.tradesHour[drop];
+    }
+  }
+}
+
+function cloudTradesThisHour(){
+  var key = currentHourKey();
+  return botState.cloud.tradesHour[key] || 0;
+}
+
+function shouldThrottleByTraining(){
+  var c = botState.cloud;
+  if (c.mode === 'HOT' && !c.driftTriggered) return false;
+  return cloudTradesThisHour() >= CLOUD_MAX_TRADE_PER_HOUR;
+}
+
+function normalizeAssetName(name){
+  return String(name || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+}
+
+function getCurrentAssetKey(){
+  var asset = normalizeAssetName(symbolName || '');
+  var tf = String(currentTF || 'M1').toUpperCase();
+  if (!asset) return null;
+  return asset + '__' + tf;
+}
+
+function updateCloudMode(perf){
+  var c = botState.cloud;
+  var mode = 'COLD';
+  if (perf){
+    var hasEligible = false;
+    var signals = perf.signals || {};
+    for (var key in signals){
+      if (!signals.hasOwnProperty(key)) continue;
+      if (CloudStats.shouldTrade(key, perf, c.policy)){
+        hasEligible = true;
+        break;
+      }
+    }
+    mode = hasEligible ? 'HOT' : 'WARMUP';
+  }
+  if (c.driftTriggered) mode = 'DRIFT';
+  if (!perf) c.driftTriggered = false;
+  c.lastMode = c.mode;
+  c.mode = mode;
+  updateCloudLambda();
+}
+
+function updateCloudUi(){
+  try{
+    var badge = document.getElementById('cloud-status-badge');
+    var lambdaEl = document.getElementById('cloud-lambda');
+    var topEl = document.getElementById('cloud-top');
+    var updEl = document.getElementById('cloud-updated');
+    if (badge){
+      badge.textContent = 'Cloud: ' + botState.cloud.mode;
+      var color = '#9e9e9e';
+      if (botState.cloud.mode === 'HOT') color = '#00e676';
+      else if (botState.cloud.mode === 'WARMUP') color = '#ffeb3b';
+      else if (botState.cloud.mode === 'DRIFT') color = '#ff9800';
+      else color = '#ff5252';
+      badge.style.background = color;
+    }
+    if (lambdaEl){ lambdaEl.textContent = 'λ=' + botState.cloud.lambda.toFixed(2); }
+    if (updEl){
+      if (botState.cloud.cloudAge != null){
+        var hrs = botState.cloud.cloudAge;
+        updEl.textContent = 'Age: ' + hrs.toFixed(1) + 'h';
+      }else{
+        updEl.textContent = 'Age: —';
+      }
+    }
+    if (topEl){
+      var top = botState.cloud.topSignals || [];
+      if (!top.length){
+        topEl.innerHTML = '<div>Нет данных</div>';
+      }else{
+        var html = top.map(function(item, idx){
+          var stats = item.stats || {};
+          var trades = stats.trades || 0;
+          var wr = trades ? (stats.wins || 0) / trades : 0;
+          var ewma = stats.ewma != null ? stats.ewma : wr;
+          return '<div style="display:flex;justify-content:space-between;gap:6px;">'
+            + '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (idx+1) + '. ' + item.key + '</span>'
+            + '<span style="white-space:nowrap;">EWMA ' + (ewma*100).toFixed(1) + '% • ' + (stats.wins||0) + '/' + trades + '</span>'
+            + '</div>';
+        }).join('');
+        topEl.innerHTML = html;
+      }
+    }
+  }catch(_){ }
+}
+
+function updateCloudState(perf){
+  botState.cloud.perf = perf;
+  botState.cloud.topSignals = perf ? CloudStats.rankSignals(perf, botState.cloud.weights, 5) : [];
+  if (perf && perf.updatedAt){
+    botState.cloud.cloudAge = (Date.now() - perf.updatedAt) / 3600000;
+  }else{
+    botState.cloud.cloudAge = null;
+  }
+  updateCloudMode(perf);
+  updateCloudUi();
+}
+
+function refreshCloudPerf(force){
+  if (!enableCloud || !botState.cloud.enabled) return;
+  ensureCloudReady().then(function(){
+    var assetKey = getCurrentAssetKey();
+    var nowTs = Date.now();
+    if (!assetKey) return;
+    if (!force && nowTs < botState.cloud.nextFetch && assetKey === botState.cloud.lastAssetKey){ return; }
+    botState.cloud.lastAssetKey = assetKey;
+    botState.cloud.lastFetch = nowTs;
+    botState.cloud.nextFetch = nowTs + CLOUD_REFRESH_MINUTES * 60000;
+    var asset = symbolName || '';
+    var tf = currentTF || 'M1';
+    CloudStats.readPerf(asset, tf).then(function(perf){
+      updateCloudState(perf);
+    }).catch(function(err){
+      console.warn('[CLOUD] readPerf failed', err);
+    });
+  }).catch(function(err){
+    console.warn('[CLOUD] ensure ready failed', err);
+  });
+}
+
+function scheduleCloudRefresh(immediate){
+  if (!enableCloud || !botState.cloud.enabled) return;
+  ensureCloudReady().then(function(){
+    if (immediate) refreshCloudPerf(true);
+    if (!cloudRefreshTimer){
+      cloudRefreshTimer = setInterval(function(){ refreshCloudPerf(false); }, CLOUD_REFRESH_MINUTES * 60000);
+    }
+  }).catch(function(err){ console.warn('[CLOUD] schedule failed', err); });
+}
+
+function recordCloudLiveResult(result){
+  var c = botState.cloud;
+  var alpha = (CloudStats && CloudStats.defaults && CloudStats.defaults.alpha) || 0.2;
+  var outcome = 0.5;
+  if (result === 'won') outcome = 1;
+  else if (result === 'lost') outcome = 0;
+  c.ewmaLive = c.ewmaLive + alpha * (outcome - c.ewmaLive);
+  if (result === 'lost') c.lossStreak++; else c.lossStreak = 0;
+  c.recentResults.push(outcome);
+  if (c.recentResults.length > 50) c.recentResults.shift();
+  if (result === 'won' && c.ewmaLive >= 0.54){ c.recoveryStreak += 1; }
+  else if (result === 'won'){ c.recoveryStreak = Math.max(1, c.recoveryStreak); }
+  else c.recoveryStreak = 0;
+  evaluateCloudDrift();
+  updateCloudUi();
+}
+
+function evaluateCloudDrift(){
+  var c = botState.cloud;
+  var perf = c.perf;
+  var ewmaCloud = (perf && isFinite(perf.ewma)) ? perf.ewma : 0.5;
+  var triggers = 0;
+  if (c.ewmaLive < 0.5) triggers++;
+  if ((c.ewmaLive - ewmaCloud) < -0.06) triggers++;
+  if (c.lossStreak >= 3) triggers++;
+  if (c.cloudAge != null && c.cloudAge > 48) triggers++;
+  if (triggers > 0){
+    if (c.lambdaIndex < c.lambdaStages.length - 1) c.lambdaIndex++;
+    c.driftTriggered = true;
+  } else if (c.driftTriggered && c.recoveryStreak >= 3){
+    c.lambdaIndex = Math.max(0, c.lambdaIndex - 1);
+    if (c.lambdaIndex === 0) c.driftTriggered = false;
+  }
+  updateCloudMode(perf);
+}
+
+function cloudGuardStep(step){
+  if (!enableCloud) return step;
+  var c = botState.cloud;
+  if (c.mode === 'HOT' && !c.driftTriggered) return step;
+  return Math.min(step, 1);
+}
+
+function estimateCloudScore(stats){
+  if (!stats) return 0;
+  var w = botState.cloud.weights || { w1:0.5, w2:0.3, w3:0.1, w4:0.1, Tcap:200 };
+  var trades = stats.trades || 0;
+  var wins = stats.wins || 0;
+  var wr = trades ? wins / trades : 0.5;
+  var ewma = (stats.ewma != null) ? stats.ewma : wr;
+  var roi = stats.avgROI || 0;
+  var cap = w.Tcap || 200;
+  var tradeRatio = cap ? Math.min(trades, cap) / cap : 0;
+  if (!isFinite(tradeRatio)) tradeRatio = 0;
+  return (ewma * (w.w1 || 0)) + (wr * (w.w2 || 0)) + (roi * (w.w3 || 0)) + (tradeRatio * (w.w4 || 0));
+}
+
+function signalBias(key){
+  var k = String(key || '').toLowerCase();
+  if (!k) return 0;
+  if (k.indexOf('bull') >= 0 || k.indexOf('buy') >= 0 || k.indexOf('call') >= 0 || /_up$/.test(k) || /upper_break/.test(k) || k.indexOf('support')>=0) return 1;
+  if (k.indexOf('bear') >= 0 || k.indexOf('sell') >= 0 || k.indexOf('put') >= 0 || /_down$/.test(k) || /lower_break/.test(k) || k.indexOf('resistance')>=0) return -1;
+  if (k.indexOf('oversold') >= 0) return 1;
+  if (k.indexOf('overbought') >= 0) return -1;
+  return 0;
+}
+
+function directionValue(dir){
+  if (dir === 'buy') return 1;
+  if (dir === 'sell') return -1;
+  return 0;
+}
+
+function valueToDirection(val, fallback){
+  if (val > 0.25) return 'buy';
+  if (val < -0.25) return 'sell';
+  return fallback || 'flat';
+}
+
+function maybeInitCloud(){
+  if (!enableCloud) return;
+  try{
+    scheduleCloudRefresh(true);
+  }catch(_){ }
+}
 
 /* ====== DOM references (set later in addUI) ====== */
 let profitDiv, signalDiv, timeDiv, wonDiv, wagerDiv, tradingSymbolDiv, cyclesHistoryDiv, totalProfitDiv, tradeDirectionDiv, maxStepDiv, profitPercentDivAdvisor, armedIndicatorDiv;
@@ -1467,6 +2230,16 @@ function addUI(){
       display:flex;justify-content:space-between;align-items:center;gap:6px;
     }
     .panel-header .version{font-size:11px;color:#7a7a7a;font-weight:normal;}
+    .cloud-badge{
+      padding:2px 6px;
+      border-radius:4px;
+      background:#9e9e9e;
+      color:#000;
+      font-size:11px;
+      font-weight:600;
+      text-transform:uppercase;
+      letter-spacing:0.04em;
+    }
 
     /* Сетка и строки в Trading */
     .info-grid{
@@ -1645,6 +2418,21 @@ function addUI(){
     <div id="signal-accuracy" style="font-size:12px;line-height:1.25;"></div>
   `;
 
+  /* Cloud Signals */
+  const cloudPanel = document.createElement('div');
+  cloudPanel.className = 'bot-trading-panel';
+  cloudPanel.style.flex = "1";
+  cloudPanel.innerHTML = `
+    <div class="panel-header"><span>Cloud Signals</span><span id="cloud-status-badge" class="cloud-badge">Cloud: COLD</span></div>
+    <div style="font-size:12px;line-height:1.25;display:flex;flex-direction:column;gap:4px;">
+      <div style="display:flex;justify-content:space-between;gap:6px;">
+        <span id="cloud-lambda">λ=0.00</span>
+        <span id="cloud-updated">Age: —</span>
+      </div>
+      <div id="cloud-top" style="display:flex;flex-direction:column;gap:2px;"></div>
+    </div>
+  `;
+
   /* Technical */
   const techPanel = document.createElement('div');
   techPanel.className = 'bot-trading-panel';
@@ -1678,6 +2466,7 @@ function addUI(){
   cardsRow.className = 'cards-row';
   cardsRow.appendChild(topPanel);
   cardsRow.appendChild(accPanel);
+  cardsRow.appendChild(cloudPanel);
   cardsRow.appendChild(techPanel);
   cardsRow.appendChild(chartContainer);
 
@@ -1713,6 +2502,8 @@ function addUI(){
   lossStreakDiv = document.getElementById("loss-streak");
   pauseUntilDiv  = document.getElementById("pause-until");
   chartCanvas = document.getElementById('chart-canvas');
+
+  updateCloudUi();
 
   // controls
   document.getElementById('tf-m1').addEventListener('click', ()=>{ currentTF='M1'; renderChart(); });
@@ -1792,6 +2583,13 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
     const fmtMoney = (v) => { try { return (Number(v).toFixed(2)); } catch(e){ return String(v); } };
 
     const prevStep = currentBetStep;
+    let linkedTrade = null;
+    try{
+      if (Array.isArray(betHistory) && betHistory.length){
+        const candidate = betHistory[betHistory.length - 1];
+        if (candidate && candidate.tsOpen){ linkedTrade = candidate; }
+      }
+    }catch(_){ }
 
     // === лог результата для наглядности ===
     try {
@@ -1804,7 +2602,7 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
       };
       logTradeResult && logTradeResult(last);
       // фиксируем в истории (нормализовано к нижнему регистру)
-      if (Array.isArray(betHistory)) {
+      if (Array.isArray(betHistory) && !linkedTrade) {
         betHistory.push(last);
       }
     } catch(e) {}
@@ -1848,6 +2646,49 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
         detail: { status: st, prevStep, nextStep: currentBetStep, lossStreak: consecutiveLosses }
       }));
     } catch(e){}
+
+    if (linkedTrade){
+      linkedTrade.won = st === 'won' ? 'won' : (st === 'lost' ? 'lost' : st);
+      linkedTrade.profit = pnl;
+      linkedTrade.tsClose = Date.now();
+      linkedTrade.result = linkedTrade.won;
+    }
+
+    if (enableCloud && botState.cloud.enabled){
+      const resultKey = st === 'won' ? 'win' : (st === 'lost' ? 'loss' : (st === 'returned' || st === 'return' ? 'return' : st));
+      const tradeRecord = {
+        tsOpen: (linkedTrade && linkedTrade.tsOpen) || meta.tsOpen || Date.now(),
+        tsClose: meta.tsClose || Date.now(),
+        asset: (linkedTrade && linkedTrade.asset) || meta.asset || symbolName,
+        timeframe: (linkedTrade && linkedTrade.timeframe) || meta.timeframe || currentTF,
+        signalKey: (linkedTrade && linkedTrade.signalKeys && linkedTrade.signalKeys[0]) || meta.signalKey || ((Array.isArray(window.activeSignalsThisTrade) && window.activeSignalsThisTrade[0]) || 'unknown'),
+        entryDir: (linkedTrade && linkedTrade.betDirection) || meta.betDirection || (meta.direction || 'flat'),
+        step: (linkedTrade && typeof linkedTrade.step === 'number') ? linkedTrade.step : prevStep,
+        bet: (meta.betValue != null ? meta.betValue : ((linkedTrade && linkedTrade.betValue) || 0)),
+        payout: meta.payout != null ? meta.payout : ((linkedTrade && linkedTrade.payout) || null),
+        result: resultKey,
+        pnl: pnl,
+        priceEntry: (linkedTrade && linkedTrade.openPrice) || meta.priceEntry || null,
+        priceExit: meta.priceExit != null ? meta.priceExit : null,
+        botVersion: appversion,
+        schema: 's1',
+        lambda: botState.cloud.lambda,
+        cloudMode: botState.cloud.mode,
+        ewmaLive: botState.cloud.ewmaLive,
+        ewmaCloud: botState.cloud.perf && botState.cloud.perf.ewma != null ? botState.cloud.perf.ewma : null
+      };
+      if (linkedTrade && Array.isArray(linkedTrade.signalKeys)) tradeRecord.signalKeys = linkedTrade.signalKeys.slice(0, 10);
+      if (!isFinite(tradeRecord.bet)) tradeRecord.bet = 0;
+      if (!tradeRecord.asset) tradeRecord.asset = symbolName;
+      if (!tradeRecord.timeframe) tradeRecord.timeframe = currentTF;
+      if (!tradeRecord.entryDir) tradeRecord.entryDir = (tradeRecord.bet >= 0 ? (linkedTrade && linkedTrade.betDirection) : 'flat') || 'flat';
+
+      try{ recordCloudLiveResult(st === 'lost' ? 'lost' : (st === 'won' ? 'won' : 'returned')); }catch(_){ }
+
+      if (!cloudReadOnly && CloudStats && typeof CloudStats.updateAfterTrade === 'function'){
+        CloudStats.updateAfterTrade(tradeRecord).catch(function(err){ console.warn('[CLOUD] updateAfterTrade failed', err); });
+      }
+    }
   } catch (err) {
     console.error('[recordTradeResult:MG-FIX] error:', err);
   }
@@ -2002,6 +2843,7 @@ function tradeLogic(){
   else if (lastStatus === 'lost') currentBetStep = Math.min(prevBetStep + 1, betArray.length - 1);
   else currentBetStep = prevBetStep;
   if (typeof MG_WARMUP_TRADES === "number" && betHistory.length < MG_WARMUP_TRADES) { currentBetStep = 0; }
+  currentBetStep = cloudGuardStep(currentBetStep);
 
   // оценки/сигнал
   const bullishScore = window.bullishScore || 0;
@@ -2020,6 +2862,43 @@ function tradeLogic(){
     tradeDirectionDiv.style.background = '#555555';
   }
   tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`;
+
+  // === Cloud influence ===
+  if (enableCloud && botState.cloud.enabled && botState.cloud.perf){
+    const lambda = botState.cloud.lambda;
+    const perf = botState.cloud.perf;
+    const active = Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot : [];
+    let cloudBias = 0;
+    let weightSum = 0;
+    for (let i = 0; i < active.length; i++){
+      const sig = active[i];
+      const stats = perf.signals ? perf.signals[sig] : null;
+      if (!stats) continue;
+      if (!CloudStats.shouldTrade(sig, perf, botState.cloud.policy)) continue;
+      const bias = signalBias(sig);
+      if (!bias) continue;
+      const score = estimateCloudScore(stats);
+      cloudBias += bias * score;
+      weightSum += Math.abs(score);
+    }
+    const cloudValue = weightSum ? (cloudBias / weightSum) : 0;
+    const localValue = directionValue(tradeDirection);
+    const combinedValue = (1 - lambda) * localValue + lambda * cloudValue;
+    let finalDirection = valueToDirection(combinedValue, tradeDirection);
+    if (finalDirection === 'flat' && botState.cloud.mode === 'HOT' && Math.abs(cloudValue) > 0.1){
+      if (Math.random() < CLOUD_EXPLORE_RATE && !shouldThrottleByTraining()){
+        finalDirection = cloudValue >= 0 ? 'buy' : 'sell';
+      }
+    }
+    tradeDirection = finalDirection;
+    tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold}) λ=${lambda.toFixed(2)}`;
+  }
+
+  if (shouldThrottleByTraining()){
+    tradeDirection = 'flat';
+    tradeDirectionDiv.style.background = '#555555';
+    tradeDirectionDiv.innerHTML = `TRAINING (${botState.cloud.mode})`;
+  }
 /* [PORTFOLIO GATE v2 SAFE] — trend/mean-reversion switch + EV gate + one-per-minute aggregation */
 (function(){
   try{
@@ -2267,8 +3146,15 @@ function tradeLogic(){
         scoreDiff: scoreDifference,
         threshold: adjustedThreshold,
         // NEW: запоминаем активные сигналы, по которым принималось решение
-        signalKeys: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : []
+        signalKeys: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : [],
+        tsOpen: Date.now(),
+        asset: symbolName,
+        timeframe: currentTF,
+        cloudMode: botState.cloud.mode,
+        cloudLambda: botState.cloud.lambda,
+        cloudSignals: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : []
       };
+      try{ currentTrade.payout = typeof getPayoutPercent === 'function' ? getPayoutPercent() : undefined; }catch(_){ }
 
       if (enteringTrade) return;
       enteringTrade = true;
@@ -2279,6 +3165,8 @@ function tradeLogic(){
 
         isTradeOpen = true;
         lastTradeTime = time;
+
+        if (enableCloud){ cloudRecordTradeOpen(); }
 
         if (typeof logTradeOpen === 'function') logTradeOpen(currentTrade);
         betHistory.push(currentTrade);
@@ -2408,6 +3296,7 @@ setInterval(renderChart, 1000);
 setInterval(queryPrice, 100);
 _attachDealsObserver();
 try{ prepareArmedForStep(currentBetStep, 'startup'); }catch(e){}
+maybeInitCloud();
 
 })();
 

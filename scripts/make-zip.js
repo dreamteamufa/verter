@@ -4,9 +4,12 @@ import path from "path";
 import { deflateRawSync } from "zlib";
 
 const OUT_DIR = "build";
-const SOURCE_FILE = path.join("src", "Verter.user.js");
 const TARGET_ZIP = path.join(OUT_DIR, "Verter_SAFE.zip");
-const FILE_NAME = "Verter.user.js";
+const FILES = [
+  { path: path.join("src", "Verter.user.js"), name: "Verter.user.js" },
+  { path: path.join("src", "cloudstats_s1.js"), name: "cloudstats_s1.js" },
+  { path: "CloudStats_s1_README.txt", name: "CloudStats_s1_README.txt" }
+];
 
 function toDosTime(date){
   const d = new Date(date);
@@ -42,65 +45,83 @@ function crc32(buffer){
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 
-const fileBuffer = fs.readFileSync(SOURCE_FILE);
-const stats = fs.statSync(SOURCE_FILE);
-const compressed = deflateRawSync(fileBuffer);
-const crc = crc32(fileBuffer);
-const modTime = toDosTime(stats.mtime);
-const modDate = toDosDate(stats.mtime);
-const nameBuffer = Buffer.from(FILE_NAME, "utf8");
+const entries = FILES.map((file) => {
+  const buffer = fs.readFileSync(file.path);
+  const stats = fs.statSync(file.path);
+  return {
+    name: file.name,
+    buffer,
+    compressed: deflateRawSync(buffer),
+    crc: crc32(buffer),
+    modTime: toDosTime(stats.mtime),
+    modDate: toDosDate(stats.mtime)
+  };
+});
 
-const localHeader = Buffer.alloc(30 + nameBuffer.length);
 let offset = 0;
-localHeader.writeUInt32LE(0x04034b50, offset); offset += 4;
-localHeader.writeUInt16LE(20, offset); offset += 2;
-localHeader.writeUInt16LE(0, offset); offset += 2;
-localHeader.writeUInt16LE(8, offset); offset += 2;
-localHeader.writeUInt16LE(modTime, offset); offset += 2;
-localHeader.writeUInt16LE(modDate, offset); offset += 2;
-localHeader.writeUInt32LE(crc, offset); offset += 4;
-localHeader.writeUInt32LE(compressed.length, offset); offset += 4;
-localHeader.writeUInt32LE(fileBuffer.length, offset); offset += 4;
-localHeader.writeUInt16LE(nameBuffer.length, offset); offset += 2;
-localHeader.writeUInt16LE(0, offset); offset += 2;
-nameBuffer.copy(localHeader, offset);
+const localParts = [];
+const centralParts = [];
 
-const centralHeader = Buffer.alloc(46 + nameBuffer.length);
-offset = 0;
-centralHeader.writeUInt32LE(0x02014b50, offset); offset += 4;
-centralHeader.writeUInt16LE(0x0014, offset); offset += 2;
-centralHeader.writeUInt16LE(20, offset); offset += 2;
-centralHeader.writeUInt16LE(0, offset); offset += 2;
-centralHeader.writeUInt16LE(8, offset); offset += 2;
-centralHeader.writeUInt16LE(modTime, offset); offset += 2;
-centralHeader.writeUInt16LE(modDate, offset); offset += 2;
-centralHeader.writeUInt32LE(crc, offset); offset += 4;
-centralHeader.writeUInt32LE(compressed.length, offset); offset += 4;
-centralHeader.writeUInt32LE(fileBuffer.length, offset); offset += 4;
-centralHeader.writeUInt16LE(nameBuffer.length, offset); offset += 2;
-centralHeader.writeUInt16LE(0, offset); offset += 2;
-centralHeader.writeUInt16LE(0, offset); offset += 2;
-centralHeader.writeUInt16LE(0, offset); offset += 2;
-centralHeader.writeUInt16LE(0, offset); offset += 2;
-centralHeader.writeUInt32LE(0, offset); offset += 4;
-centralHeader.writeUInt32LE(0, offset); offset += 4;
-nameBuffer.copy(centralHeader, offset);
+entries.forEach((entry) => {
+  const nameBuffer = Buffer.from(entry.name, "utf8");
+  const localHeader = Buffer.alloc(30 + nameBuffer.length);
+  let ptr = 0;
+  localHeader.writeUInt32LE(0x04034b50, ptr); ptr += 4;
+  localHeader.writeUInt16LE(20, ptr); ptr += 2;
+  localHeader.writeUInt16LE(0, ptr); ptr += 2;
+  localHeader.writeUInt16LE(8, ptr); ptr += 2;
+  localHeader.writeUInt16LE(entry.modTime, ptr); ptr += 2;
+  localHeader.writeUInt16LE(entry.modDate, ptr); ptr += 2;
+  localHeader.writeUInt32LE(entry.crc, ptr); ptr += 4;
+  localHeader.writeUInt32LE(entry.compressed.length, ptr); ptr += 4;
+  localHeader.writeUInt32LE(entry.buffer.length, ptr); ptr += 4;
+  localHeader.writeUInt16LE(nameBuffer.length, ptr); ptr += 2;
+  localHeader.writeUInt16LE(0, ptr); ptr += 2;
+  nameBuffer.copy(localHeader, ptr);
 
-const centralDirectoryOffset = localHeader.length + compressed.length;
-const centralDirectorySize = centralHeader.length;
+  localParts.push(localHeader, entry.compressed);
+
+  const centralHeader = Buffer.alloc(46 + nameBuffer.length);
+  ptr = 0;
+  centralHeader.writeUInt32LE(0x02014b50, ptr); ptr += 4;
+  centralHeader.writeUInt16LE(0x0014, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(20, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(0, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(8, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(entry.modTime, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(entry.modDate, ptr); ptr += 2;
+  centralHeader.writeUInt32LE(entry.crc, ptr); ptr += 4;
+  centralHeader.writeUInt32LE(entry.compressed.length, ptr); ptr += 4;
+  centralHeader.writeUInt32LE(entry.buffer.length, ptr); ptr += 4;
+  centralHeader.writeUInt16LE(nameBuffer.length, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(0, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(0, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(0, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(0, ptr); ptr += 2;
+  centralHeader.writeUInt32LE(0, ptr); ptr += 4;
+  centralHeader.writeUInt32LE(offset, ptr); ptr += 4;
+  nameBuffer.copy(centralHeader, ptr);
+
+  offset += localHeader.length + entry.compressed.length;
+  centralParts.push(centralHeader);
+});
+
+const centralDirectoryOffset = offset;
+const centralDirectory = Buffer.concat(centralParts);
+const centralDirectorySize = centralDirectory.length;
 
 const endRecord = Buffer.alloc(22);
-offset = 0;
-endRecord.writeUInt32LE(0x06054b50, offset); offset += 4;
-endRecord.writeUInt16LE(0, offset); offset += 2;
-endRecord.writeUInt16LE(0, offset); offset += 2;
-endRecord.writeUInt16LE(1, offset); offset += 2;
-endRecord.writeUInt16LE(1, offset); offset += 2;
-endRecord.writeUInt32LE(centralDirectorySize, offset); offset += 4;
-endRecord.writeUInt32LE(centralDirectoryOffset, offset); offset += 4;
-endRecord.writeUInt16LE(0, offset);
+let endPtr = 0;
+endRecord.writeUInt32LE(0x06054b50, endPtr); endPtr += 4;
+endRecord.writeUInt16LE(0, endPtr); endPtr += 2;
+endRecord.writeUInt16LE(0, endPtr); endPtr += 2;
+endRecord.writeUInt16LE(entries.length, endPtr); endPtr += 2;
+endRecord.writeUInt16LE(entries.length, endPtr); endPtr += 2;
+endRecord.writeUInt32LE(centralDirectorySize, endPtr); endPtr += 4;
+endRecord.writeUInt32LE(centralDirectoryOffset, endPtr); endPtr += 4;
+endRecord.writeUInt16LE(0, endPtr);
 
-const zipBuffer = Buffer.concat([localHeader, compressed, centralHeader, endRecord]);
+const zipBuffer = Buffer.concat([...localParts, centralDirectory, endRecord]);
 fs.writeFileSync(TARGET_ZIP, zipBuffer);
 
 console.log("✅ Build: build/Verter_SAFE.zip ready");
