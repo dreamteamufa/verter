@@ -23,90 +23,29 @@ try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 const MG_WARMUP_TRADES = 0;
 
 
-/* ====== SAFE KEYS CONFIGURATION ====== */
-var SAFE_KEYS_CONFIG = {
-  amountSelectors: [
-    'input.trade-input__value',
-    '.trade-input input',
-    '.trade-amount input',
-    '.trade-amount__value input',
-    'input[name="amount"]',
-    'input[data-name="amount"]',
-    '.amount-input input',
-    '.amount-input__value',
-    '.trade-amount__input',
-    '.trade-amount__field input',
-    '.input-amount input'
-  ],
-  balanceSelectors: [
-    '.js-hd.js-balance-real-USD',
-    '.js-hd.js-balance-demo',
-    '.balance .amount',
-    '.balance-value',
-    '.header-balance__value'
-  ],
-  buySelectors: [
-    'button.trade-button--buy',
-    'button[data-test="trade-button-buy"]',
-    '.trade-button-buy',
-    '.deal-button--up'
-  ],
-  sellSelectors: [
-    'button.trade-button--sell',
-    'button[data-test="trade-button-sell"]',
-    '.trade-button-sell',
-    '.deal-button--down'
-  ],
+/* ====== SAFE KEYS BLIND CONFIGURATION ====== */
+var SAFE_KEYS_BLIND = {
   STEP_DELAY_MS: 55,
-  PHASE_PAUSE_MS: 130,
+  BATCH_PAUSE_MS: 100,
   USE_SHIFT_FOR_RESET: true,
-  USE_SHIFT_FOR_GROSS_SET: true,
-  MAX_BALANCE_PCT: 0.10,
-  MAX_ABS_BET: 500,
-  RESET_MAX_TICKS: 400,
-  SET_MAX_TICKS: 500,
-  READ_RETRIES: 6,
-  SET_RETRIES: 4,
-  STALE_TIMEOUT_SEC: 30,
-  MICRO_ADJUST_MAX_MS: 150,
-  TOLERANCE: 0.05,
-  SHIFT_BUFFER_STEPS: 3,
-  BALANCE_DIRTY_THRESHOLD: 0.0075,
-  RESET_SHIFT_BATCH: 6,
-  GROSS_SHIFT_BATCH: 4,
-  WATCHDOG_MS: 15000,
-  MONITOR_INTERVAL_MS: 1200,
-  DEV_EXPORT: true
+  RESET_SHIFT_A_BLOCKS: 15,
+  SHIFT_A_BLOCK_SIZE: 8,
+  RESET_A_TAIL_TICKS: 25,
+  WATCHDOG_MS: 12000,
+  THROTTLE_MS: 500
 };
 
-
-/* ====== SAFE KEY PIPELINE (ARMED PREPARATION) ====== */
-var SafeKeyPipeline = (function(){
+var safeBlind = (function(){
+  'use strict';
   var defaults = {
-    amountSelectors: [],
-    balanceSelectors: [],
-    buySelectors: [],
-    sellSelectors: [],
     STEP_DELAY_MS: 55,
-    PHASE_PAUSE_MS: 130,
+    BATCH_PAUSE_MS: 100,
     USE_SHIFT_FOR_RESET: true,
-    USE_SHIFT_FOR_GROSS_SET: true,
-    RESET_SHIFT_BATCH: 6,
-    GROSS_SHIFT_BATCH: 4,
-    MAX_BALANCE_PCT: 0.10,
-    MAX_ABS_BET: 500,
-    RESET_MAX_TICKS: 400,
-    SET_MAX_TICKS: 500,
-    READ_RETRIES: 6,
-    SET_RETRIES: 4,
-    STALE_TIMEOUT_SEC: 30,
-    MICRO_ADJUST_MAX_MS: 150,
-    TOLERANCE: 0.05,
-    SHIFT_BUFFER_STEPS: 3,
-    BALANCE_DIRTY_THRESHOLD: 0.0075,
-    WATCHDOG_MS: 15000,
-    MONITOR_INTERVAL_MS: 1200,
-    DEV_EXPORT: false
+    RESET_SHIFT_A_BLOCKS: 15,
+    SHIFT_A_BLOCK_SIZE: 8,
+    RESET_A_TAIL_TICKS: 25,
+    WATCHDOG_MS: 12000,
+    THROTTLE_MS: 500
   };
 
   function assignDefaults(cfg){
@@ -122,621 +61,237 @@ var SafeKeyPipeline = (function(){
     return merged;
   }
 
-  var config = assignDefaults(typeof SAFE_KEYS_CONFIG !== 'undefined' ? SAFE_KEYS_CONFIG : null);
-
-  var detection = {
-    amountEl: null,
-    balanceEl: null,
-    buyEl: null,
-    sellEl: null
-  };
-
-  var calibration = {
-    calibrated: false,
-    stepNormal: null,
-    stepShift: null,
-    lastCalibratedAt: 0
-  };
+  var config = assignDefaults(typeof SAFE_KEYS_BLIND !== 'undefined' ? SAFE_KEYS_BLIND : null);
 
   var state = {
     status: 'IDLE',
-    armedAmount: null,
+    step: 0,
+    pressCount: 0,
+    amount: null,
     preparedAt: 0,
-    lastTarget: null,
-    dirtyReason: null,
-    isSettingBet: false,
+    isPreparing: false,
     throttleUntil: 0,
-    lastBalance: null,
-    lastAmount: null
+    step0PressCount: null
   };
 
   var indicatorUpdater = null;
-  var monitorTimer = null;
   var watchdogTimer = null;
 
   function now(){ return Date.now(); }
 
-  function once(fn){
-    var called = false;
-    return function(){
-      if (called) return;
-      called = true;
-      fn.apply(null, arguments);
+  function log(){
+    try{ console.log.apply(console, arguments); }catch(_){ }
+  }
+
+  function warn(){
+    try{ console.warn.apply(console, arguments); }catch(_){ }
+  }
+
+  function pressKey(letter, opts){
+    if (!letter) return;
+    var options = opts || {};
+    var key = String(letter).toUpperCase();
+    if (!key) return;
+    var code = key.charCodeAt(0);
+    var eventInit = {
+      key: key,
+      code: 'Key' + key,
+      keyCode: code,
+      which: code,
+      shiftKey: !!options.shift,
+      bubbles: true,
+      cancelable: true
     };
-  }
-
-  function clamp(value, min, max){
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
-  }
-
-  function detectFirst(list){
-    if (!list) return null;
-    for (var i = 0; i < list.length; i++){
-      try{
-        var el = document.querySelector(list[i]);
-        if (el) return el;
-      }catch(e){}
-    }
-    return null;
-  }
-
-  function parseDomNumber(val){
-    if (val === null || val === undefined) return null;
-    if (typeof val === 'number'){
-      if (isNaN(val)) return null;
-      return val;
-    }
-    var str = String(val);
-    str = str.replace(/[^0-9,.-]/g, '');
-    if (str.indexOf(',') > -1 && str.indexOf('.') > -1){
-      if (str.lastIndexOf('.') < str.lastIndexOf(',')){
-        str = str.replace(/\./g, '').replace(',', '.');
-      } else {
-        str = str.replace(/,/g, '');
-      }
-    } else if (str.indexOf(',') > -1){
-      str = str.replace(/,/g, '.');
-    }
-    var num = parseFloat(str);
-    if (isNaN(num)) return null;
-    return num;
-  }
-
-  function readElementNumber(el){
-    if (!el) return null;
-    var val = null;
     try{
-      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') val = el.value;
-      else val = el.textContent || el.innerText;
-    }catch(e){ return null; }
-    return parseDomNumber(val);
-  }
-
-  function ensureDetection(){
-    if (!detection.amountEl) detection.amountEl = detectFirst(config.amountSelectors);
-    if (!detection.balanceEl) detection.balanceEl = detectFirst(config.balanceSelectors);
-    if (!detection.buyEl) detection.buyEl = detectFirst(config.buySelectors);
-    if (!detection.sellEl) detection.sellEl = detectFirst(config.sellSelectors);
-  }
-
-  function readAmount(){
-    ensureDetection();
-    var amount = readElementNumber(detection.amountEl);
-    if (amount === null){
-      detection.amountEl = null;
-      return null;
-    }
-    state.lastAmount = amount;
-    return amount;
-  }
-
-  function readBalance(){
-    ensureDetection();
-    var balance = readElementNumber(detection.balanceEl);
-    if (balance === null){
-      detection.balanceEl = null;
-      return null;
-    }
-    state.lastBalance = balance;
-    return balance;
-  }
-
-  function pressKey(key, opts){
-    if (!opts) opts = {};
-    var ev = { shiftKey: !!opts.shift };
-    var upper = key && key.toUpperCase ? key.toUpperCase() : key;
-    try{
-      document.dispatchEvent(new KeyboardEvent('keydown', {
-        key: upper,
-        code: 'Key'+upper,
-        keyCode: upper.charCodeAt(0),
-        which: upper.charCodeAt(0),
-        shiftKey: ev.shiftKey,
-        bubbles: true,
-        cancelable: true
-      }));
-      document.dispatchEvent(new KeyboardEvent('keyup', {
-        key: upper,
-        code: 'Key'+upper,
-        keyCode: upper.charCodeAt(0),
-        which: upper.charCodeAt(0),
-        shiftKey: ev.shiftKey,
-        bubbles: true,
-        cancelable: true
-      }));
-    }catch(e){
-      try{ emulateKey(key, { shiftKey: ev.shiftKey }); }catch(err){}
-    }
+      document.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+      document.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+    }catch(e){}
   }
 
   function updateIndicator(){
     if (typeof indicatorUpdater === 'function'){
-      try{ indicatorUpdater(getStateSnapshot()); }catch(e){}
+      try{ indicatorUpdater(getState()); }catch(_){ }
     }
   }
 
-  function setStatus(newStatus, meta){
-    state.status = newStatus;
+  function getState(){
+    return {
+      status: state.status,
+      step: state.step,
+      pressCount: state.pressCount,
+      amount: state.amount,
+      preparedAt: state.preparedAt,
+      throttleUntil: state.throttleUntil,
+      isPreparing: state.isPreparing
+    };
+  }
+
+  function setStatus(status, meta){
+    state.status = status;
     if (meta){
-      if (typeof meta.amount === 'number') state.armedAmount = meta.amount;
-      if (typeof meta.preparedAt === 'number') state.preparedAt = meta.preparedAt;
-      if (meta.dirtyReason) state.dirtyReason = meta.dirtyReason;
+      if (meta.step !== undefined) state.step = meta.step;
+      if (meta.pressCount !== undefined) state.pressCount = meta.pressCount;
+      if (meta.amount !== undefined) state.amount = meta.amount;
+      if (meta.preparedAt !== undefined) state.preparedAt = meta.preparedAt;
     }
-    if (newStatus !== 'DIRTY') state.dirtyReason = null;
     updateIndicator();
   }
 
-  function log(tag, msg){
-    var args = [];
-    args.push(tag);
-    for (var i=1;i<arguments.length;i++) args.push(arguments[i]);
-    try{ console.log.apply(console, args); }catch(e){}
-  }
-
-  function setAbort(reason){
-    log('[ABORT]', 'reason='+reason);
-    setStatus('ABORT', { dirtyReason: reason });
-  }
-
-  function markDirty(reason){
-    if (state.status === 'DIRTY' && state.dirtyReason === reason) return;
-    log('[BET][DIRTY]', 'reason='+reason);
-    setStatus('DIRTY', { dirtyReason: reason });
-    try{
-      window.dispatchEvent(new CustomEvent('safe-keys-dirty', { detail: { reason: reason, state: getStateSnapshot() } }));
-    }catch(e){}
-  }
-
-  function startWatchdog(label, done){
-    stopWatchdog();
-    watchdogTimer = setTimeout(function(){
-      watchdogTimer = null;
-      log('[ABORT]', 'reason=watchdog.'+label);
-      state.isSettingBet = false;
-      setStatus('ABORT', { dirtyReason: 'watchdog' });
-      if (typeof done === 'function') done(new Error('watchdog '+label));
-    }, config.WATCHDOG_MS);
-  }
-
-  function stopWatchdog(){
+  function clearWatchdog(){
     if (watchdogTimer){
       clearTimeout(watchdogTimer);
       watchdogTimer = null;
     }
   }
 
-  function getStateSnapshot(){
-    return {
-      status: state.status,
-      armedAmount: state.armedAmount,
-      preparedAt: state.preparedAt,
-      lastTarget: state.lastTarget,
-      dirtyReason: state.dirtyReason,
-      isSettingBet: state.isSettingBet,
-      throttleUntil: state.throttleUntil,
-      lastBalance: state.lastBalance,
-      lastAmount: state.lastAmount,
-      calibration: {
-        calibrated: calibration.calibrated,
-        stepNormal: calibration.stepNormal,
-        stepShift: calibration.stepShift,
-        lastCalibratedAt: calibration.lastCalibratedAt
-      }
-    };
+  function startWatchdog(){
+    clearWatchdog();
+    watchdogTimer = setTimeout(function(){
+      watchdogTimer = null;
+      state.isPreparing = false;
+      setStatus('ABORT', {});
+      warn('[BET][ABORT]', 'reason=watchdog');
+    }, config.WATCHDOG_MS);
   }
 
-  function setIndicatorUpdater(fn){ indicatorUpdater = fn; updateIndicator(); }
-
-  function doubleVerify(target, cb){
-    var first = readAmount();
-    if (first === null) return cb(new Error('amount-unreadable'));
-    setTimeout(function(){
-      var second = readAmount();
-      if (second === null) return cb(new Error('amount-unreadable'));
-      var diff1 = Math.abs(first - target);
-      var diff2 = Math.abs(second - target);
-      if (diff1 <= config.TOLERANCE && diff2 <= config.TOLERANCE){
-        log('[BET][SET_OK]', 'final=$'+target.toFixed(2), 'tol='+config.TOLERANCE);
-        state.armedAmount = second;
-        state.preparedAt = now();
-        setStatus('ARMED', { amount: second, preparedAt: state.preparedAt });
-        log('[ARMED]', 'amount=$'+second.toFixed(2), 't='+new Date(state.preparedAt).toISOString());
-        cb(null, second);
+  function pressRepeated(key, times, opts, delay, done){
+    var total = Math.max(0, times|0);
+    var stepDelay = typeof delay === 'number' ? delay : config.STEP_DELAY_MS;
+    if (typeof done !== 'function') done = function(){};
+    if (!total){
+      return setTimeout(done, stepDelay);
+    }
+    var index = 0;
+    function tick(){
+      pressKey(key, opts);
+      index++;
+      if (index >= total){
+        setTimeout(done, stepDelay);
       } else {
-        cb(new Error('double-verify-failed'));
+        setTimeout(tick, stepDelay);
       }
-    }, config.PHASE_PAUSE_MS);
+    }
+    tick();
   }
 
-  function calibrateSteps(cb){
-    if (calibration.calibrated && now() - calibration.lastCalibratedAt < 60000){
-      if (typeof cb === 'function') cb(null, calibration);
-      return;
-    }
-    var initial = readAmount();
-    if (initial === null){
-      if (typeof cb === 'function') cb(new Error('amount-unreadable'));
-      return;
-    }
-    var result = { stepNormal: null, stepShift: null };
-    function revertToInitial(next){
-      setTimeout(function(){
-        var current = readAmount();
-        if (current === null){ next(new Error('amount-unreadable')); return; }
-        var diff = current - initial;
-        if (Math.abs(diff) < 0.0001){ next(null); return; }
-        if (diff > 0){
-          var useShift = config.USE_SHIFT_FOR_RESET && calibration.stepShift && diff > (calibration.stepNormal||1) * config.SHIFT_BUFFER_STEPS;
-          pressKey('a', useShift ? { shift: true } : {});
-        } else {
-          var useShiftGrow = config.USE_SHIFT_FOR_GROSS_SET && calibration.stepShift && Math.abs(diff) > (calibration.stepNormal||1) * config.SHIFT_BUFFER_STEPS;
-          pressKey('d', useShiftGrow ? { shift: true } : {});
-        }
-        setTimeout(function(){ revertToInitial(next); }, config.STEP_DELAY_MS);
-      }, config.STEP_DELAY_MS);
-    }
-    function measureNormal(next){
-      pressKey('d');
-      setTimeout(function(){
-        var val = readAmount();
-        if (val === null){ next(new Error('amount-unreadable')); return; }
-        result.stepNormal = val - initial;
-        if (result.stepNormal < 0) result.stepNormal = Math.abs(result.stepNormal);
-        revertToInitial(next);
-      }, config.PHASE_PAUSE_MS);
-    }
-    function measureShift(next){
-      if (!config.USE_SHIFT_FOR_GROSS_SET){ next(null); return; }
-      pressKey('d', { shift: true });
-      setTimeout(function(){
-        var val = readAmount();
-        if (val === null){ next(new Error('amount-unreadable')); return; }
-        result.stepShift = val - initial;
-        if (result.stepShift < 0) result.stepShift = Math.abs(result.stepShift);
-        revertToInitial(next);
-      }, config.PHASE_PAUSE_MS);
-    }
-    measureNormal(function(err){
-      if (err){ if (typeof cb === 'function') cb(err); return; }
-      measureShift(function(err2){
-        if (err2){ if (typeof cb === 'function') cb(err2); return; }
-        calibration.stepNormal = result.stepNormal || calibration.stepNormal || 1;
-        calibration.stepShift = result.stepShift || calibration.stepShift || (calibration.stepNormal ? calibration.stepNormal*10 : null);
-        calibration.calibrated = true;
-        calibration.lastCalibratedAt = now();
-        if (typeof cb === 'function') cb(null, calibration);
+  function performReset(onDone){
+    if (typeof onDone !== 'function') onDone = function(){};
+    var blocks = config.USE_SHIFT_FOR_RESET ? config.RESET_SHIFT_A_BLOCKS : 0;
+    var blockIndex = 0;
+
+    function runTail(){
+      pressRepeated('A', config.RESET_A_TAIL_TICKS, {}, config.STEP_DELAY_MS, function(){
+        onDone(blocks);
       });
-    });
-  }
-
-  function resetToMin(opts, cb){
-    if (!cb) cb = function(){};
-    var useShift = config.USE_SHIFT_FOR_RESET;
-    if (opts && typeof opts.useShift === 'boolean') useShift = opts.useShift;
-    var ticks = 0;
-    var stableReads = 0;
-    var lastVal = null;
-    var done = once(function(err, info){
-      stopWatchdog();
-      cb(err, info);
-    });
-    startWatchdog('reset', done);
-
-    function finish(amount){
-      log('[BET][RESET_OK]', 'amount=$'+amount.toFixed(2), 'ticks='+ticks);
-      done(null, { amount: amount, ticks: ticks });
     }
 
-    function preciseLoop(){
-      if (ticks >= config.RESET_MAX_TICKS){ done(new Error('reset-max-ticks')); return; }
-      setTimeout(function(){
-        var current = readAmount();
-        if (current === null){ done(new Error('amount-unreadable')); return; }
-        if (lastVal !== null && current === lastVal){
-          stableReads++;
-          if (stableReads >= 2){ finish(current); return; }
+    function runNextBlock(){
+      if (!blocks || blockIndex >= blocks){
+        return runTail();
+      }
+      pressRepeated('A', config.SHIFT_A_BLOCK_SIZE, { shift: true }, config.STEP_DELAY_MS, function(){
+        blockIndex++;
+        if (blockIndex < blocks){
+          setTimeout(runNextBlock, config.BATCH_PAUSE_MS);
         } else {
-          stableReads = 0;
+          setTimeout(runTail, config.BATCH_PAUSE_MS);
         }
-        lastVal = current;
-        pressKey('a');
-        ticks++;
-        preciseLoop();
-      }, config.STEP_DELAY_MS);
+      });
     }
 
-    function shiftBatch(batchLeft){
-      if (batchLeft <= 0){
-        setTimeout(function(){
-          var current = readAmount();
-          if (current === null){ done(new Error('amount-unreadable')); return; }
-          lastVal = current;
-          preciseLoop();
-        }, config.PHASE_PAUSE_MS);
-        return;
-      }
-      if (ticks >= config.RESET_MAX_TICKS){ done(new Error('reset-max-ticks')); return; }
-      pressKey('a', { shift: true });
-      ticks++;
-      setTimeout(function(){ shiftBatch(batchLeft-1); }, config.STEP_DELAY_MS);
-    }
-
-    function start(){
-      var current = readAmount();
-      if (current === null){ done(new Error('amount-unreadable')); return; }
-      lastVal = current;
-      if (!useShift){ preciseLoop(); return; }
-      shiftBatch(config.RESET_SHIFT_BATCH);
-    }
-
-    start();
-  }
-
-  function setToTarget(target, opts, cb){
-    if (typeof opts === 'function'){ cb = opts; opts = null; }
-    if (!cb) cb = function(){};
-    var useShift = config.USE_SHIFT_FOR_GROSS_SET;
-    if (opts && typeof opts.useShift === 'boolean') useShift = opts.useShift;
-    var ticks = 0;
-    var overShootGuard = false;
-    var done = once(function(err, amount){
-      stopWatchdog();
-      cb(err, amount);
-    });
-    startWatchdog('set', done);
-
-    function checkTarget(){
-      var val = readAmount();
-      if (val === null){ done(new Error('amount-unreadable')); return; }
-      if (val - target > config.TOLERANCE){ overShootGuard = true; done(new Error('overshoot')); return; }
-      if (Math.abs(val - target) <= config.TOLERANCE){
-        doubleVerify(target, function(err){
-          if (err){ done(err); return; }
-          done(null, target);
-        });
-        return;
-      }
-      adjust(val);
-    }
-
-    function adjust(current){
-      if (ticks >= config.SET_MAX_TICKS){ done(new Error('set-max-ticks')); return; }
-      var diff = target - current;
-      if (diff < 0){ done(new Error('overshoot')); return; }
-      var useShiftNow = false;
-      if (useShift && calibration.stepShift){
-        if (diff > calibration.stepShift * 0.8){ useShiftNow = true; }
-      } else if (useShift && !calibration.stepShift){
-        useShiftNow = diff > (calibration.stepNormal ? calibration.stepNormal * config.SHIFT_BUFFER_STEPS : 1);
-      }
-      if (useShiftNow){
-        performShiftIncrease();
-      } else {
-        performNormalIncrease();
-      }
-    }
-
-    function performNormalIncrease(){
-      pressKey('d');
-      ticks++;
-      setTimeout(checkTarget, config.PHASE_PAUSE_MS);
-    }
-
-    function performShiftIncrease(){
-      var batch = config.GROSS_SHIFT_BATCH;
-      function loop(batchLeft){
-        if (batchLeft <= 0){
-          setTimeout(checkTarget, config.PHASE_PAUSE_MS);
-          return;
-        }
-        if (ticks >= config.SET_MAX_TICKS){ done(new Error('set-max-ticks')); return; }
-        pressKey('d', { shift: true });
-        ticks++;
-        setTimeout(function(){ loop(batchLeft-1); }, config.STEP_DELAY_MS);
-      }
-      loop(batch);
-    }
-
-    setTimeout(function(){ calibrateSteps(function(){ checkTarget(); }); }, config.PHASE_PAUSE_MS);
-  }
-
-  function clampTarget(target){
-    var balance = readBalance();
-    if ((balance === null || balance === undefined) && typeof currentBalance === 'number'){
-      balance = currentBalance;
-    }
-    var balLimit = balance ? balance * config.MAX_BALANCE_PCT : target;
-    var limit = Math.min(config.MAX_ABS_BET, balLimit);
-    return clamp(target, 0, limit);
-  }
-
-  function prepareArmed(target, cb){
-    if (!cb) cb = function(){};
-    if (state.isSettingBet){
-      cb(new Error('busy'));
-      return;
-    }
-    state.isSettingBet = true;
-    var clampedTarget = clampTarget(target);
-    state.lastTarget = clampedTarget;
-    if (clampedTarget !== target){
-      log('[BET][NEXT]', 'calc=$'+target.toFixed(2), 'clamped=$'+clampedTarget.toFixed(2));
+    if (blocks){
+      runNextBlock();
     } else {
-      log('[BET][NEXT]', 'calc=$'+target.toFixed(2));
+      runTail();
     }
-    setStatus('PREPARING');
-    log('[BET][PREP_START]', 'target=$'+clampedTarget.toFixed(2), 'useShift='+config.USE_SHIFT_FOR_GROSS_SET);
-    resetToMin(null, function(err){
-      if (err){
-        state.isSettingBet = false;
-        setAbort('reset-failed');
-        cb(err);
-        return;
-      }
-      calibrateSteps(function(){
-        setToTarget(clampedTarget, function(err2){
-          state.isSettingBet = false;
-          if (err2){
-            setAbort('set-failed');
-            cb(err2);
-            return;
-          }
-          updateIndicator();
-          cb(null, clampedTarget);
-        });
-      });
+  }
+
+  function performSet(pressCount, onDone){
+    pressRepeated('D', pressCount, {}, config.STEP_DELAY_MS, function(){
+      if (typeof onDone === 'function') onDone();
     });
   }
 
-  function quickReverifyOrMicroAdjust(cb){
-    if (!cb) cb = function(){};
-    if (state.status === 'ABORT'){ cb(new Error('abort')); return; }
-    if (!state.armedAmount){ cb(new Error('no-armed')); return; }
-    var elapsed = now() - state.preparedAt;
-    if (elapsed > config.STALE_TIMEOUT_SEC * 1000){
-      log('[BET][STALE]', 'reverify');
+  function finishSuccess(step){
+    clearWatchdog();
+    state.isPreparing = false;
+    var preparedAt = now();
+    setStatus('ARMED', { step: step, preparedAt: preparedAt, amount: state.amount, pressCount: state.pressCount });
+    var amt = state.amount;
+    log('[ARMED]', 'step=' + step, 'calc=$' + (typeof amt === 'number' ? amt.toFixed(2) : '—'));
+  }
+
+  function begin(step, pressCount, meta){
+    if (typeof pressCount !== 'number' || pressCount < 0){
+      warn('[BET][PREP_SKIP]', 'reason=invalid-press', 'step=' + step, 'pressCount=' + pressCount);
+      return false;
     }
-    var startTs = now();
-    var target = state.lastTarget || state.armedAmount;
-    var current = readAmount();
-    if (current === null){ markDirty('amount-unreadable'); cb(new Error('amount-unreadable')); return; }
-    var diff = target - current;
-    if (Math.abs(diff) <= config.TOLERANCE){
-      doubleVerify(target, function(err){
-        if (err){ markDirty('reverify-failed'); cb(err); return; }
-        cb(null, target);
+    var ts = now();
+    if (state.isPreparing){
+      warn('[BET][PREP_SKIP]', 'reason=busy', 'activeStep=' + state.step);
+      return false;
+    }
+    if (state.throttleUntil && ts < state.throttleUntil){
+      warn('[BET][PREP_SKIP]', 'reason=throttle', 'wait=' + (state.throttleUntil - ts));
+      return false;
+    }
+    if (step === 0) state.step0PressCount = pressCount;
+    state.isPreparing = true;
+    state.step = step;
+    state.pressCount = pressCount;
+    if (meta && typeof meta.amount === 'number') state.amount = meta.amount;
+    setStatus('PREPARING', { step: step, pressCount: pressCount, amount: state.amount });
+    log('[BET][PREP_START]', 'step=' + step, 'pressCount=' + pressCount);
+    state.throttleUntil = ts + config.THROTTLE_MS;
+    startWatchdog();
+    performReset(function(blocksUsed){
+      log('[BET][RESET]', 'blocks=' + (blocksUsed || 0), 'tail=' + config.RESET_A_TAIL_TICKS);
+      performSet(pressCount, function(){
+        log('[BET][SET]', 'D×' + pressCount);
+        finishSuccess(step);
       });
+    });
+    return true;
+  }
+
+  function prepare(step, pressCount, meta){
+    return begin(step, pressCount, meta || {});
+  }
+
+  function prepareStep0(pressCount, meta){
+    var effective = pressCount;
+    if (typeof effective !== 'number'){
+      if (typeof state.step0PressCount === 'number') effective = state.step0PressCount;
+      else effective = 0;
+    }
+    return begin(0, effective, meta || {});
+  }
+
+  function click(side){
+    if (!side) return;
+    var dir = String(side).toLowerCase();
+    if (dir === 'buy'){
+      try{ buy(); }catch(_){ }
+    } else if (dir === 'sell'){
+      try{ sell(); }catch(_){ }
+    } else {
       return;
     }
-    var maxDuration = config.MICRO_ADJUST_MAX_MS;
-    var normalStep = calibration.stepNormal || 1;
-    var maxSteps = Math.max(1, Math.floor(maxDuration / config.STEP_DELAY_MS));
-    var stepsDone = 0;
+    log('[TRADE][CLICK]', 'side=' + dir.toUpperCase());
+    setStatus('IDLE', {});
+    state.amount = null;
+  }
 
-    function microAdjust(){
-      if (Math.abs(target - current) <= config.TOLERANCE){
-        doubleVerify(target, function(err){
-          if (err){ markDirty('reverify-failed'); cb(err); return; }
-          cb(null, target);
-        });
-        return;
-      }
-      if (now() - startTs > maxDuration || stepsDone >= maxSteps){
-        markDirty('micro-failed');
-        cb(new Error('micro-adjust-failed'));
-        return;
-      }
-      var delta = target - current;
-      if (delta < 0){
-        pressKey('a');
-      } else {
-        pressKey('d');
-      }
-      stepsDone++;
-      setTimeout(function(){
-        current = readAmount();
-        if (current === null){ markDirty('amount-unreadable'); cb(new Error('amount-unreadable')); return; }
-        microAdjust();
-      }, config.STEP_DELAY_MS);
+  return {
+    prepare: prepare,
+    prepareStep0: prepareStep0,
+    click: click,
+    getState: getState,
+    setIndicatorUpdater: function(fn){
+      indicatorUpdater = fn;
+      updateIndicator();
     }
-
-    if (Math.abs(diff) > normalStep * 4){
-      markDirty('diff-too-large');
-      cb(new Error('diff-too-large'));
-      return;
-    }
-    microAdjust();
-  }
-
-  function startMonitor(){
-    if (monitorTimer) return;
-    monitorTimer = setInterval(function(){
-      if (state.status === 'ARMED'){
-        var age = now() - state.preparedAt;
-        if (age > config.STALE_TIMEOUT_SEC * 1000){
-          markDirty('stale');
-        }
-      }
-      var amount = readAmount();
-      if (amount !== null && state.status === 'ARMED'){
-        if (Math.abs(amount - state.armedAmount) > config.TOLERANCE){
-          markDirty('amount-changed');
-        }
-      }
-      var balance = readBalance();
-      if (balance !== null && state.status === 'ARMED'){
-        if (state.lastBalance){
-          var delta = Math.abs(balance - state.lastBalance) / state.lastBalance;
-          if (delta > config.BALANCE_DIRTY_THRESHOLD){
-            markDirty('balance-changed');
-          }
-        }
-      }
-    }, config.MONITOR_INTERVAL_MS);
-  }
-
-  function setThrottle(ms){
-    state.throttleUntil = now() + ms;
-  }
-
-  function clearAbort(){
-    if (state.status === 'ABORT'){
-      setStatus('IDLE');
-    }
-  }
-
-  function init(){
-    ensureDetection();
-    startMonitor();
-  }
-
-  init();
-
-  var api = {
-    readAmount: readAmount,
-    readBalance: readBalance,
-    pressKey: pressKey,
-    resetToMin: resetToMin,
-    calibrateSteps: calibrateSteps,
-    setToTarget: setToTarget,
-    prepareArmed: prepareArmed,
-    quickReverifyOrMicroAdjust: quickReverifyOrMicroAdjust,
-    getState: getStateSnapshot,
-    setIndicatorUpdater: setIndicatorUpdater,
-    markDirty: markDirty,
-    clearAbort: clearAbort,
-    setThrottle: setThrottle
   };
-
-  try{
-    if (config.DEV_EXPORT){
-      window.__SAFE_KEYS__ = api;
-    }
-  }catch(e){}
-
-  return api;
 })();
 
 function updateArmedIndicator(state){
@@ -749,20 +304,17 @@ function updateArmedIndicator(state){
   var bg = '#2a2a2a';
   var text = 'IDLE';
   if (status === 'ARMED'){
-    var amt = typeof state.armedAmount === 'number' ? state.armedAmount : state.lastTarget;
+    var amt = (typeof state.amount === 'number') ? state.amount : null;
     var sec = state.preparedAt ? Math.max(0, Math.floor((Date.now() - state.preparedAt)/1000)) : 0;
-    text = '$' + (amt ? amt.toFixed(2) : '—') + ' • ' + sec + 's ago';
+    var stepInfo = (typeof state.step === 'number') ? ('step ' + state.step + ' • ') : '';
+    text = stepInfo + '$' + (amt != null ? amt.toFixed(2) : '—') + ' • ' + sec + 's ago';
     bg = '#1f6f2d';
   } else if (status === 'PREPARING'){
-    text = 'Preparing…';
+    var prepStep = (typeof state.step === 'number') ? ('step ' + state.step + ' • ') : '';
+    text = prepStep + 'Preparing…';
     bg = '#1d4b9b';
-  } else if (status === 'DIRTY'){
-    var reason = state.dirtyReason ? String(state.dirtyReason) : 'dirty';
-    text = 'Dirty (' + reason + ')';
-    bg = '#b38f1d';
   } else if (status === 'ABORT'){
-    var r = state.dirtyReason ? String(state.dirtyReason) : 'abort';
-    text = 'Abort (' + r + ')';
+    text = 'Abort';
     bg = '#9a1f1f';
   } else {
     text = status;
@@ -772,16 +324,7 @@ function updateArmedIndicator(state){
   if (valueEl){ valueEl.textContent = text; }
 }
 
-try{ SafeKeyPipeline.setIndicatorUpdater(updateArmedIndicator); }catch(e){}
-try{
-  window.addEventListener('safe-keys-dirty', function(ev){
-    var reason = ev && ev.detail && ev.detail.reason ? ev.detail.reason : 'auto';
-    setTimeout(function(){
-      prepareArmedForStep(currentBetStep, 'dirty-'+reason);
-    }, 300);
-  });
-}catch(e){}
-
+try{ safeBlind.setIndicatorUpdater(updateArmedIndicator); }catch(e){}
 
 /* ====== CONFIG / LIMITS / ARRAYS ====== */
 const reverse = false;
@@ -2082,7 +1625,7 @@ function addUI(){
   armedBox.innerHTML = '<span id="armed-status-label">ARMED</span><span id="armed-status-value">IDLE</span>';
   if (tradingFooter){ tradingFooter.appendChild(armedBox); }
   armedIndicatorDiv = armedBox;
-  try{ updateArmedIndicator(SafeKeyPipeline.getState()); }catch(e){}
+  try{ updateArmedIndicator(safeBlind.getState()); }catch(e){}
 
   /* Top Signals */
   const topPanel = document.createElement('div');
@@ -2343,7 +1886,6 @@ function queryPrice(){
   if (symbolName !== newSymbolName){
     symbolName = newSymbolName;
     if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
-    try{ SafeKeyPipeline.markDirty('symbol-change'); }catch(e){}
     try{ prepareArmedForStep(currentBetStep, 'symbol-change'); }catch(e){}
   }
 
@@ -2369,24 +1911,31 @@ function getBetValue(step){
   return 1;
 }
 
+function getPressCount(step){
+  for (let i=0;i<betArray.length;i++) if (step===betArray[i].step) return betArray[i].pressCount;
+  return 0;
+}
+
 function prepareArmedForStep(step, reason){
-  try{ SafeKeyPipeline.clearAbort(); }catch(e){}
   const target = getBetValue(step);
+  const pressCount = getPressCount(step);
   const cycleIndex = cyclesStats.length + 1;
   let summary = '[BET][NEXT] calc=$' + target.toFixed(2) + ' | step=' + step + ' | array=' + activeBetArrayName + ' | cycle=' + cycleIndex;
   if (reason){ summary += ' | reason=' + reason; }
   console.log(summary);
-  SafeKeyPipeline.prepareArmed(target, function(err){
-    if (err){
-      const msg = err && err.message ? err.message : String(err);
-      console.warn('[BET][PREP_FAIL]', msg);
-      if (msg && msg.indexOf('busy')>-1){
-        setTimeout(function(){ prepareArmedForStep(step, reason || 'retry'); }, 250);
-      } else {
-        setTimeout(function(){ prepareArmedForStep(step, (reason ? reason+'-retry' : 'retry')); }, 1000);
-      }
+  let started = false;
+  try{
+    if (step === 0){
+      started = safeBlind.prepareStep0(pressCount, { amount: target });
+    } else {
+      started = safeBlind.prepare(step, pressCount, { amount: target });
     }
-  });
+  }catch(e){
+    console.warn('[BET][PREP_FAIL]', e && e.message ? e.message : String(e));
+  }
+  if (!started){
+    setTimeout(function(){ prepareArmedForStep(step, reason ? reason + '-retry' : 'retry'); }, 600);
+  }
 }
 
 function smartBet(step, direction, onDone){
@@ -2403,44 +1952,26 @@ function smartBet(step, direction, onDone){
     return;
   }
 
-  const pipelineState = SafeKeyPipeline.getState();
-  if (pipelineState.status === 'DIRTY' || pipelineState.status === 'ABORT'){
-    console.warn('[ABORT] reason=pipeline-status', pipelineState.status, pipelineState.dirtyReason);
-    onDone(false, { reason: 'pipeline-'+pipelineState.status });
+  const blindState = safeBlind.getState();
+  if (!blindState || blindState.status !== 'ARMED'){
+    const status = blindState && blindState.status ? blindState.status : 'unknown';
+    console.warn('[ABORT] reason=blind-status', status);
+    onDone(false, { reason: 'blind-'+status.toLowerCase() });
     return;
   }
-  if (pipelineState.status !== 'ARMED'){
-    console.warn('[ABORT] reason=pipeline-not-armed', pipelineState.status);
-    onDone(false, { reason: 'not-armed' });
-    return;
-  }
-  if (pipelineState.throttleUntil && Date.now() < pipelineState.throttleUntil){
-    onDone(false, { reason: 'throttled' });
+  if (typeof blindState.step === 'number' && blindState.step !== step){
+    console.warn('[ABORT] reason=step-mismatch', blindState.step, step);
+    onDone(false, { reason: 'step-mismatch' });
+    try{ prepareArmedForStep(step, 'step-mismatch'); }catch(e){}
     return;
   }
 
   const targetValue = getBetValue(step);
-  if (typeof pipelineState.lastTarget === 'number' && Math.abs(pipelineState.lastTarget - targetValue) > (SAFE_KEYS_CONFIG.TOLERANCE||0.05)*2){
-    console.warn('[ABORT] reason=target-mismatch', pipelineState.lastTarget, targetValue);
-    onDone(false, { reason: 'target-mismatch' });
-    try{ prepareArmedForStep(step, 'target-mismatch'); }catch(e){}
-    return;
-  }
 
-  SafeKeyPipeline.quickReverifyOrMicroAdjust(function(err){
-    if (err){
-      console.warn('[ABORT] reason=reverify', err && err.message);
-      onDone(false, { reason: 'reverify-failed', error: err });
-      return;
-    }
-
-    profitPercentDivAdvisor.style.background = 'inherit';
-    profitPercentDivAdvisor.style.color = '#fff';
-    if (direction === 'buy') buy(); else sell();
-    console.log('[TRADE][CLICK]', 'side=' + direction.toUpperCase(), 'amount=$' + targetValue.toFixed(2));
-    SafeKeyPipeline.setThrottle(400);
-    onDone(true, { amount: targetValue, direction: direction });
-  });
+  profitPercentDivAdvisor.style.background = 'inherit';
+  profitPercentDivAdvisor.style.color = '#fff';
+  try{ safeBlind.click(direction); }catch(e){ console.warn('[ABORT] reason=blind-click', e && e.message ? e.message : e); onDone(false, { reason: 'blind-click-error', error: e }); return; }
+  onDone(true, { amount: targetValue, direction: direction });
 }
 
 function resetCycle(winStatus){
