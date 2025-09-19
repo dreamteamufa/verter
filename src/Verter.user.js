@@ -10,6 +10,20 @@
   }catch(e){}
 'use strict';
 
+  const CFG = {
+    minPayoutToTrade: 90,
+    preArmingEnabled: true,
+    preArming: {
+      prepareAbortOnGateFail: true,
+      t_prepare_ms: 2800,
+      t_rebind_ms: 1800,
+      t_candidate_ms: 1200,
+      t_gate_ms: 800,
+      t_health_ms: 250,
+      debounce_ms: 50
+    }
+  };
+
 // === Firebase CloudStats configuration ===
 const firebaseConfig = {
   apiKey: "AIzaSyC1KqNekr6GGtsBEHvvU_3Ou1TmHVQPOX4",
@@ -2777,6 +2791,9 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
       'color:#ffcc66;font-weight:600', 'color:inherit',
       st, prevStep, currentBetStep
     );
+    try{
+      console.log(`[RESULT] ${st} step:${prevStep}→${currentBetStep}  profit:${fmtMoney(pnl)}`);
+    }catch(_){ }
 
     // уведомление для внутренних подписчиков
     try {
@@ -2858,6 +2875,7 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
         });
       }
     }
+    try{ if (PreArmingController && typeof PreArmingController.onResult === 'function'){ PreArmingController.onResult(); } }catch(_){ }
   } catch (err) {
     console.error('[recordTradeResult:MG-FIX] error:', err);
   }
@@ -2896,6 +2914,7 @@ function queryPrice(){
   if (symbolName !== newSymbolName){
     symbolName = newSymbolName;
     if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
+    try{ if (PreArmingController && typeof PreArmingController.cancelPreArm === 'function'){ PreArmingController.cancelPreArm('symbol_change'); } }catch(_){ }
     try{ prepareArmedForStep(currentBetStep, 'symbol-change'); }catch(e){}
   }
 
@@ -2924,6 +2943,25 @@ function getBetValue(step){
 function getPressCount(step){
   for (let i=0;i<betArray.length;i++) if (step===betArray[i].step) return betArray[i].pressCount;
   return 0;
+}
+
+function prepareBetSize(step, direction, reason){
+  try{
+    prepareArmedForStep(step, reason || ('prearm-' + (direction || 'na')));
+    return true;
+  }catch(e){
+    console.warn('[PREP][ERROR]', e && e.message ? e.message : String(e));
+    return false;
+  }
+}
+
+function executeBet(direction){
+  const blindState = safeBlind.getState();
+  const amount = blindState && typeof blindState.amount === 'number' ? blindState.amount : getBetValue(currentBetStep);
+  const code = direction === 'sell' ? 'S' : 'W';
+  console.log(`[EXEC] ${code} size=$${isFinite(amount) ? amount.toFixed(2) : '—'}`);
+  safeBlind.click(direction);
+  return { amount };
 }
 
 function prepareArmedForStep(step, reason){
@@ -2959,7 +2997,7 @@ function smartBet(step, direction, onDone){
     profitPercentDivAdvisor.style.color = "#fff";
     profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => ' + currentProfitPercent;
     onDone(false, { reason: 'low-profit-percent' });
-    return;
+    return false;
   }
 
   const blindState = safeBlind.getState();
@@ -2967,21 +3005,28 @@ function smartBet(step, direction, onDone){
     const status = blindState && blindState.status ? blindState.status : 'unknown';
     console.warn('[ABORT] reason=blind-status', status);
     onDone(false, { reason: 'blind-'+status.toLowerCase() });
-    return;
+    return false;
   }
   if (typeof blindState.step === 'number' && blindState.step !== step){
     console.warn('[ABORT] reason=step-mismatch', blindState.step, step);
     onDone(false, { reason: 'step-mismatch' });
     try{ prepareArmedForStep(step, 'step-mismatch'); }catch(e){}
-    return;
+    return false;
   }
 
   const targetValue = getBetValue(step);
 
   profitPercentDivAdvisor.style.background = 'inherit';
   profitPercentDivAdvisor.style.color = '#fff';
-  try{ safeBlind.click(direction); }catch(e){ console.warn('[ABORT] reason=blind-click', e && e.message ? e.message : e); onDone(false, { reason: 'blind-click-error', error: e }); return; }
-  onDone(true, { amount: targetValue, direction: direction });
+  try{
+    const execMeta = executeBet(direction);
+    onDone(true, { amount: targetValue, direction: direction, execMeta });
+    return true;
+  }catch(e){
+    console.warn('[ABORT] reason=blind-click', e && e.message ? e.message : e);
+    onDone(false, { reason: 'blind-click-error', error: e });
+    return false;
+  }
 }
 
 function resetCycle(winStatus){
@@ -2994,6 +3039,420 @@ function resetCycle(winStatus){
     totalProfitDiv.style.background = totalProfit<0?redColor:(totalProfit>0?greenColor:'inherit');
   }
   try{ prepareArmedForStep(currentBetStep, 'cycle-reset'); }catch(e){}
+}
+
+const PreArmingController = (function(){
+  const STATES = {
+    IDLE: 'IDLE',
+    PREPARE_SIZE: 'PREPARE_SIZE',
+    WAIT_SIGNAL: 'WAIT_SIGNAL',
+    EXECUTE: 'EXECUTE',
+    RESULT: 'RESULT'
+  };
+
+  let stage = STATES.IDLE;
+  let ctx;
+  let schedulerTimer = null;
+  const tasks = [];
+
+  function now(){ return Date.now(); }
+
+  function resetContext(){
+    ctx = {
+      step: null,
+      pressCount: 0,
+      amount: 0,
+      direction: 'flat',
+      allow: false,
+      payout: NaN,
+      EV: null,
+      sys: 'NONE',
+      diff: null,
+      thr: null,
+      t0: 0,
+      startedAt: 0,
+      candidateTs: 0,
+      candidateLogged: false,
+      gateLogged: false,
+      onExecute: null,
+      payload: null
+    };
+  }
+
+  resetContext();
+
+  function setStage(next){ stage = next; }
+
+  function clearScheduler(){
+    tasks.length = 0;
+    if (schedulerTimer){
+      clearTimeout(schedulerTimer);
+      schedulerTimer = null;
+    }
+  }
+
+  function pump(){
+    if (schedulerTimer) return;
+    const runner = function(){
+      schedulerTimer = null;
+      const ts = now();
+      while (tasks.length && tasks[0].at <= ts){
+        const task = tasks.shift();
+        try{ task.fn(); }catch(err){ console.warn('[PreArm] task error', task.tag, err); }
+      }
+      if (tasks.length){
+        const delay = Math.max(10, tasks[0].at - now());
+        schedulerTimer = setTimeout(runner, delay);
+      }
+    };
+    runner();
+  }
+
+  function schedule(tag, at, fn){
+    const ts = Math.max(now(), at);
+    tasks.push({ tag, at: ts, fn });
+    tasks.sort((a,b)=>a.at - b.at);
+    pump();
+  }
+
+  function computeT0(){
+    try{
+      const chs = window.__CHS;
+      if (chs && chs.lastM1CloseTs){
+        const predicted = chs.lastM1CloseTs + 60000;
+        if (predicted > now()) return predicted;
+      }
+    }catch(_){ }
+    return now() + 3000;
+  }
+
+  function formatNum(val){
+    if (val == null) return '—';
+    if (typeof val === 'number' && isFinite(val)){
+      if (Math.abs(val) >= 100) return val.toFixed(0);
+      if (Math.abs(val) >= 10) return val.toFixed(1);
+      return val.toFixed(2);
+    }
+    return String(val);
+  }
+
+  function rebindDom(){
+    let ok = true;
+    try{
+      const tooltipList = document.getElementsByClassName('tooltip-text') || [];
+      const text = 'Winnings amount you receive';
+      let rebound = null;
+      for (let i=0;i<tooltipList.length;i++){
+        const el = tooltipList[i];
+        const txt = (el.textContent || el.innerText || '');
+        if (txt && txt.indexOf(text) !== -1){ rebound = el; break; }
+      }
+      if (rebound){ targetElement2 = rebound; } else { ok = false; }
+    }catch(e){ ok = false; }
+    try{
+      const canvas = document.getElementById('chart-canvas');
+      if (canvas){ chartCanvas = canvas; } else { ok = false; }
+    }catch(e){ ok = false; }
+    try{ if (typeof updateTradingSymbolUI === 'function') updateTradingSymbolUI(); }catch(_){ }
+    try{ if (typeof updateWarmupUI === 'function') updateWarmupUI(); }catch(_){ }
+    return ok && !!targetElement2 && !!chartCanvas;
+  }
+
+  function healthCheck(meta){
+    const snapshot = meta || ctx;
+    const ts = now();
+    if (isTradeOpen){ return { ok:false, reason:'trade-open' }; }
+    if (typeof isPaused === 'function' && isPaused()){ return { ok:false, reason:'paused' }; }
+    if (ts - lastTradeTime < minTimeBetweenTrades){ return { ok:false, reason:'min-delay' }; }
+    if (snapshot && snapshot.allow === false){ return { ok:false, reason:'allow' }; }
+    let payout = snapshot && snapshot.payout;
+    if (!isFinite(payout)){
+      try{ payout = getPayoutPercent(); }catch(_){ }
+    }
+    if (!isFinite(payout)){ return { ok:false, reason:'payout-na' }; }
+    if (payout < CFG.minPayoutToTrade){ return { ok:false, reason:'payout-low', payout }; }
+    const autoState = (window.__autoSwitch && window.__autoSwitch.state) || {};
+    if (autoState.switchInProgress){ return { ok:false, reason:'switching' }; }
+    if (!autoState.warmupReady){ return { ok:false, reason:'warmup' }; }
+    if (ts < (autoState.cooldownUntil || 0)){ return { ok:false, reason:'cooldown' }; }
+    if (typeof isReady === 'function'){
+      try{ if (!isReady()){ return { ok:false, reason:'chs-warmup' }; } }catch(_){ }
+    }
+    if (!targetElement2){ return { ok:false, reason:'dom-price' }; }
+    if (!balanceDiv){ return { ok:false, reason:'dom-balance' }; }
+    if (!chartCanvas){ return { ok:false, reason:'dom-chart' }; }
+    return { ok:true, payout, allow: snapshot ? snapshot.allow : undefined, EV: snapshot ? snapshot.EV : undefined, sys: snapshot ? snapshot.sys : undefined };
+  }
+
+  function cancel(reason){
+    const stageName = stage;
+    clearScheduler();
+    resetContext();
+    setStage(STATES.IDLE);
+    if (reason){ console.warn(`[CANCEL] reason=${reason} stage=${stageName}`); }
+  }
+
+  function runPrepare(){
+    setStage(STATES.PREPARE_SIZE);
+    const gate = healthCheck();
+    if (!gate.ok && CFG.preArming.prepareAbortOnGateFail){
+      cancel(gate.reason || 'gate');
+      return;
+    }
+    prepareBetSize(ctx.step, ctx.direction, 'prearm');
+  }
+
+  function runRebind(){
+    if (!rebindDom()){
+      cancel('rebind');
+      return;
+    }
+    const gate = healthCheck();
+    if (!gate.ok){
+      cancel(gate.reason || 'gate');
+    }
+  }
+
+  function runCandidate(){
+    setStage(STATES.WAIT_SIGNAL);
+    ctx.candidateTs = now();
+    if (!ctx.direction || ctx.direction === 'flat'){
+      cancel('no-direction');
+      return;
+    }
+    if (!ctx.candidateLogged){
+      console.log(`[ARMED] dir=${ctx.direction} diff=${formatNum(ctx.diff)} thr=${formatNum(ctx.thr)}`);
+      ctx.candidateLogged = true;
+    }
+  }
+
+  function runGate(){
+    const gate = healthCheck();
+    if (!gate.ok){
+      cancel(gate.reason || 'gate');
+      return;
+    }
+    if (!ctx.gateLogged){
+      const payout = isFinite(gate.payout) ? gate.payout.toFixed(1) + '%' : 'unknown';
+      const ev = ctx.EV != null && isFinite(ctx.EV) ? ctx.EV.toFixed(4) : 'unknown';
+      const allow = gate.allow === undefined ? (ctx.allow ? 'true' : 'false') : String(gate.allow);
+      const sys = gate.sys || ctx.sys || 'NONE';
+      console.log(`[GATE] payout=${payout} EV=${ev} allow=${allow} (sys=${sys})`);
+      ctx.gateLogged = true;
+    }
+    if (typeof shouldTradeNow === 'function'){
+      try{ if (!shouldTradeNow()){ cancel('minute-limit'); } }catch(_){ }
+    }
+  }
+
+  function runHealth(){
+    const gate = healthCheck();
+    if (!gate.ok){
+      cancel(gate.reason || 'health');
+      return;
+    }
+    if (typeof shouldTradeNow === 'function'){
+      try{ if (!shouldTradeNow()){ cancel('minute-limit'); } }catch(_){ }
+    }
+  }
+
+  function runExecute(){
+    const gate = healthCheck();
+    if (!gate.ok){
+      cancel(gate.reason || 'execute');
+      return;
+    }
+    if (typeof shouldTradeNow === 'function'){
+      try{ if (!shouldTradeNow()){ cancel('minute-limit'); return; } }catch(_){ }
+    }
+    if (typeof ctx.onExecute !== 'function'){
+      cancel('no-executor');
+      return;
+    }
+    setStage(STATES.EXECUTE);
+    try{
+      ctx.onExecute();
+      if (typeof markTradeDecision === 'function'){
+        try{ markTradeDecision(); }catch(_){ }
+      }
+    }catch(err){
+      console.warn('[PreArm][EXEC] error', err);
+      cancel('exec-error');
+    }
+  }
+
+  function startPreArm(step){
+    resetContext();
+    ctx.step = step;
+    ctx.pressCount = getPressCount(step);
+    ctx.amount = getBetValue(step);
+    ctx.startedAt = now();
+    ctx.t0 = computeT0();
+    setStage(STATES.PREPARE_SIZE);
+    console.log(`[PREP] step=${step} pressCount=${ctx.pressCount}`);
+    schedule('prepare', ctx.t0 - CFG.preArming.t_prepare_ms, runPrepare);
+    schedule('rebind', ctx.t0 - CFG.preArming.t_rebind_ms, runRebind);
+    schedule('candidate', ctx.t0 - CFG.preArming.t_candidate_ms, runCandidate);
+    schedule('gate', ctx.t0 - CFG.preArming.t_gate_ms, runGate);
+    schedule('health', ctx.t0 - CFG.preArming.t_health_ms, runHealth);
+    schedule('execute', ctx.t0, runExecute);
+    return true;
+  }
+
+  function ensure(meta){
+    if (!CFG.preArmingEnabled){
+      if (stage !== STATES.IDLE){ cancel('prearm-disabled'); }
+      return false;
+    }
+    if (!meta){ return false; }
+    ctx.direction = meta.direction || ctx.direction;
+    ctx.allow = !!meta.allow;
+    ctx.payout = meta.payout != null ? meta.payout : ctx.payout;
+    ctx.EV = meta.EV != null ? meta.EV : ctx.EV;
+    ctx.sys = meta.sys || ctx.sys;
+    ctx.diff = meta.diff != null ? meta.diff : ctx.diff;
+    ctx.thr = meta.thr != null ? meta.thr : ctx.thr;
+    ctx.onExecute = meta.onExecute || ctx.onExecute;
+    ctx.payload = meta.payload || ctx.payload;
+
+    if (stage === STATES.IDLE){
+      if (ctx.direction === 'flat' || !ctx.allow){ return false; }
+      return startPreArm(meta.step);
+    }
+
+    if (meta.step != null && ctx.step != null && meta.step !== ctx.step){
+      cancel('step-change');
+      if (ctx.direction !== 'flat' && ctx.allow){
+        return startPreArm(meta.step);
+      }
+      return false;
+    }
+
+    if (ctx.direction === 'flat' || !ctx.allow){
+      cancel(ctx.direction === 'flat' ? 'direction-flat' : 'allow-false');
+      return false;
+    }
+
+    return true;
+  }
+
+  function execOrder(dir){
+    if (dir && dir !== ctx.direction){ ctx.direction = dir; }
+    runExecute();
+  }
+
+  function cancelPreArm(reason){ cancel(reason || 'manual'); }
+
+  function onResult(){
+    setStage(STATES.RESULT);
+    clearScheduler();
+    resetContext();
+    setStage(STATES.IDLE);
+  }
+
+  function state(){ return stage; }
+
+  function stats(){
+    const base = { state: stage };
+    if (ctx){
+      base.step = ctx.step;
+      base.direction = ctx.direction;
+      base.allow = ctx.allow;
+      base.payout = ctx.payout;
+      base.EV = ctx.EV;
+      base.t0 = ctx.t0;
+    }
+    return base;
+  }
+
+  const api = {
+    consider: ensure,
+    startPreArm,
+    cancelPreArm,
+    execOrder,
+    healthCheck,
+    rebindDom,
+    onResult,
+    state,
+    stats
+  };
+
+  try{
+    window.__preArm = Object.assign(window.__preArm || {}, api);
+  }catch(_){ }
+
+  return api;
+})();
+
+let pendingTradeMeta = null;
+
+function buildTradeSnapshot(meta){
+  const direction = meta && meta.direction ? meta.direction : 'flat';
+  const step = meta && typeof meta.step === 'number' ? meta.step : currentBetStep;
+  const signals = Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : [];
+  const trade = {
+    time: (meta && meta.hTime) ? meta.hTime : humanTime(time),
+    betTime: betTimeDiv.textContent,
+    openPrice: globalPrice,
+    step,
+    betValue: getBetValue(step),
+    betDirection: direction,
+    shortEMA: window.currentShortEMA,
+    longEMA: window.currentLongEMA,
+    emaDiff: (((window.currentShortEMA)!=null ? (window.currentShortEMA) : (0))) - (((window.currentLongEMA)!=null ? (window.currentLongEMA) : (0))),
+    rsi: window.currentRSI,
+    bullishScore: meta && meta.bullishScore != null ? meta.bullishScore : (window.bullishScore || 0),
+    bearishScore: meta && meta.bearishScore != null ? meta.bearishScore : (window.bearishScore || 0),
+    scoreDiff: meta && meta.diff != null ? meta.diff : Math.abs((window.bullishScore||0) - (window.bearishScore||0)),
+    threshold: meta && meta.thr != null ? meta.thr : (11 - signalSensitivity),
+    signalKeys: signals,
+    tsOpen: Date.now(),
+    asset: symbolName,
+    timeframe: currentTF,
+    cloudMode: botState.cloud.mode,
+    cloudLambda: botState.cloud.lambda,
+    cloudSignals: signals.slice(0)
+  };
+  try{ trade.payout = typeof getPayoutPercent === 'function' ? getPayoutPercent() : undefined; }catch(_){ }
+  return trade;
+}
+
+function executePlannedTrade(meta){
+  if (!meta) return false;
+  if (cyclesToPlay <= 0) return false;
+  if (!autoTradingEnabled) return false;
+  if (meta.direction === 'flat') return false;
+  if (isTradeOpen) return false;
+  if (enteringTrade) return false;
+
+  const tradeCard = buildTradeSnapshot(meta);
+  const step = meta.step != null ? meta.step : currentBetStep;
+  const direction = meta.direction;
+
+  enteringTrade = true;
+  smartBet(step, direction, function(placed, info){
+    enteringTrade = false;
+    if (!placed){
+      try{ if (PreArmingController && typeof PreArmingController.cancelPreArm === 'function'){ PreArmingController.cancelPreArm('exec-abort'); } }catch(_){ }
+      return;
+    }
+    isTradeOpen = true;
+    lastTradeTime = time;
+    window.lastTradeDirection = direction;
+    if (info && info.execMeta && info.execMeta.amount != null){
+      try{ tradeCard.betValue = info.execMeta.amount; }catch(_){ }
+    }
+    if (enableCloud){ cloudRecordTradeOpen(); }
+    if (typeof logTradeOpen === 'function') logTradeOpen(tradeCard);
+    betHistory.push(tradeCard);
+    totalWager += tradeCard.betValue;
+    wagerDiv.innerHTML = totalWager;
+    maxStepInCycle = Math.max(maxStepInCycle, tradeCard.step);
+    maxStepDiv.innerHTML = maxStepInCycle;
+    window.activeSignalsThisTrade = tradeCard.signalKeys.slice(0);
+    pendingTradeMeta = null;
+  });
+  return true;
 }
 
 function tradeLogic(){
@@ -3068,6 +3527,10 @@ function tradeLogic(){
     tradeDirectionDiv.style.background = '#555555';
     tradeDirectionDiv.innerHTML = `TRAINING (${botState.cloud.mode})`;
   }
+  let gateAllow = false;
+  let gateSys = 'NONE';
+  let gatePayout = NaN;
+  let gateEV = null;
 /* [PORTFOLIO GATE v2 SAFE] — trend/mean-reversion switch + EV gate + one-per-minute aggregation */
 (function(){
   try{
@@ -3104,6 +3567,11 @@ function tradeLogic(){
     const EV = (p_est!=null && r!=null) ? (p_est*r - (1-p_est)) : null;
 
     if (EV != null && EV < 0){ allow = false; }
+
+    gateAllow = allow;
+    gateSys = sys;
+    gatePayout = payout;
+    gateEV = EV;
 
     if (!allow){
       tradeDirection = 'flat';
@@ -3295,59 +3763,33 @@ function tradeLogic(){
   }
 
   // ВХОД В СДЕЛКУ
-  if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
-    // открываем ТОЛЬКО если сделки нет
-    if (!isTradeOpen){
-      // сформируем карточку сделки заранее
-      const currentTrade = {
-        time: hTime,
-        betTime: betTime,
-        openPrice: globalPrice,
-        step: currentBetStep,
-        betValue: getBetValue(currentBetStep),
-        betDirection: tradeDirection,
-        shortEMA: window.currentShortEMA,
-        longEMA: window.currentLongEMA,
-        emaDiff: (((window.currentShortEMA)!=null ? (window.currentShortEMA) : (0))) - (((window.currentLongEMA)!=null ? (window.currentLongEMA) : (0))),
-        rsi: window.currentRSI,
-        bullishScore,
-        bearishScore,
-        scoreDiff: scoreDifference,
-        threshold: adjustedThreshold,
-        // NEW: запоминаем активные сигналы, по которым принималось решение
-        signalKeys: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : [],
-        tsOpen: Date.now(),
-        asset: symbolName,
-        timeframe: currentTF,
-        cloudMode: botState.cloud.mode,
-        cloudLambda: botState.cloud.lambda,
-        cloudSignals: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : []
-      };
-      try{ currentTrade.payout = typeof getPayoutPercent === 'function' ? getPayoutPercent() : undefined; }catch(_){ }
+  const autoReady = cyclesToPlay > 0 && autoTradingEnabled;
+  const tradeMeta = {
+    step: currentBetStep,
+    direction: tradeDirection,
+    allow: gateAllow,
+    payout: gatePayout,
+    EV: gateEV,
+    sys: gateSys,
+    diff: scoreDifference,
+    thr: adjustedThreshold,
+    bullishScore,
+    bearishScore,
+    hTime,
+    betTime
+  };
+  pendingTradeMeta = tradeMeta;
 
-      if (enteringTrade) return;
-      enteringTrade = true;
-
-      smartBet(currentBetStep, tradeDirection, function(placed){
-        enteringTrade = false;
-        if (!placed){ return; }
-
-        isTradeOpen = true;
-        lastTradeTime = time;
-
-        if (enableCloud){ cloudRecordTradeOpen(); }
-
-        if (typeof logTradeOpen === 'function') logTradeOpen(currentTrade);
-        betHistory.push(currentTrade);
-
-        totalWager += currentTrade.betValue;
-        wagerDiv.innerHTML = totalWager;
-
-        maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
-        maxStepDiv.innerHTML = maxStepInCycle;
-
-        window.activeSignalsThisTrade = currentTrade.signalKeys.slice(0);
-      });
+  if (CFG.preArmingEnabled){
+    const metaForPreArm = Object.assign({}, tradeMeta, {
+      allow: gateAllow && autoReady,
+      direction: autoReady ? tradeDirection : 'flat',
+      onExecute: function(){ executePlannedTrade(pendingTradeMeta); }
+    });
+    try{ PreArmingController.consider(metaForPreArm); }catch(e){ }
+  } else {
+    if (autoReady && gateAllow && tradeDirection !== 'flat'){
+      executePlannedTrade(tradeMeta);
     }
   }
 
@@ -3476,7 +3918,7 @@ maybeInitCloud();
   if (window.__FAV_AUTOSWITCH_PATCH_V2__) return;
   window.__FAV_AUTOSWITCH_PATCH_V2__ = true;
 
-  const CFG = {
+  const AS_CFG = {
     minPayoutToTrade: 90,
     payoutDebounceChecks: 3,
     assetSwitchCooldownMs: 5000,
@@ -3492,6 +3934,10 @@ maybeInitCloud();
     warmupReady: true,
     lastSeenSymbol: null
   };
+
+  try{
+    window.__autoSwitch = Object.assign(window.__autoSwitch || {}, { state: ST, config: AS_CFG });
+  }catch(_){ }
 
   function now(){ return Date.now(); }
   function getElByClassOne(cls){
@@ -3534,10 +3980,10 @@ maybeInitCloud();
     document.dispatchEvent(new KeyboardEvent("keyup", evInit));
   }
   function shouldSwitchAsset(){
-    if (!CFG.autoSwitchEnabled) return false;
+    if (!AS_CFG.autoSwitchEnabled) return false;
     const p = getPayoutPercent(); if (!isFinite(p)) return false;
-    if (p < CFG.minPayoutToTrade) ST.belowCount++; else ST.belowCount = 0;
-    return ST.belowCount >= CFG.payoutDebounceChecks;
+    if (p < AS_CFG.minPayoutToTrade) ST.belowCount++; else ST.belowCount = 0;
+    return ST.belowCount >= AS_CFG.payoutDebounceChecks;
   }
   function refreshDomRefs(){ updateTradingSymbolUI(); }
   function resetAssetContext(){
@@ -3552,7 +3998,7 @@ maybeInitCloud();
     const baseLen = (window.priceHistory && window.priceHistory.length) || 0;
     (function loop(){
       const len = (window.priceHistory && window.priceHistory.length) || 0;
-      const okTicks = (len - baseLen) >= CFG.dataWarmupTicks;
+      const okTicks = (len - baseLen) >= AS_CFG.dataWarmupTicks;
       if (okTicks || now() > timeoutAt){
         done && done(); return;
       }
@@ -3561,9 +4007,10 @@ maybeInitCloud();
   }
   function switchToNextFavorite(){
     if (ST.switchInProgress) return;
+    try{ if (PreArmingController && typeof PreArmingController.cancelPreArm === 'function'){ PreArmingController.cancelPreArm('asset_switch'); } }catch(_){ }
     ST.switchInProgress = true;
     ST.warmupReady = false;
-    ST.cooldownUntil = now() + CFG.assetSwitchCooldownMs;
+    ST.cooldownUntil = now() + AS_CFG.assetSwitchCooldownMs;
     console.log("🟡 [ASSET] Low payout — requesting switch via Shift+Tab");
     emulateKey("Shift",{shift:true}); emulateKey("Tab",{shift:true});
     setTimeout(()=>{
@@ -3573,6 +4020,7 @@ maybeInitCloud();
         ST.switchInProgress = false;
         ST.warmupReady = true;
         ST.belowCount = 0;
+        try{ if (PreArmingController && typeof PreArmingController.rebindDom === 'function'){ PreArmingController.rebindDom(); } }catch(_){ }
         console.log("⏱️ [ASSET] Warmup ready");
       });
     }, 500);
