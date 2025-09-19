@@ -6,7 +6,7 @@ import { deflateRawSync } from "zlib";
 const OUT_DIR = "build";
 const TARGET_ZIP = path.join(OUT_DIR, "Verter_SAFE.zip");
 const FILES = [
-  { path: path.join("src", "Verter.user.js"), name: "Verter.user.js" },
+  { path: path.join("src", "Verter.user.js"), name: "Verter v5.11.1 (CAN CHS) — Pre-Arming v1.0.user.js" },
   { path: path.join("src", "cloudstats_s1.js"), name: "cloudstats_s1.js" },
   { path: "CloudStats_s1_README.txt", name: "CloudStats_s1_README.txt" }
 ];
@@ -68,7 +68,7 @@ entries.forEach((entry) => {
   let ptr = 0;
   localHeader.writeUInt32LE(0x04034b50, ptr); ptr += 4;
   localHeader.writeUInt16LE(20, ptr); ptr += 2;
-  localHeader.writeUInt16LE(0, ptr); ptr += 2;
+  localHeader.writeUInt16LE(0x0800, ptr); ptr += 2;
   localHeader.writeUInt16LE(8, ptr); ptr += 2;
   localHeader.writeUInt16LE(entry.modTime, ptr); ptr += 2;
   localHeader.writeUInt16LE(entry.modDate, ptr); ptr += 2;
@@ -86,7 +86,7 @@ entries.forEach((entry) => {
   centralHeader.writeUInt32LE(0x02014b50, ptr); ptr += 4;
   centralHeader.writeUInt16LE(0x0014, ptr); ptr += 2;
   centralHeader.writeUInt16LE(20, ptr); ptr += 2;
-  centralHeader.writeUInt16LE(0, ptr); ptr += 2;
+  centralHeader.writeUInt16LE(0x0800, ptr); ptr += 2;
   centralHeader.writeUInt16LE(8, ptr); ptr += 2;
   centralHeader.writeUInt16LE(entry.modTime, ptr); ptr += 2;
   centralHeader.writeUInt16LE(entry.modDate, ptr); ptr += 2;
