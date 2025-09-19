@@ -429,10 +429,10 @@ let firebaseAuthWatcherSet = false;
 
 })(typeof window !== 'undefined' ? window : this);
 
-const appversion = "Verter ver. 5.11.2_ARMed";
+const appversion = "Verter ver. 5.11.1";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
-var BOT_BUILD = "5.11.2-ARMED PCS";
+var BOT_BUILD = "5.11.1 Pre-Arming v1.0 PCS";
 var QUIET_CONSOLE = true; // only errors by default
 try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 }
@@ -3045,15 +3045,18 @@ const PreArmingController = (function(){
   const STATES = {
     IDLE: 'IDLE',
     PREPARE_SIZE: 'PREPARE_SIZE',
+    ARMED: 'ARMED',
     WAIT_SIGNAL: 'WAIT_SIGNAL',
     EXECUTE: 'EXECUTE',
-    RESULT: 'RESULT'
+    RESULT: 'RESULT',
+    CANCEL: 'CANCEL'
   };
 
   let stage = STATES.IDLE;
   let ctx;
   let schedulerTimer = null;
   const tasks = [];
+  let lastCancelReason = null;
 
   function now(){ return Date.now(); }
 
@@ -3188,7 +3191,8 @@ const PreArmingController = (function(){
     const stageName = stage;
     clearScheduler();
     resetContext();
-    setStage(STATES.IDLE);
+    lastCancelReason = reason || null;
+    setStage(STATES.CANCEL);
     if (reason){ console.warn(`[CANCEL] reason=${reason} stage=${stageName}`); }
   }
 
@@ -3214,7 +3218,7 @@ const PreArmingController = (function(){
   }
 
   function runCandidate(){
-    setStage(STATES.WAIT_SIGNAL);
+    setStage(STATES.ARMED);
     ctx.candidateTs = now();
     if (!ctx.direction || ctx.direction === 'flat'){
       cancel('no-direction');
@@ -3227,6 +3231,7 @@ const PreArmingController = (function(){
   }
 
   function runGate(){
+    setStage(STATES.WAIT_SIGNAL);
     const gate = healthCheck();
     if (!gate.ok){
       cancel(gate.reason || 'gate');
@@ -3288,6 +3293,7 @@ const PreArmingController = (function(){
     ctx.amount = getBetValue(step);
     ctx.startedAt = now();
     ctx.t0 = computeT0();
+    lastCancelReason = null;
     setStage(STATES.PREPARE_SIZE);
     console.log(`[PREP] step=${step} pressCount=${ctx.pressCount}`);
     schedule('prepare', ctx.t0 - CFG.preArming.t_prepare_ms, runPrepare);
@@ -3315,7 +3321,7 @@ const PreArmingController = (function(){
     ctx.onExecute = meta.onExecute || ctx.onExecute;
     ctx.payload = meta.payload || ctx.payload;
 
-    if (stage === STATES.IDLE){
+    if (stage === STATES.IDLE || stage === STATES.CANCEL){
       if (ctx.direction === 'flat' || !ctx.allow){ return false; }
       return startPreArm(meta.step);
     }
@@ -3347,6 +3353,7 @@ const PreArmingController = (function(){
     setStage(STATES.RESULT);
     clearScheduler();
     resetContext();
+    lastCancelReason = null;
     setStage(STATES.IDLE);
   }
 
@@ -3362,6 +3369,7 @@ const PreArmingController = (function(){
       base.EV = ctx.EV;
       base.t0 = ctx.t0;
     }
+    if (lastCancelReason){ base.lastCancelReason = lastCancelReason; }
     return base;
   }
 
