@@ -91,6 +91,7 @@ let currentProfit = 0;
 let totalWager = 0;
 let globalPrice;
 let lastTradeTime = 0;
+let lastBetExecutionTs = 0;
 let lastSignalCheck = 0;
 let signalSensitivity = 3;
 let autoTradingEnabled = true;
@@ -189,13 +190,40 @@ loseCycle.style.lineHeight = '1.1';
 loseCycle.style.flex = '0 0 auto';
 
 /* ====== Keyboard emulation ====== */
-const buyButton = document.getElementsByClassName("btn btn-call")[0];
-const betInput  = document.getElementsByClassName("call-put-block__in")[0].querySelector("input");
+const KEY_CODES = { BUY: 87, SELL: 83, DOWN: 65, UP: 68 };
+const KEY_PRESS_DELAY = 24; // ~24ms between key presses (fits 18-30ms window)
+const RESET_PRESS_COUNT = 30;
 
-function buy()        { document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 87, shiftKey: true})); } // W
-function sell()       { document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 83, shiftKey: true})); } // S
-function decreaseBet(){ document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 65, shiftKey: true})); } // A
-function increaseBet(){ document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 68, shiftKey: true})); } // D
+function emitShiftKey(keyCode){
+  const opts = { keyCode, which: keyCode, shiftKey: true, bubbles: true };
+  try {
+    document.dispatchEvent(new KeyboardEvent('keydown', opts));
+    document.dispatchEvent(new KeyboardEvent('keyup', opts));
+  } catch (err) {
+    console.warn('[BOT:KEY] emit error:', err);
+  }
+}
+
+function queueShiftKey(keyCode, count, offset){
+  const total = Math.max(0, parseInt(count, 10) || 0);
+  for (let i = 0; i < total; i++){
+    setTimeout(() => emitShiftKey(keyCode), offset + (i * KEY_PRESS_DELAY));
+  }
+  return offset + (total * KEY_PRESS_DELAY);
+}
+
+function prepareBetAmount(pressCount){
+  const resetEnd = queueShiftKey(KEY_CODES.DOWN, RESET_PRESS_COUNT, 0);
+  const adjustOffset = resetEnd + KEY_PRESS_DELAY;
+  const finalEnd = queueShiftKey(KEY_CODES.UP, Math.max(0, pressCount), adjustOffset);
+  return finalEnd + KEY_PRESS_DELAY;
+}
+
+function openOrder(direction, offset){
+  const keyCode = direction === 'buy' ? KEY_CODES.BUY : (direction === 'sell' ? KEY_CODES.SELL : null);
+  if (keyCode == null){ return; }
+  setTimeout(() => emitShiftKey(keyCode), Math.max(0, offset));
+}
 
 /* ====== Helpers / Formatting ====== */
 let totalTrades = 0;
@@ -271,16 +299,37 @@ function logTradeResult(last){
     const cycProfit  = typeof currentProfit  === 'number' ? currentProfit  : 0;
     const balanceNow = typeof currentBalance === 'number' ? currentBalance : NaN;
 
-    let color="#fff", mark="ℹ️";
-    if (last.won === "won")      { color="limegreen"; mark="✅"; }
-    else if (last.won === "lost"){ color="crimson";   mark="❌"; }
-    else if (last.won === "returned"){ color="gold";  mark="↔️"; }
+    const step = typeof last.step === 'number' ? last.step : 0;
+    const betAmount = typeof last.betValue === 'number' ? last.betValue : getBetValue(step);
+    const stepCfg = Array.isArray(betArray) ? betArray.find(cfg => cfg.step === step) : null;
+    const pressCount = stepCfg && typeof stepCfg.pressCount === 'number' ? stepCfg.pressCount : null;
+    const direction = String(last.betDirection || '').toUpperCase() || 'FLAT';
+    const normalizedStatus = String(last.won || '').toLowerCase();
+    const isWin = normalizedStatus === 'won';
+    const isLoss = normalizedStatus === 'lost';
+    const mark = isWin ? '✅ WIN' : (isLoss ? '❌ LOSS' : '↔️');
+    const style = isWin ? 'color:#00c853;font-weight:bold;' : (isLoss ? 'color:#ff5252;font-weight:bold;' : 'color:#fdd835;font-weight:bold;');
 
+    const pnl = Number(last.profit) || 0;
+    const pnlStr = `${pnl>0?'+':pnl<0?'-':''}$${Math.abs(pnl).toFixed(2)}`;
+
+    let assetName = '';
+    try {
+      if (symbolDiv && symbolDiv.textContent){ assetName = symbolDiv.textContent.trim(); }
+      if (!assetName && symbolName){ assetName = symbolName.replace(/\s+/g,'/'); }
+    } catch(_){}
+    if (!assetName) assetName = '—';
+
+    const stepInfo = pressCount != null ? `${cur(betAmount)} / ${pressCount}x` : cur(betAmount);
     console.log(
-      "%c%s [TRADE-RESULT] %s | %s | P/L:%s | step:%d bet:%s dir:%s | balance:%s cycleProfit:%s | winRate:%s (%d/%d)",
-      `color:${color};font-weight:bold;`,
-      mark, ts(), String(last.won).toUpperCase(), cur(last.profit), last.step, cur(last.betValue),
-      String(last.betDirection || '').toUpperCase(),
+      `%c[TRADE] ${ts()} | ${assetName} | Step=${step} (${stepInfo}) | ${direction} | ${mark} | ${pnlStr}`,
+      style
+    );
+
+    // сохранение расширенной статистики для внутреннего мониторинга
+    console.log(
+      "%cℹ️ [TRADE-STATS] balance:%s cycleProfit:%s | winRate:%s (%d/%d)",
+      'color:#9fa8da;',
       isNaN(balanceNow)?'N/A':cur(balanceNow), cur(cycProfit), pct(winRate), wins, totalTrades
     );
   }catch(e){ console.warn('[BOT:TRADE-RESULT] log error:', e); }
@@ -1575,29 +1624,38 @@ function getBetValue(step){
 
 function smartBet(step, direction){
   // вернём true, если реально отправили ордер; иначе false
-  const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
-  profitPercentDivAdvisor.innerHTML = currentProfitPercent;
-
-  if (currentProfitPercent < 90){
-    // сигнализируем в UI и чётко возвращаем «неуспех»
-    profitPercentDivAdvisor.style.background = redColor;
-    profitPercentDivAdvisor.style.color = "#fff";
-    profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => ' + currentProfitPercent;
+  const now = Date.now();
+  if (now - lastBetExecutionTs < 1200){
+    console.warn('[BOT:BET] throttled to avoid rapid re-entry');
     return false;
   }
 
-  // найти pressCount по шагу
-  let pressCount = 0;
-  for (let i = 0; i < betArray.length; i++){
-    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
+  if (direction !== 'buy' && direction !== 'sell'){ return false; }
+
+  const currentProfitPercent = percentProfitDiv ? parseInt(percentProfitDiv.innerHTML, 10) : NaN;
+  if (profitPercentDivAdvisor){
+    profitPercentDivAdvisor.innerHTML = isNaN(currentProfitPercent) ? 'N/A' : currentProfitPercent;
+    profitPercentDivAdvisor.style.background = '';
+    profitPercentDivAdvisor.style.color = '';
   }
 
-  // сброс ставки и установка нужного размера
-  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
-  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
+  if (!isNaN(currentProfitPercent) && currentProfitPercent < 90){
+    if (profitPercentDivAdvisor){
+      profitPercentDivAdvisor.style.background = redColor;
+      profitPercentDivAdvisor.style.color = "#fff";
+      profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => ' + currentProfitPercent;
+    }
+    return false;
+  }
 
-  // отправка ордера
-  setTimeout(() => { if (direction === 'buy') buy(); else sell(); }, 100);
+  const stepCfg = Array.isArray(betArray) ? betArray.find(cfg => cfg.step === step) : null;
+  const pressCount = stepCfg && typeof stepCfg.pressCount === 'number' ? stepCfg.pressCount : 0;
+
+  const prepDuration = prepareBetAmount(pressCount);
+  openOrder(direction, prepDuration + KEY_PRESS_DELAY);
+
+  lastBetExecutionTs = now;
+  try { window.lastTradeDirection = direction; } catch(_){}
 
   return true;
 }
