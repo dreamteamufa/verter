@@ -10,429 +10,10 @@
   }catch(e){}
 'use strict';
 
-  const CFG = {
-    minPayoutToTrade: 90,
-    preArmingEnabled: true,
-    preArming: {
-      prepareAbortOnGateFail: true,
-      t_prepare_ms: 2800,
-      t_rebind_ms: 1800,
-      t_candidate_ms: 1200,
-      t_gate_ms: 800,
-      t_health_ms: 250,
-      debounce_ms: 50
-    }
-  };
-
-// === Firebase CloudStats configuration ===
-const firebaseConfig = {
-  apiKey: "AIzaSyC1KqNekr6GGtsBEHvvU_3Ou1TmHVQPOX4",
-  authDomain: "tradebot-71c75.firebaseapp.com",
-  projectId: "tradebot-71c75",
-  appId: "1:12759618797:web:8a0ef77e64d56197814334"
-};
-
-const recaptchaKey = "6LdPEs4rAAAAAFWk1leiOkAhJRog6Jv6sw1lrhB";
-
-let firebaseBootstrapPromise = null;
-let firebaseDbInstance = null;
-let firebaseAuthWatcherSet = false;
-
-// === CloudStats module inline copy (kept in sync with src/cloudstats_s1.js) ===
-(function(global){
-  'use strict';
-
-  var DEFAULTS = {
-    T_min: 30,
-    ewmaMin: 0.52,
-    weights: { w1: 0.5, w2: 0.3, w3: 0.1, w4: 0.1, Tcap: 200 },
-    alpha: 0.2,
-    readCooldownMs: 30000,
-    writeCooldownMs: 5000,
-    cacheTtlMs: 180000
-  };
-
-  var CLOUD_LOCAL_KEY = 'cloudstats_s1_cache';
-  var CLOUD_QUEUE_KEY = 'cloudstats_s1_queue';
-
-  var firebaseApp = null;
-  var firestoreDb = null;
-  var firebaseAuth = null;
-  var firebaseAppCheck = null;
-
-  var initPromise = null;
-  var cachePerf = {};
-  var readThrottles = {};
-  var writeThrottleUntil = 0;
-  var writeQueue = [];
-  var processingQueue = false;
-  var lastInitCfg = null;
-
-  function now(){ return Date.now(); }
-
-  function clone(obj){
-    if (!obj || typeof obj !== 'object') return obj;
-    if (Array.isArray(obj)){ return obj.slice(); }
-    var out = {};
-    for (var k in obj){ if (obj.hasOwnProperty(k)) out[k] = clone(obj[k]); }
-    return out;
-  }
-
-  function getLocalStorage(){
-    try{ if (typeof window !== 'undefined' && window.localStorage) return window.localStorage; }catch(_){ }
-    return null;
-  }
-
-  function loadQueueFromStorage(){
-    var ls = getLocalStorage();
-    if (!ls) return;
-    try{
-      var raw = ls.getItem(CLOUD_QUEUE_KEY);
-      if (!raw) return;
-      var arr = JSON.parse(raw);
-      if (Array.isArray(arr)) writeQueue = arr.concat(writeQueue);
-    }catch(_){ }
-  }
-
-  function persistQueue(){
-    var ls = getLocalStorage();
-    if (!ls) return;
-    try{
-      if (!writeQueue.length){ ls.removeItem(CLOUD_QUEUE_KEY); return; }
-      ls.setItem(CLOUD_QUEUE_KEY, JSON.stringify(writeQueue.slice(0, 30)));
-    }catch(_){ }
-  }
-
-  function savePerfToCache(key, perf){
-    cachePerf[key] = { ts: now(), data: clone(perf) };
-    var ls = getLocalStorage();
-    if (!ls) return;
-    try{
-      var data = ls.getItem(CLOUD_LOCAL_KEY);
-      var store = data ? JSON.parse(data) : {};
-      store[key] = { ts: cachePerf[key].ts, data: cachePerf[key].data };
-      ls.setItem(CLOUD_LOCAL_KEY, JSON.stringify(store));
-    }catch(_){ }
-  }
-
-  function loadCache(){
-    var ls = getLocalStorage();
-    if (!ls) return;
-    try{
-      var raw = ls.getItem(CLOUD_LOCAL_KEY);
-      if (!raw) return;
-      var parsed = JSON.parse(raw);
-      for (var key in parsed){
-        if (parsed.hasOwnProperty(key)){
-          cachePerf[key] = parsed[key];
-        }
-      }
-    }catch(_){ }
-  }
-
-  function waitFirebaseReady(){
-    return new Promise(function(resolve, reject){
-      var checks = 0;
-      (function verify(){
-        checks++;
-        try{
-          if (global.firebase && global.firebase.app && global.firebase.app.App){ resolve(); return; }
-        }catch(_){ }
-        if (checks > 60){ reject(new Error('Firebase compat SDK missing')); return; }
-        setTimeout(verify, 250);
-      })();
-    });
-  }
-
-  function withRetry(fn){
-    var attempt = 0;
-    function exec(){
-      attempt++;
-      return fn().catch(function(err){
-        var delay = Math.min(30000, Math.pow(2, attempt - 1) * 1000);
-        if (delay >= 30000 && attempt > 6){ throw err; }
-        return new Promise(function(resolve){
-          setTimeout(function(){ resolve(exec()); }, delay);
-        });
-      });
-    }
-    return exec();
-  }
-
-  function ensureInit(){
-    if (initPromise) return initPromise;
-    return Promise.reject(new Error('CloudStats.init not called'));
-  }
-
-  function buildPerfKey(asset, tf){
-    var a = String(asset || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
-    var t = String(tf || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '_');
-    if (!a) a = 'UNKNOWN';
-    if (!t) t = 'TF';
-    return 's1__' + a + '__' + t;
-  }
-
-  function computeEwma(prev, outcome, alpha){
-    if (!isFinite(prev)) prev = 0.5;
-    if (!isFinite(outcome)) outcome = 0.5;
-    if (!isFinite(alpha) || alpha <= 0 || alpha >= 1) alpha = DEFAULTS.alpha;
-    return prev + alpha * (outcome - prev);
-  }
-
-  function normalizePerf(doc){
-    if (!doc) return null;
-    var perf = clone(doc);
-    if (perf && perf.updatedAt && perf.updatedAt.toMillis){
-      perf.updatedAt = perf.updatedAt.toMillis();
-    } else if (perf && perf.updatedAt && perf.updatedAt.seconds){
-      perf.updatedAt = perf.updatedAt.seconds * 1000;
-    }
-    if (!perf.signals) perf.signals = {};
-    return perf;
-  }
-
-  function pushQueue(entry){
-    writeQueue.push(entry);
-    if (writeQueue.length > 60) writeQueue = writeQueue.slice(-60);
-    persistQueue();
-    processQueue();
-  }
-
-  function processQueue(){
-    if (processingQueue) return;
-    if (!writeQueue.length) return;
-    if (now() < writeThrottleUntil) return;
-    processingQueue = true;
-    ensureInit().then(function(){ return runQueueEntry(); }).catch(function(err){
-      processingQueue = false;
-      writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
-      console.warn('[CLOUD ERROR] queue error', err && err.message ? err.message : err);
-    });
-  }
-
-  function runQueueEntry(){
-    if (!writeQueue.length){ processingQueue = false; persistQueue(); return Promise.resolve(); }
-    var entry = writeQueue[0];
-    return withRetry(function(){ return applyWrite(entry); }).then(function(){
-      writeQueue.shift();
-      persistQueue();
-      writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
-      processingQueue = false;
-      if (writeQueue.length){ setTimeout(processQueue, DEFAULTS.writeCooldownMs); }
-    }).catch(function(err){
-      processingQueue = false;
-      console.warn('[CLOUD ERROR] write failed', err && err.message ? err.message : err);
-      writeThrottleUntil = now() + DEFAULTS.writeCooldownMs;
-    });
-  }
-
-  function applyWrite(entry){
-    if (!firestoreDb) return Promise.reject(new Error('Firestore not ready'));
-    var trade = entry.trade || {};
-    var perfKey = buildPerfKey(trade.asset, trade.timeframe);
-    var perfRef = firestoreDb.collection('signals_perf').doc(perfKey);
-    var tradeDate = new Date(trade.tsClose || trade.tsOpen || now());
-    var y = tradeDate.getUTCFullYear();
-    var m = tradeDate.getUTCMonth() + 1;
-    var d = tradeDate.getUTCDate();
-    var bucket = String(y) + String(m < 10 ? '0' + m : m) + String(d < 10 ? '0' + d : d);
-    var tradeRef = firestoreDb.collection('trade_logs').doc(bucket).collection('items').doc();
-
-    return firestoreDb.runTransaction(function(tx){
-      return tx.get(perfRef).then(function(doc){
-        var data = doc.exists ? doc.data() : { schema: 's1', trades: 0, wins: 0, losses: 0, ewma: 0.5, avgROI: 0, signals: {} };
-        var signalKey = trade.signalKey || 'unknown';
-        if (!data.signals) data.signals = {};
-        if (!data.signals[signalKey]){
-          data.signals[signalKey] = { trades: 0, wins: 0, losses: 0, ewma: 0.5, avgROI: 0, lastTs: 0 };
-        }
-        var sig = data.signals[signalKey];
-        var result = String(trade.result || '').toLowerCase();
-        var win = result === 'win' || result === 'won';
-        var loss = result === 'loss' || result === 'lost';
-        var roi = 0;
-        if (isFinite(trade.pnl) && isFinite(trade.bet) && trade.bet !== 0){
-          roi = trade.pnl / Math.abs(trade.bet);
-        }
-        data.trades = (data.trades || 0) + 1;
-        data.wins = (data.wins || 0) + (win ? 1 : 0);
-        data.losses = (data.losses || 0) + (loss ? 1 : 0);
-        data.ewma = computeEwma(data.ewma, win ? 1 : (loss ? 0 : 0.5), entry.alpha || DEFAULTS.alpha);
-        data.avgROI = data.avgROI == null ? roi : ((data.avgROI * (data.trades - 1) + roi) / data.trades);
-        data.asset = trade.asset;
-        data.timeframe = trade.timeframe;
-        data.updatedAt = new Date(now());
-        data.schema = 's1';
-
-        sig.trades = (sig.trades || 0) + 1;
-        sig.wins = (sig.wins || 0) + (win ? 1 : 0);
-        sig.losses = (sig.losses || 0) + (loss ? 1 : 0);
-        sig.ewma = computeEwma(sig.ewma, win ? 1 : (loss ? 0 : 0.5), entry.alpha || DEFAULTS.alpha);
-        sig.avgROI = sig.avgROI == null ? roi : ((sig.avgROI * (sig.trades - 1) + roi) / sig.trades);
-        sig.lastTs = trade.tsClose || trade.tsOpen || now();
-
-        var payload = clone(data);
-        var signalsClone = clone(data.signals);
-        payload.signals = signalsClone;
-
-        tx.set(perfRef, payload, { merge: true });
-        tx.set(tradeRef, clone(trade));
-
-        savePerfToCache(perfKey, payload);
-      });
-    });
-  }
-
-  function projectScore(sig, weights){
-    if (!sig) return 0;
-    var w = weights || DEFAULTS.weights;
-    var trades = sig.trades || 0;
-    var wins = sig.wins || 0;
-    var losses = sig.losses || 0;
-    var wr = trades > 0 ? wins / trades : 0.5;
-    var ewma = isFinite(sig.ewma) ? sig.ewma : wr;
-    var roi = isFinite(sig.avgROI) ? sig.avgROI : 0;
-    var cappedTrades = Math.min(trades, w.Tcap || DEFAULTS.weights.Tcap || 200);
-    var tradeRatio = (w.Tcap ? (cappedTrades / w.Tcap) : (trades / 200));
-    if (!isFinite(tradeRatio)) tradeRatio = 0;
-    var stability = trades > 0 ? 1 - (Math.abs(wins - losses) / trades) : 0.5;
-    var score = (ewma * (w.w1 || 0)) + (wr * (w.w2 || 0)) + (roi * (w.w3 || 0)) + (tradeRatio * (w.w4 || 0));
-    score += stability * 0.05;
-    return score;
-  }
-
-  var CloudStats = {
-    init: function(cfg){
-      if (initPromise) return initPromise;
-      loadCache();
-      loadQueueFromStorage();
-      lastInitCfg = cfg || {};
-      initPromise = waitFirebaseReady().then(function(){
-        var firebase = global.firebase;
-        if (!firebase) throw new Error('Firebase SDK missing');
-        var baseCfg = clone(cfg || {});
-        if (baseCfg && baseCfg.recaptchaKey) delete baseCfg.recaptchaKey;
-        if (firebase.apps && firebase.apps.length && firebase.apps[0]){
-          firebaseApp = firebase.apps[0];
-        } else {
-          firebaseApp = firebase.initializeApp(baseCfg);
-        }
-        firestoreDb = firebase.firestore();
-        firebaseAuth = firebase.auth();
-        firebaseAppCheck = firebase.appCheck ? firebase.appCheck() : null;
-
-        if (firebaseAppCheck && cfg && cfg.recaptchaKey){
-          try{
-            firebaseAppCheck.activate(cfg.recaptchaKey, true);
-          }catch(err){
-            console.warn('[CLOUD ERROR] AppCheck activate skipped', err && err.message ? err.message : err);
-          }
-        }
-
-        if (firebaseAuth && firebaseAuth.currentUser && firebaseAuth.currentUser.isAnonymous){
-          return firebaseAuth.currentUser;
-        }
-        if (!firebaseAuth) return null;
-        return firebaseAuth.signInAnonymously().catch(function(err){
-          console.warn('[CLOUD ERROR] Anonymous auth init failed', err && err.message ? err.message : err);
-          throw err;
-        });
-      }).then(function(){
-        processQueue();
-        return true;
-      }).catch(function(err){
-        console.warn('[CLOUD ERROR] init failed', err && err.message ? err.message : err);
-        throw err;
-      });
-      return initPromise;
-    },
-
-    readPerf: function(asset, tf){
-      return ensureInit().then(function(){
-        var key = buildPerfKey(asset, tf);
-        var c = cachePerf[key];
-        var nowTs = now();
-        if (c && (nowTs - c.ts) < DEFAULTS.cacheTtlMs){
-          return clone(c.data);
-        }
-        var lastRead = readThrottles[key] || 0;
-        if ((nowTs - lastRead) < DEFAULTS.readCooldownMs && c){
-          return clone(c.data);
-        }
-        readThrottles[key] = nowTs;
-        return withRetry(function(){
-          return firestoreDb.collection('signals_perf').doc(key).get().then(function(snap){
-            if (!snap.exists){
-              if (c) return clone(c.data);
-              return null;
-            }
-            var doc = normalizePerf(snap.data());
-            savePerfToCache(key, doc);
-            return clone(doc);
-          });
-        }).catch(function(err){
-          console.warn('[CLOUD ERROR] read failed', err && err.message ? err.message : err);
-          if (c) return clone(c.data);
-          return null;
-        });
-      });
-    },
-
-    updateAfterTrade: function(trade){
-      return ensureInit().then(function(){
-        pushQueue({ trade: clone(trade), alpha: DEFAULTS.alpha, enqueuedAt: now() });
-      });
-    },
-
-    rankSignals: function(perf, weights, limit){
-      if (!perf || !perf.signals) return [];
-      var list = [];
-      var w = weights || DEFAULTS.weights;
-      var lim = typeof limit === 'number' && limit > 0 ? limit : 5;
-      for (var key in perf.signals){
-        if (!perf.signals.hasOwnProperty(key)) continue;
-        var sig = perf.signals[key];
-        var score = projectScore(sig, w);
-        list.push({ key: key, score: score, stats: clone(sig) });
-      }
-      list.sort(function(a, b){ return b.score - a.score; });
-      if (list.length > lim) list = list.slice(0, lim);
-      return list;
-    },
-
-    shouldTrade: function(key, perf, policy){
-      var cfg = policy || {};
-      var T_min = isFinite(cfg.T_min) ? cfg.T_min : DEFAULTS.T_min;
-      var ewmaMin = isFinite(cfg.ewmaMin) ? cfg.ewmaMin : DEFAULTS.ewmaMin;
-      if (!perf || !perf.signals) return false;
-      var sig = perf.signals[key];
-      if (!sig) return false;
-      if ((sig.trades || 0) < T_min) return false;
-      var ewma = isFinite(sig.ewma) ? sig.ewma : 0.5;
-      if (ewma < ewmaMin) return false;
-      return true;
-    },
-
-    defaults: clone(DEFAULTS),
-
-    _state: function(){
-      return {
-        queueLength: writeQueue.length,
-        cacheKeys: Object.keys(cachePerf || {}),
-        lastConfig: clone(lastInitCfg)
-      };
-    }
-  };
-
-  if (typeof module !== 'undefined' && module.exports){ module.exports = CloudStats; }
-  global.CloudStats = CloudStats;
-
-})(typeof window !== 'undefined' ? window : this);
-
-const appversion = "Verter ver. 5.11.1";
+const appversion = "Verter ver. 5.2";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
-var BOT_BUILD = "5.11.1 Pre-Arming v1.0 PCS";
+var BOT_BUILD = "5.11.1-CAN CHS AllStages";
 var QUIET_CONSOLE = true; // only errors by default
 try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 }
@@ -441,364 +22,6 @@ try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 // Martingale warm-up trades before stepping (0 = off)
 const MG_WARMUP_TRADES = 0;
 
-
-/* ====== CloudStats integration flags ====== */
-const enableCloud = true;
-const cloudReadOnly = false;
-const CLOUD_REFRESH_MINUTES = 3;
-const CLOUD_MAX_TRADE_PER_HOUR = 6;
-const CLOUD_EXPLORE_RATE = 0.15;
-
-function loadCloudConfig(){
-  var overrides = null;
-  try{
-    if (window.__VERTER_FIREBASE_CONFIG__) overrides = window.__VERTER_FIREBASE_CONFIG__;
-  }catch(_){ }
-  if (!overrides){
-    try{
-      var raw = localStorage.getItem('verter_cloud_config');
-      if (raw) overrides = JSON.parse(raw);
-    }catch(_){ overrides = null; }
-  }
-  var cfg = shallowAssign({}, firebaseConfig);
-  if (overrides) cfg = shallowAssign(cfg, overrides);
-  cfg.recaptchaKey = recaptchaKey;
-  return cfg;
-}
-
-var botState = {
-  cloud: {
-    enabled: enableCloud,
-    readOnly: cloudReadOnly,
-    lambdaStages: [0.8, 0.6, 0.4, 0.2, 0.0],
-    lambdaIndex: 0,
-    lambda: 0.8,
-    mode: 'COLD',
-    lastMode: 'COLD',
-    lastFetch: 0,
-    nextFetch: 0,
-    perf: null,
-    topSignals: [],
-    trades: 0,
-    wins: 0,
-    losses: 0,
-    ewmaLive: 0.5,
-    lossStreak: 0,
-    cloudAge: null,
-    tradesHour: {},
-    exploreToggle: 0,
-    driftTriggered: false,
-    lastAssetKey: null,
-    recentResults: [],
-    recoveryStreak: 0,
-    policy: { T_min: 30, ewmaMin: 0.52 },
-    weights: { w1: 0.5, w2: 0.3, w3: 0.1, w4: 0.1, Tcap: 200 }
-  }
-};
-
-
-/* ====== SAFE KEYS BLIND CONFIGURATION ====== */
-var SAFE_KEYS_BLIND = {
-  STEP_DELAY_MS: 55,
-  BATCH_PAUSE_MS: 100,
-  USE_SHIFT_FOR_RESET: true,
-  RESET_SHIFT_A_BLOCKS: 15,
-  SHIFT_A_BLOCK_SIZE: 8,
-  RESET_A_TAIL_TICKS: 25,
-  WATCHDOG_MS: 12000,
-  THROTTLE_MS: 500
-};
-
-var safeBlind = (function(){
-  'use strict';
-  var defaults = {
-    STEP_DELAY_MS: 55,
-    BATCH_PAUSE_MS: 100,
-    USE_SHIFT_FOR_RESET: true,
-    RESET_SHIFT_A_BLOCKS: 15,
-    SHIFT_A_BLOCK_SIZE: 8,
-    RESET_A_TAIL_TICKS: 25,
-    WATCHDOG_MS: 12000,
-    THROTTLE_MS: 500
-  };
-
-  function assignDefaults(cfg){
-    var merged = {};
-    var key;
-    for (key in defaults){
-      if (defaults.hasOwnProperty(key)) merged[key] = defaults[key];
-    }
-    if (!cfg) return merged;
-    for (key in cfg){
-      if (cfg.hasOwnProperty(key)) merged[key] = cfg[key];
-    }
-    return merged;
-  }
-
-  var config = assignDefaults(typeof SAFE_KEYS_BLIND !== 'undefined' ? SAFE_KEYS_BLIND : null);
-
-  var state = {
-    status: 'IDLE',
-    step: 0,
-    pressCount: 0,
-    amount: null,
-    preparedAt: 0,
-    isPreparing: false,
-    throttleUntil: 0,
-    step0PressCount: null
-  };
-
-  var indicatorUpdater = null;
-  var watchdogTimer = null;
-
-  function now(){ return Date.now(); }
-
-  function log(){
-    try{ console.log.apply(console, arguments); }catch(_){ }
-  }
-
-  function warn(){
-    try{ console.warn.apply(console, arguments); }catch(_){ }
-  }
-
-  function pressKey(letter, opts){
-    if (!letter) return;
-    var options = opts || {};
-    var key = String(letter).toUpperCase();
-    if (!key) return;
-    var code = key.charCodeAt(0);
-    var eventInit = {
-      key: key,
-      code: 'Key' + key,
-      keyCode: code,
-      which: code,
-      shiftKey: !!options.shift,
-      bubbles: true,
-      cancelable: true
-    };
-    try{
-      document.dispatchEvent(new KeyboardEvent('keydown', eventInit));
-      document.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-    }catch(e){}
-  }
-
-  function updateIndicator(){
-    if (typeof indicatorUpdater === 'function'){
-      try{ indicatorUpdater(getState()); }catch(_){ }
-    }
-  }
-
-  function getState(){
-    return {
-      status: state.status,
-      step: state.step,
-      pressCount: state.pressCount,
-      amount: state.amount,
-      preparedAt: state.preparedAt,
-      throttleUntil: state.throttleUntil,
-      isPreparing: state.isPreparing
-    };
-  }
-
-  function setStatus(status, meta){
-    state.status = status;
-    if (meta){
-      if (meta.step !== undefined) state.step = meta.step;
-      if (meta.pressCount !== undefined) state.pressCount = meta.pressCount;
-      if (meta.amount !== undefined) state.amount = meta.amount;
-      if (meta.preparedAt !== undefined) state.preparedAt = meta.preparedAt;
-    }
-    updateIndicator();
-  }
-
-  function clearWatchdog(){
-    if (watchdogTimer){
-      clearTimeout(watchdogTimer);
-      watchdogTimer = null;
-    }
-  }
-
-  function startWatchdog(){
-    clearWatchdog();
-    watchdogTimer = setTimeout(function(){
-      watchdogTimer = null;
-      state.isPreparing = false;
-      setStatus('ABORT', {});
-      warn('[BET][ABORT]', 'reason=watchdog');
-    }, config.WATCHDOG_MS);
-  }
-
-  function pressRepeated(key, times, opts, delay, done){
-    var total = Math.max(0, times|0);
-    var stepDelay = typeof delay === 'number' ? delay : config.STEP_DELAY_MS;
-    if (typeof done !== 'function') done = function(){};
-    if (!total){
-      return setTimeout(done, stepDelay);
-    }
-    var index = 0;
-    function tick(){
-      pressKey(key, opts);
-      index++;
-      if (index >= total){
-        setTimeout(done, stepDelay);
-      } else {
-        setTimeout(tick, stepDelay);
-      }
-    }
-    tick();
-  }
-
-  function performReset(onDone){
-    if (typeof onDone !== 'function') onDone = function(){};
-    var blocks = config.USE_SHIFT_FOR_RESET ? config.RESET_SHIFT_A_BLOCKS : 0;
-    var blockIndex = 0;
-
-    function runTail(){
-      pressRepeated('A', config.RESET_A_TAIL_TICKS, {}, config.STEP_DELAY_MS, function(){
-        onDone(blocks);
-      });
-    }
-
-    function runNextBlock(){
-      if (!blocks || blockIndex >= blocks){
-        return runTail();
-      }
-      pressRepeated('A', config.SHIFT_A_BLOCK_SIZE, { shift: true }, config.STEP_DELAY_MS, function(){
-        blockIndex++;
-        if (blockIndex < blocks){
-          setTimeout(runNextBlock, config.BATCH_PAUSE_MS);
-        } else {
-          setTimeout(runTail, config.BATCH_PAUSE_MS);
-        }
-      });
-    }
-
-    if (blocks){
-      runNextBlock();
-    } else {
-      runTail();
-    }
-  }
-
-  function performSet(pressCount, onDone){
-    pressRepeated('D', pressCount, {}, config.STEP_DELAY_MS, function(){
-      if (typeof onDone === 'function') onDone();
-    });
-  }
-
-  function finishSuccess(step){
-    clearWatchdog();
-    state.isPreparing = false;
-    var preparedAt = now();
-    setStatus('ARMED', { step: step, preparedAt: preparedAt, amount: state.amount, pressCount: state.pressCount });
-    var amt = state.amount;
-    log('[ARMED]', 'step=' + step, 'calc=$' + (typeof amt === 'number' ? amt.toFixed(2) : '—'));
-  }
-
-  function begin(step, pressCount, meta){
-    if (typeof pressCount !== 'number' || pressCount < 0){
-      warn('[BET][PREP_SKIP]', 'reason=invalid-press', 'step=' + step, 'pressCount=' + pressCount);
-      return false;
-    }
-    var ts = now();
-    if (state.isPreparing){
-      warn('[BET][PREP_SKIP]', 'reason=busy', 'activeStep=' + state.step);
-      return false;
-    }
-    if (state.throttleUntil && ts < state.throttleUntil){
-      warn('[BET][PREP_SKIP]', 'reason=throttle', 'wait=' + (state.throttleUntil - ts));
-      return false;
-    }
-    if (step === 0) state.step0PressCount = pressCount;
-    state.isPreparing = true;
-    state.step = step;
-    state.pressCount = pressCount;
-    if (meta && typeof meta.amount === 'number') state.amount = meta.amount;
-    setStatus('PREPARING', { step: step, pressCount: pressCount, amount: state.amount });
-    log('[BET][PREP_START]', 'step=' + step, 'pressCount=' + pressCount);
-    state.throttleUntil = ts + config.THROTTLE_MS;
-    startWatchdog();
-    performReset(function(blocksUsed){
-      log('[BET][RESET]', 'blocks=' + (blocksUsed || 0), 'tail=' + config.RESET_A_TAIL_TICKS);
-      performSet(pressCount, function(){
-        log('[BET][SET]', 'D×' + pressCount);
-        finishSuccess(step);
-      });
-    });
-    return true;
-  }
-
-  function prepare(step, pressCount, meta){
-    return begin(step, pressCount, meta || {});
-  }
-
-  function prepareStep0(pressCount, meta){
-    var effective = pressCount;
-    if (typeof effective !== 'number'){
-      if (typeof state.step0PressCount === 'number') effective = state.step0PressCount;
-      else effective = 0;
-    }
-    return begin(0, effective, meta || {});
-  }
-
-  function click(side){
-    if (!side) return;
-    var dir = String(side).toLowerCase();
-    if (dir === 'buy'){
-      try{ buy(); }catch(_){ }
-    } else if (dir === 'sell'){
-      try{ sell(); }catch(_){ }
-    } else {
-      return;
-    }
-    log('[TRADE][CLICK]', 'side=' + dir.toUpperCase());
-    setStatus('IDLE', {});
-    state.amount = null;
-  }
-
-  return {
-    prepare: prepare,
-    prepareStep0: prepareStep0,
-    click: click,
-    getState: getState,
-    setIndicatorUpdater: function(fn){
-      indicatorUpdater = fn;
-      updateIndicator();
-    }
-  };
-})();
-
-function updateArmedIndicator(state){
-  if (!armedIndicatorDiv){ return; }
-  if (!state) state = {};
-  var valueEl = armedIndicatorDiv.querySelector('#armed-status-value');
-  var labelEl = armedIndicatorDiv.querySelector('#armed-status-label');
-  if (labelEl){ labelEl.textContent = 'ARMED'; }
-  var status = state.status || 'IDLE';
-  var bg = '#2a2a2a';
-  var text = 'IDLE';
-  if (status === 'ARMED'){
-    var amt = (typeof state.amount === 'number') ? state.amount : null;
-    var sec = state.preparedAt ? Math.max(0, Math.floor((Date.now() - state.preparedAt)/1000)) : 0;
-    var stepInfo = (typeof state.step === 'number') ? ('step ' + state.step + ' • ') : '';
-    text = stepInfo + '$' + (amt != null ? amt.toFixed(2) : '—') + ' • ' + sec + 's ago';
-    bg = '#1f6f2d';
-  } else if (status === 'PREPARING'){
-    var prepStep = (typeof state.step === 'number') ? ('step ' + state.step + ' • ') : '';
-    text = prepStep + 'Preparing…';
-    bg = '#1d4b9b';
-  } else if (status === 'ABORT'){
-    text = 'Abort';
-    bg = '#9a1f1f';
-  } else {
-    text = status;
-    bg = '#444';
-  }
-  armedIndicatorDiv.style.background = bg;
-  if (valueEl){ valueEl.textContent = text; }
-}
-
-try{ safeBlind.setIndicatorUpdater(updateArmedIndicator); }catch(e){}
 
 /* ====== CONFIG / LIMITS / ARRAYS ====== */
 const reverse = false;
@@ -844,10 +67,7 @@ const betArray3 = [
     {step: 4, value: 1800, pressCount: 42}
 ];
 
-let activeBetArrayName = 'betArray1';
-
 function logActiveBetArray(name){
-  activeBetArrayName = name;
   try{ console.log("[DEBUG] Active bet array:", name); }catch(_){ }
 }
 
@@ -864,7 +84,6 @@ let maxStepInCycle = 0;
 let cyclesStats = [];
 let tradingAllowed = true;
 let isTradeOpen = false;
-let enteringTrade = false;
 let currentBetStep = 0;
 let betHistory = [];
 let priceHistory = [];
@@ -905,448 +124,8 @@ let signalWeights  = {};
 window.activeSignalsSnapshot  = [];
 window.activeSignalsThisTrade = null;
 
-/* ====== Cloud Stats helpers ====== */
-var cloudSdkLoading = null;
-var cloudInitPromise = null;
-var cloudRefreshTimer = null;
-
-function shallowAssign(target){
-  var out = target || {};
-  for (var i = 1; i < arguments.length; i++){
-    var src = arguments[i];
-    if (!src) continue;
-    for (var k in src){
-      if (Object.prototype.hasOwnProperty.call(src, k)) out[k] = src[k];
-    }
-  }
-  return out;
-}
-
-function loadScriptOnce(url){
-  return new Promise(function(resolve, reject){
-    try{
-      var attr = 'data-cloudsrc';
-      var existing = document.querySelector('script[' + attr + '="' + url + '"]');
-      if (existing){
-        if (existing.getAttribute('data-loaded') === '1'){ resolve(); return; }
-        existing.addEventListener('load', function(){ existing.setAttribute('data-loaded', '1'); resolve(); });
-        existing.addEventListener('error', function(){ reject(new Error('Failed to load ' + url)); });
-        return;
-      }
-      var script = document.createElement('script');
-      script.type = 'text/javascript';
-      script.async = true;
-      script.setAttribute(attr, url);
-      script.addEventListener('load', function(){ script.setAttribute('data-loaded', '1'); resolve(); });
-      script.addEventListener('error', function(){ reject(new Error('Failed to load ' + url)); });
-      script.src = url;
-      (document.head || document.documentElement || document.body).appendChild(script);
-    }catch(e){ reject(e); }
-  });
-}
-
-function loadFirebaseCompat(){
-  if (cloudSdkLoading) return cloudSdkLoading;
-  var urls = [
-    'https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js',
-    'https://www.gstatic.com/firebasejs/9.22.2/firebase-auth-compat.js',
-    'https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js',
-    'https://www.gstatic.com/firebasejs/9.22.2/firebase-app-check-compat.js'
-  ];
-  cloudSdkLoading = urls.reduce(function(prev, url){
-    return prev.then(function(){ return loadScriptOnce(url); });
-  }, Promise.resolve());
-  return cloudSdkLoading;
-}
-
-function bootstrapFirebaseCore(){
-  if (firebaseBootstrapPromise) return firebaseBootstrapPromise;
-  firebaseBootstrapPromise = loadFirebaseCompat().then(function(){
-    var firebase = window.firebase;
-    if (!firebase) throw new Error('Firebase SDK missing');
-
-    if (!firebase.apps || !firebase.apps.length){
-      firebase.initializeApp(firebaseConfig); // 1) Firebase SDK
-    }
-
-    try {
-      if (firebase.appCheck){
-        var appCheckInstance = firebase.appCheck();
-        if (appCheckInstance && typeof appCheckInstance.activate === 'function'){
-          appCheckInstance.activate(recaptchaKey, true); // 2) App Check (reCAPTCHA v3)
-        }
-      }
-    } catch (err){
-      console.warn('[CLOUD ERROR] Firebase AppCheck activate failed', err && err.message ? err.message : err);
-    }
-
-    var auth = null;
-    try {
-      auth = firebase.auth();
-      if (auth && !firebaseAuthWatcherSet){
-        firebaseAuthWatcherSet = true;
-        auth.onAuthStateChanged(function(u){ // 3) Anonymous Auth
-          if (!u){
-            auth.signInAnonymously().catch(function(err){
-              console.warn('[CLOUD ERROR] Anonymous auth failed', err && err.message ? err.message : err);
-            });
-          }
-        }, function(err){
-          console.warn('[CLOUD ERROR] Auth state listener error', err && err.message ? err.message : err);
-        });
-        if (!auth.currentUser){
-          auth.signInAnonymously().catch(function(err){
-            console.warn('[CLOUD ERROR] Anonymous auth bootstrap failed', err && err.message ? err.message : err);
-          });
-        }
-      }
-    } catch (err){
-      console.warn('[CLOUD ERROR] Firebase auth init failed', err && err.message ? err.message : err);
-    }
-
-    try {
-      const db = firebase.firestore(); // 4) Firestore
-      firebaseDbInstance = db;
-      try{ window.__VERTER_FIRESTORE__ = db; }catch(_){ }
-    } catch (err){
-      console.warn('[CLOUD ERROR] Firestore init failed', err && err.message ? err.message : err);
-      throw err;
-    }
-
-    try{ window.__VERTER_FIREBASE__ = firebase; }catch(_){ }
-    return { firebase: firebase, db: firebaseDbInstance };
-  }).catch(function(err){
-    console.warn('[CLOUD ERROR] Firebase bootstrap failed', err && err.message ? err.message : err);
-    firebaseBootstrapPromise = null;
-    throw err;
-  });
-  return firebaseBootstrapPromise;
-}
-
-function ensureCloudReady(){
-  if (!enableCloud){ return Promise.reject(new Error('Cloud disabled')); }
-  if (cloudInitPromise) return cloudInitPromise;
-  var cfg = loadCloudConfig();
-  if (!cfg){ return Promise.reject(new Error('Cloud config missing')); }
-  var normalized = shallowAssign({}, cfg);
-  if (!normalized.projectId && normalized.project_id) normalized.projectId = normalized.project_id;
-  if (!normalized.apiKey && normalized.api_key) normalized.apiKey = normalized.api_key;
-  cloudInitPromise = bootstrapFirebaseCore()
-    .then(function(){ return CloudStats.init(normalized); })
-    .then(function(){
-      if (CloudStats && CloudStats.defaults && CloudStats.defaults.weights){
-        botState.cloud.weights = shallowAssign({}, CloudStats.defaults.weights);
-        botState.cloud.policy = shallowAssign({}, { T_min: CloudStats.defaults.T_min, ewmaMin: CloudStats.defaults.ewmaMin });
-      }
-      return true;
-    }).catch(function(err){
-      console.warn('[CLOUD ERROR] init error', err && err.message ? err.message : err);
-      botState.cloud.enabled = false;
-      throw err;
-    });
-  return cloudInitPromise;
-}
-
-function cloudEffectiveLambda(){
-  var c = botState.cloud;
-  var idx = c.lambdaIndex;
-  if (idx < 0) idx = 0;
-  if (idx >= c.lambdaStages.length) idx = c.lambdaStages.length - 1;
-  var base = c.lambdaStages[idx];
-  if (c.mode === 'COLD') return 0;
-  if (c.mode === 'WARMUP') return Math.min(base, 0.3);
-  return base;
-}
-
-function updateCloudLambda(){
-  botState.cloud.lambda = cloudEffectiveLambda();
-}
-
-function currentHourKey(){
-  var d = new Date();
-  return d.getUTCFullYear() + '-' + (d.getUTCMonth()+1) + '-' + d.getUTCDate() + '-' + d.getUTCHours();
-}
-
-function cloudRecordTradeOpen(){
-  var c = botState.cloud;
-  var key = currentHourKey();
-  if (!c.tradesHour[key]) c.tradesHour[key] = 0;
-  c.tradesHour[key] += 1;
-  var keys = Object.keys(c.tradesHour);
-  if (keys.length > 24){
-    keys.sort();
-    while (keys.length > 24){
-      var drop = keys.shift();
-      delete c.tradesHour[drop];
-    }
-  }
-}
-
-function cloudTradesThisHour(){
-  var key = currentHourKey();
-  return botState.cloud.tradesHour[key] || 0;
-}
-
-function shouldThrottleByTraining(){
-  var c = botState.cloud;
-  if (c.mode === 'HOT' && !c.driftTriggered) return false;
-  return cloudTradesThisHour() >= CLOUD_MAX_TRADE_PER_HOUR;
-}
-
-function normalizeAssetName(name){
-  return String(name || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-}
-
-function getCurrentAssetKey(){
-  var asset = normalizeAssetName(symbolName || '');
-  var tf = String(currentTF || 'M1').toUpperCase();
-  if (!asset) return null;
-  return asset + '__' + tf;
-}
-
-function normalizeTimeframeName(tf){
-  return String(tf || 'M1').toUpperCase();
-}
-
-function cloudDirectionLabel(dir){
-  var val = String(dir || '').toUpperCase();
-  if (val === 'BUY' || val === 'CALL' || val === 'UP') return 'BUY';
-  if (val === 'SELL' || val === 'PUT' || val === 'DOWN') return 'SELL';
-  return 'FLAT';
-}
-
-function toIsoStringSafe(ts){
-  try{
-    if (!ts) return new Date().toISOString();
-    var d = ts instanceof Date ? ts : new Date(ts);
-    if (isNaN(d.getTime())) return new Date().toISOString();
-    return d.toISOString();
-  }catch(_){
-    return new Date().toISOString();
-  }
-}
-
-function updateCloudMode(perf){
-  var c = botState.cloud;
-  var prevMode = c.mode;
-  var trades = perf && isFinite(perf.trades) ? perf.trades : 0;
-  var hasEligible = false;
-  if (perf && perf.signals){
-    for (var key in perf.signals){
-      if (!Object.prototype.hasOwnProperty.call(perf.signals, key)) continue;
-      if (CloudStats.shouldTrade(key, perf, c.policy)){
-        hasEligible = true;
-        break;
-      }
-    }
-  }
-  var mode = 'COLD';
-  if (perf){
-    mode = (trades >= 50 && hasEligible) ? 'HOT' : 'WARMUP';
-  } else {
-    c.driftTriggered = false;
-  }
-  if (c.driftTriggered) mode = 'DRIFT';
-  c.lastMode = prevMode;
-  c.mode = mode;
-  updateCloudLambda();
-  if (prevMode !== mode){
-    try{
-      console.log('[CLOUD] mode=' + mode + ' trades=' + trades + (perf && perf.ewma != null ? ' ewma=' + (perf.ewma*100).toFixed(1) + '%' : ''));
-    }catch(_){ }
-  }
-}
-
-function updateCloudUi(){
-  try{
-    var badge = document.getElementById('cloud-status-badge');
-    var lambdaEl = document.getElementById('cloud-lambda');
-    var topEl = document.getElementById('cloud-top');
-    var updEl = document.getElementById('cloud-updated');
-    var tradesEl = document.getElementById('cloud-trades');
-    if (badge){
-      badge.textContent = 'Cloud: ' + botState.cloud.mode;
-      var color = '#9e9e9e';
-      if (botState.cloud.mode === 'HOT') color = '#00e676';
-      else if (botState.cloud.mode === 'WARMUP') color = '#ffeb3b';
-      else if (botState.cloud.mode === 'DRIFT') color = '#ff9800';
-      else color = '#ff5252';
-      badge.style.background = color;
-    }
-    if (lambdaEl){ lambdaEl.textContent = 'λ=' + botState.cloud.lambda.toFixed(2); }
-    if (tradesEl){ tradesEl.textContent = 'Trades: ' + (botState.cloud.trades || 0); }
-    if (updEl){
-      if (botState.cloud.cloudAge != null){
-        var hrs = botState.cloud.cloudAge;
-        updEl.textContent = 'Age: ' + hrs.toFixed(1) + 'h';
-      }else{
-        updEl.textContent = 'Age: —';
-      }
-    }
-    if (topEl){
-      var top = botState.cloud.topSignals || [];
-      if (!top.length){
-        topEl.innerHTML = '<div>Нет данных</div>';
-      }else{
-        var html = top.map(function(item, idx){
-          var stats = item.stats || {};
-          var trades = stats.trades || 0;
-          var wr = trades ? (stats.wins || 0) / trades : 0;
-          var ewma = stats.ewma != null ? stats.ewma : wr;
-          return '<div style="display:flex;justify-content:space-between;gap:6px;">'
-            + '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + (idx+1) + '. ' + item.key + '</span>'
-            + '<span style="white-space:nowrap;">EWMA ' + (ewma*100).toFixed(1) + '% • ' + (stats.wins||0) + '/' + trades + '</span>'
-            + '</div>';
-        }).join('');
-        topEl.innerHTML = html;
-      }
-    }
-  }catch(_){ }
-}
-
-function updateCloudState(perf){
-  botState.cloud.perf = perf;
-  botState.cloud.topSignals = perf ? CloudStats.rankSignals(perf, botState.cloud.weights, 5) : [];
-  botState.cloud.trades = perf && isFinite(perf.trades) ? perf.trades : 0;
-  botState.cloud.wins = perf && isFinite(perf.wins) ? perf.wins : 0;
-  botState.cloud.losses = perf && isFinite(perf.losses) ? perf.losses : 0;
-  if (perf && perf.updatedAt){
-    botState.cloud.cloudAge = (Date.now() - perf.updatedAt) / 3600000;
-  }else{
-    botState.cloud.cloudAge = null;
-  }
-  updateCloudMode(perf);
-  updateCloudUi();
-}
-
-function refreshCloudPerf(force){
-  if (!enableCloud || !botState.cloud.enabled) return;
-  ensureCloudReady().then(function(){
-    var assetKey = getCurrentAssetKey();
-    var nowTs = Date.now();
-    if (!assetKey){
-      updateCloudState(null);
-      return;
-    }
-    if (!force && nowTs < botState.cloud.nextFetch && assetKey === botState.cloud.lastAssetKey){ return; }
-    botState.cloud.lastAssetKey = assetKey;
-    botState.cloud.lastFetch = nowTs;
-    botState.cloud.nextFetch = nowTs + CLOUD_REFRESH_MINUTES * 60000;
-    var asset = symbolName || '';
-    var tf = currentTF || 'M1';
-    CloudStats.readPerf(asset, tf).then(function(perf){
-      updateCloudState(perf);
-    }).catch(function(err){
-      console.warn('[CLOUD ERROR] readPerf failed', err && err.message ? err.message : err);
-      updateCloudState(null);
-    });
-  }).catch(function(err){
-    console.warn('[CLOUD ERROR] ensure ready failed', err && err.message ? err.message : err);
-    updateCloudState(null);
-  });
-}
-
-function scheduleCloudRefresh(immediate){
-  if (!enableCloud || !botState.cloud.enabled) return;
-  ensureCloudReady().then(function(){
-    if (immediate) refreshCloudPerf(true);
-    if (!cloudRefreshTimer){
-      cloudRefreshTimer = setInterval(function(){ refreshCloudPerf(false); }, CLOUD_REFRESH_MINUTES * 60000);
-    }
-  }).catch(function(err){
-    console.warn('[CLOUD ERROR] schedule failed', err && err.message ? err.message : err);
-    updateCloudState(null);
-  });
-}
-
-function recordCloudLiveResult(result){
-  var c = botState.cloud;
-  var alpha = (CloudStats && CloudStats.defaults && CloudStats.defaults.alpha) || 0.2;
-  var outcome = 0.5;
-  if (result === 'won') outcome = 1;
-  else if (result === 'lost') outcome = 0;
-  c.ewmaLive = c.ewmaLive + alpha * (outcome - c.ewmaLive);
-  if (result === 'lost') c.lossStreak++; else c.lossStreak = 0;
-  c.recentResults.push(outcome);
-  if (c.recentResults.length > 50) c.recentResults.shift();
-  if (result === 'won' && c.ewmaLive >= 0.54){ c.recoveryStreak += 1; }
-  else if (result === 'won'){ c.recoveryStreak = Math.max(1, c.recoveryStreak); }
-  else c.recoveryStreak = 0;
-  evaluateCloudDrift();
-  updateCloudUi();
-}
-
-function evaluateCloudDrift(){
-  var c = botState.cloud;
-  var perf = c.perf;
-  var ewmaCloud = (perf && isFinite(perf.ewma)) ? perf.ewma : 0.5;
-  var triggers = 0;
-  if (c.ewmaLive < 0.48) triggers++;
-  if ((c.ewmaLive - ewmaCloud) < -0.06) triggers++;
-  if (c.lossStreak >= 3) triggers++;
-  if (c.cloudAge != null && c.cloudAge > 48) triggers++;
-  if (triggers > 0){
-    if (c.lambdaIndex < c.lambdaStages.length - 1) c.lambdaIndex++;
-    c.driftTriggered = true;
-  } else if (c.driftTriggered && c.recoveryStreak >= 3){
-    c.lambdaIndex = Math.max(0, c.lambdaIndex - 1);
-    if (c.lambdaIndex === 0) c.driftTriggered = false;
-  }
-  updateCloudMode(perf);
-}
-
-function cloudGuardStep(step){
-  if (!enableCloud) return step;
-  var c = botState.cloud;
-  if (c.mode === 'HOT' && !c.driftTriggered) return step;
-  return Math.min(step, 1);
-}
-
-function estimateCloudScore(stats){
-  if (!stats) return 0;
-  var w = botState.cloud.weights || { w1:0.5, w2:0.3, w3:0.1, w4:0.1, Tcap:200 };
-  var trades = stats.trades || 0;
-  var wins = stats.wins || 0;
-  var wr = trades ? wins / trades : 0.5;
-  var ewma = (stats.ewma != null) ? stats.ewma : wr;
-  var roi = stats.avgROI || 0;
-  var cap = w.Tcap || 200;
-  var tradeRatio = cap ? Math.min(trades, cap) / cap : 0;
-  if (!isFinite(tradeRatio)) tradeRatio = 0;
-  return (ewma * (w.w1 || 0)) + (wr * (w.w2 || 0)) + (roi * (w.w3 || 0)) + (tradeRatio * (w.w4 || 0));
-}
-
-function signalBias(key){
-  var k = String(key || '').toLowerCase();
-  if (!k) return 0;
-  if (k.indexOf('bull') >= 0 || k.indexOf('buy') >= 0 || k.indexOf('call') >= 0 || /_up$/.test(k) || /upper_break/.test(k) || k.indexOf('support')>=0) return 1;
-  if (k.indexOf('bear') >= 0 || k.indexOf('sell') >= 0 || k.indexOf('put') >= 0 || /_down$/.test(k) || /lower_break/.test(k) || k.indexOf('resistance')>=0) return -1;
-  if (k.indexOf('oversold') >= 0) return 1;
-  if (k.indexOf('overbought') >= 0) return -1;
-  return 0;
-}
-
-function directionValue(dir){
-  if (dir === 'buy') return 1;
-  if (dir === 'sell') return -1;
-  return 0;
-}
-
-function valueToDirection(val, fallback){
-  if (val > 0.25) return 'buy';
-  if (val < -0.25) return 'sell';
-  return fallback || 'flat';
-}
-
-function maybeInitCloud(){
-  if (!enableCloud) return;
-  try{
-    scheduleCloudRefresh(true);
-  }catch(_){ }
-}
-
 /* ====== DOM references (set later in addUI) ====== */
-let profitDiv, signalDiv, timeDiv, wonDiv, wagerDiv, tradingSymbolDiv, cyclesHistoryDiv, totalProfitDiv, tradeDirectionDiv, maxStepDiv, profitPercentDivAdvisor, armedIndicatorDiv;
+let profitDiv, signalDiv, timeDiv, wonDiv, wagerDiv, tradingSymbolDiv, cyclesHistoryDiv, totalProfitDiv, tradeDirectionDiv, maxStepDiv, profitPercentDivAdvisor;
 let lossStreakDiv, pauseUntilDiv; // NEW for pause UI
 
 /* ====== Platform DOM ====== */
@@ -2381,16 +1160,6 @@ function addUI(){
       display:flex;justify-content:space-between;align-items:center;gap:6px;
     }
     .panel-header .version{font-size:11px;color:#7a7a7a;font-weight:normal;}
-    .cloud-badge{
-      padding:2px 6px;
-      border-radius:4px;
-      background:#9e9e9e;
-      color:#000;
-      font-size:11px;
-      font-weight:600;
-      text-transform:uppercase;
-      letter-spacing:0.04em;
-    }
 
     /* Сетка и строки в Trading */
     .info-grid{
@@ -2482,21 +1251,6 @@ function addUI(){
       accent-color:#fff;background:#111;border-radius:2px;width:110px;height:3px;cursor:pointer;
     }
 
-    .armed-indicator{
-      font-size:11px;
-      padding:4px 6px;
-      border-radius:4px;
-      background:#2a2a2a;
-      color:#f0f0f0;
-      display:flex;
-      justify-content:space-between;
-      gap:6px;
-      align-items:center;
-      line-height:1.2;
-      min-width:0;
-    }
-    .armed-indicator span{ min-width:0; }
-
     /* Управляющие кнопки графика */
     #tf-m1,#tf-m5,#live-btn{ padding:2px 6px; margin-right:4px; font-size:11px; }
 
@@ -2543,14 +1297,6 @@ function addUI(){
     <div class="panel-footer trading-footer" id="trading-footer"></div>
   `;
 
-  const tradingFooter = tradingPanel.querySelector('#trading-footer');
-  const armedBox = document.createElement('div');
-  armedBox.className = 'armed-indicator';
-  armedBox.innerHTML = '<span id="armed-status-label">ARMED</span><span id="armed-status-value">IDLE</span>';
-  if (tradingFooter){ tradingFooter.appendChild(armedBox); }
-  armedIndicatorDiv = armedBox;
-  try{ updateArmedIndicator(safeBlind.getState()); }catch(e){}
-
   /* Top Signals */
   const topPanel = document.createElement('div');
   topPanel.className = 'bot-trading-panel';
@@ -2567,22 +1313,6 @@ function addUI(){
   accPanel.innerHTML = `
     <div class="panel-header"><span>Signals Accuracy</span></div>
     <div id="signal-accuracy" style="font-size:12px;line-height:1.25;"></div>
-  `;
-
-  /* Cloud Signals */
-  const cloudPanel = document.createElement('div');
-  cloudPanel.className = 'bot-trading-panel';
-  cloudPanel.style.flex = "1";
-  cloudPanel.innerHTML = `
-    <div class="panel-header"><span>Cloud Signals</span><span id="cloud-status-badge" class="cloud-badge">Cloud: COLD</span></div>
-    <div style="font-size:12px;line-height:1.25;display:flex;flex-direction:column;gap:4px;">
-      <div style="display:flex;justify-content:space-between;gap:6px;">
-        <span id="cloud-lambda">λ=0.00</span>
-        <span id="cloud-updated">Age: —</span>
-      </div>
-      <div id="cloud-trades">Trades: 0</div>
-      <div id="cloud-top" style="display:flex;flex-direction:column;gap:2px;"></div>
-    </div>
   `;
 
   /* Technical */
@@ -2618,7 +1348,6 @@ function addUI(){
   cardsRow.className = 'cards-row';
   cardsRow.appendChild(topPanel);
   cardsRow.appendChild(accPanel);
-  cardsRow.appendChild(cloudPanel);
   cardsRow.appendChild(techPanel);
   cardsRow.appendChild(chartContainer);
 
@@ -2654,8 +1383,6 @@ function addUI(){
   lossStreakDiv = document.getElementById("loss-streak");
   pauseUntilDiv  = document.getElementById("pause-until");
   chartCanvas = document.getElementById('chart-canvas');
-
-  updateCloudUi();
 
   // controls
   document.getElementById('tf-m1').addEventListener('click', ()=>{ currentTF='M1'; renderChart(); });
@@ -2735,13 +1462,6 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
     const fmtMoney = (v) => { try { return (Number(v).toFixed(2)); } catch(e){ return String(v); } };
 
     const prevStep = currentBetStep;
-    let linkedTrade = null;
-    try{
-      if (Array.isArray(betHistory) && betHistory.length){
-        const candidate = betHistory[betHistory.length - 1];
-        if (candidate && candidate.tsOpen){ linkedTrade = candidate; }
-      }
-    }catch(_){ }
 
     // === лог результата для наглядности ===
     try {
@@ -2754,7 +1474,7 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
       };
       logTradeResult && logTradeResult(last);
       // фиксируем в истории (нормализовано к нижнему регистру)
-      if (Array.isArray(betHistory) && !linkedTrade) {
+      if (Array.isArray(betHistory)) {
         betHistory.push(last);
       }
     } catch(e) {}
@@ -2791,9 +1511,6 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
       'color:#ffcc66;font-weight:600', 'color:inherit',
       st, prevStep, currentBetStep
     );
-    try{
-      console.log(`[RESULT] ${st} step:${prevStep}→${currentBetStep}  profit:${fmtMoney(pnl)}`);
-    }catch(_){ }
 
     // уведомление для внутренних подписчиков
     try {
@@ -2801,81 +1518,6 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
         detail: { status: st, prevStep, nextStep: currentBetStep, lossStreak: consecutiveLosses }
       }));
     } catch(e){}
-
-    if (linkedTrade){
-      linkedTrade.won = st === 'won' ? 'won' : (st === 'lost' ? 'lost' : st);
-      linkedTrade.profit = pnl;
-      linkedTrade.tsClose = Date.now();
-      linkedTrade.result = linkedTrade.won;
-    }
-
-    if (enableCloud && botState.cloud.enabled){
-      const resultKey = st === 'won' ? 'win' : (st === 'lost' ? 'loss' : (st === 'returned' || st === 'return' ? 'return' : st));
-      const tradeRecord = {
-        tsOpen: (linkedTrade && linkedTrade.tsOpen) || meta.tsOpen || Date.now(),
-        tsClose: meta.tsClose || Date.now(),
-        asset: (linkedTrade && linkedTrade.asset) || meta.asset || symbolName,
-        timeframe: (linkedTrade && linkedTrade.timeframe) || meta.timeframe || currentTF,
-        signalKey: (linkedTrade && linkedTrade.signalKeys && linkedTrade.signalKeys[0]) || meta.signalKey || ((Array.isArray(window.activeSignalsThisTrade) && window.activeSignalsThisTrade[0]) || 'unknown'),
-        entryDir: (linkedTrade && linkedTrade.betDirection) || meta.betDirection || (meta.direction || 'flat'),
-        step: (linkedTrade && typeof linkedTrade.step === 'number') ? linkedTrade.step : prevStep,
-        bet: (meta.betValue != null ? meta.betValue : ((linkedTrade && linkedTrade.betValue) || 0)),
-        payout: meta.payout != null ? meta.payout : ((linkedTrade && linkedTrade.payout) || null),
-        result: resultKey,
-        pnl: pnl,
-        priceEntry: (linkedTrade && linkedTrade.openPrice) || meta.priceEntry || null,
-        priceExit: meta.priceExit != null ? meta.priceExit : null,
-        botVersion: appversion,
-        schema: 's1',
-        lambda: botState.cloud.lambda,
-        cloudMode: botState.cloud.mode,
-        ewmaLive: botState.cloud.ewmaLive,
-        ewmaCloud: botState.cloud.perf && botState.cloud.perf.ewma != null ? botState.cloud.perf.ewma : null
-      };
-      if (linkedTrade && Array.isArray(linkedTrade.signalKeys)) tradeRecord.signalKeys = linkedTrade.signalKeys.slice(0, 10);
-      tradeRecord.asset = normalizeAssetName(tradeRecord.asset || symbolName);
-      if (!tradeRecord.asset) tradeRecord.asset = 'UNKNOWN';
-      tradeRecord.timeframe = normalizeTimeframeName(tradeRecord.timeframe || currentTF);
-      tradeRecord.signalKey = String(tradeRecord.signalKey || 'unknown').trim() || 'unknown';
-      var derivedDir = tradeRecord.entryDir;
-      if (!derivedDir && tradeRecord.bet >= 0){ derivedDir = linkedTrade && linkedTrade.betDirection; }
-      tradeRecord.entryDir = cloudDirectionLabel(derivedDir);
-      tradeRecord.step = Number.isFinite(tradeRecord.step) ? tradeRecord.step : 0;
-      var betVal = Number(tradeRecord.bet);
-      tradeRecord.bet = isFinite(betVal) ? Math.abs(betVal) : 0;
-      var pnlVal = Number(tradeRecord.pnl);
-      tradeRecord.pnl = isFinite(pnlVal) ? pnlVal : 0;
-      if (tradeRecord.payout != null){
-        var payoutRaw = tradeRecord.payout;
-        if (typeof payoutRaw === 'string'){ payoutRaw = payoutRaw.replace(/[^0-9.\-]/g, ''); }
-        var payoutVal = Number(payoutRaw);
-        if (!isFinite(payoutVal)) payoutVal = null;
-        else if (payoutVal > 1.5) payoutVal = payoutVal / 100;
-        tradeRecord.payout = payoutVal;
-      } else {
-        tradeRecord.payout = null;
-      }
-      if (tradeRecord.priceEntry != null){
-        var pe = Number(tradeRecord.priceEntry);
-        tradeRecord.priceEntry = isFinite(pe) ? pe : null;
-      }
-      if (tradeRecord.priceExit != null){
-        var px = Number(tradeRecord.priceExit);
-        tradeRecord.priceExit = isFinite(px) ? px : null;
-      }
-      tradeRecord.result = resultKey === 'win' ? 'WIN' : (resultKey === 'loss' ? 'LOSS' : 'DRAW');
-      tradeRecord.tsOpen = toIsoStringSafe(tradeRecord.tsOpen);
-      tradeRecord.tsClose = toIsoStringSafe(tradeRecord.tsClose);
-
-      try{ recordCloudLiveResult(st === 'lost' ? 'lost' : (st === 'won' ? 'won' : 'returned')); }catch(_){ }
-
-      if (!cloudReadOnly && CloudStats && typeof CloudStats.updateAfterTrade === 'function'){
-        CloudStats.updateAfterTrade(tradeRecord).catch(function(err){
-          console.warn('[CLOUD ERROR] updateAfterTrade failed', err && err.message ? err.message : err);
-        });
-      }
-    }
-    try{ if (PreArmingController && typeof PreArmingController.onResult === 'function'){ PreArmingController.onResult(); } }catch(_){ }
   } catch (err) {
     console.error('[recordTradeResult:MG-FIX] error:', err);
   }
@@ -2910,14 +1552,6 @@ function queryPrice(){
     calculateIndicators();
   }
 
-  var newSymbolName = symbolDiv.textContent.replace("/", " ");
-  if (symbolName !== newSymbolName){
-    symbolName = newSymbolName;
-    if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
-    try{ if (PreArmingController && typeof PreArmingController.cancelPreArm === 'function'){ PreArmingController.cancelPreArm('symbol_change'); } }catch(_){ }
-    try{ prepareArmedForStep(currentBetStep, 'symbol-change'); }catch(e){}
-  }
-
   priceString = balanceDiv.innerHTML.replace(/,/g,'');
   currentBalance = parseFloat(priceString);
   currentProfit = Math.round((currentBalance - startBalance)*100)/100;
@@ -2940,93 +1574,33 @@ function getBetValue(step){
   return 1;
 }
 
-function getPressCount(step){
-  for (let i=0;i<betArray.length;i++) if (step===betArray[i].step) return betArray[i].pressCount;
-  return 0;
-}
-
-function prepareBetSize(step, direction, reason){
-  try{
-    prepareArmedForStep(step, reason || ('prearm-' + (direction || 'na')));
-    return true;
-  }catch(e){
-    console.warn('[PREP][ERROR]', e && e.message ? e.message : String(e));
-    return false;
-  }
-}
-
-function executeBet(direction){
-  const blindState = safeBlind.getState();
-  const amount = blindState && typeof blindState.amount === 'number' ? blindState.amount : getBetValue(currentBetStep);
-  const code = direction === 'sell' ? 'S' : 'W';
-  console.log(`[EXEC] ${code} size=$${isFinite(amount) ? amount.toFixed(2) : '—'}`);
-  safeBlind.click(direction);
-  return { amount };
-}
-
-function prepareArmedForStep(step, reason){
-  const target = getBetValue(step);
-  const pressCount = getPressCount(step);
-  const cycleIndex = cyclesStats.length + 1;
-  let summary = '[BET][NEXT] calc=$' + target.toFixed(2) + ' | step=' + step + ' | array=' + activeBetArrayName + ' | cycle=' + cycleIndex;
-  if (reason){ summary += ' | reason=' + reason; }
-  console.log(summary);
-  let started = false;
-  try{
-    if (step === 0){
-      started = safeBlind.prepareStep0(pressCount, { amount: target });
-    } else {
-      started = safeBlind.prepare(step, pressCount, { amount: target });
-    }
-  }catch(e){
-    console.warn('[BET][PREP_FAIL]', e && e.message ? e.message : String(e));
-  }
-  if (!started){
-    setTimeout(function(){ prepareArmedForStep(step, reason ? reason + '-retry' : 'retry'); }, 600);
-  }
-}
-
-function smartBet(step, direction, onDone){
-  if (typeof onDone !== 'function') onDone = function(){};
-
+function smartBet(step, direction){
+  // вернём true, если реально отправили ордер; иначе false
   const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
   profitPercentDivAdvisor.innerHTML = currentProfitPercent;
 
   if (currentProfitPercent < 90){
+    // сигнализируем в UI и чётко возвращаем «неуспех»
     profitPercentDivAdvisor.style.background = redColor;
     profitPercentDivAdvisor.style.color = "#fff";
     profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => ' + currentProfitPercent;
-    onDone(false, { reason: 'low-profit-percent' });
     return false;
   }
 
-  const blindState = safeBlind.getState();
-  if (!blindState || blindState.status !== 'ARMED'){
-    const status = blindState && blindState.status ? blindState.status : 'unknown';
-    console.warn('[ABORT] reason=blind-status', status);
-    onDone(false, { reason: 'blind-'+status.toLowerCase() });
-    return false;
-  }
-  if (typeof blindState.step === 'number' && blindState.step !== step){
-    console.warn('[ABORT] reason=step-mismatch', blindState.step, step);
-    onDone(false, { reason: 'step-mismatch' });
-    try{ prepareArmedForStep(step, 'step-mismatch'); }catch(e){}
-    return false;
+  // найти pressCount по шагу
+  let pressCount = 0;
+  for (let i = 0; i < betArray.length; i++){
+    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
   }
 
-  const targetValue = getBetValue(step);
+  // сброс ставки и установка нужного размера
+  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
+  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
 
-  profitPercentDivAdvisor.style.background = 'inherit';
-  profitPercentDivAdvisor.style.color = '#fff';
-  try{
-    const execMeta = executeBet(direction);
-    onDone(true, { amount: targetValue, direction: direction, execMeta });
-    return true;
-  }catch(e){
-    console.warn('[ABORT] reason=blind-click', e && e.message ? e.message : e);
-    onDone(false, { reason: 'blind-click-error', error: e });
-    return false;
-  }
+  // отправка ордера
+  setTimeout(() => { if (direction === 'buy') buy(); else sell(); }, 100);
+
+  return true;
 }
 
 function resetCycle(winStatus){
@@ -3038,429 +1612,6 @@ function resetCycle(winStatus){
     totalProfitDiv.innerHTML = totalProfit;
     totalProfitDiv.style.background = totalProfit<0?redColor:(totalProfit>0?greenColor:'inherit');
   }
-  try{ prepareArmedForStep(currentBetStep, 'cycle-reset'); }catch(e){}
-}
-
-const PreArmingController = (function(){
-  const STATES = {
-    IDLE: 'IDLE',
-    PREPARE_SIZE: 'PREPARE_SIZE',
-    ARMED: 'ARMED',
-    WAIT_SIGNAL: 'WAIT_SIGNAL',
-    EXECUTE: 'EXECUTE',
-    RESULT: 'RESULT',
-    CANCEL: 'CANCEL'
-  };
-
-  let stage = STATES.IDLE;
-  let ctx;
-  let schedulerTimer = null;
-  const tasks = [];
-  let lastCancelReason = null;
-
-  function now(){ return Date.now(); }
-
-  function resetContext(){
-    ctx = {
-      step: null,
-      pressCount: 0,
-      amount: 0,
-      direction: 'flat',
-      allow: false,
-      payout: NaN,
-      EV: null,
-      sys: 'NONE',
-      diff: null,
-      thr: null,
-      t0: 0,
-      startedAt: 0,
-      candidateTs: 0,
-      candidateLogged: false,
-      gateLogged: false,
-      onExecute: null,
-      payload: null
-    };
-  }
-
-  resetContext();
-
-  function setStage(next){ stage = next; }
-
-  function clearScheduler(){
-    tasks.length = 0;
-    if (schedulerTimer){
-      clearTimeout(schedulerTimer);
-      schedulerTimer = null;
-    }
-  }
-
-  function pump(){
-    if (schedulerTimer) return;
-    const runner = function(){
-      schedulerTimer = null;
-      const ts = now();
-      while (tasks.length && tasks[0].at <= ts){
-        const task = tasks.shift();
-        try{ task.fn(); }catch(err){ console.warn('[PreArm] task error', task.tag, err); }
-      }
-      if (tasks.length){
-        const delay = Math.max(10, tasks[0].at - now());
-        schedulerTimer = setTimeout(runner, delay);
-      }
-    };
-    runner();
-  }
-
-  function schedule(tag, at, fn){
-    const ts = Math.max(now(), at);
-    tasks.push({ tag, at: ts, fn });
-    tasks.sort((a,b)=>a.at - b.at);
-    pump();
-  }
-
-  function computeT0(){
-    try{
-      const chs = window.__CHS;
-      if (chs && chs.lastM1CloseTs){
-        const predicted = chs.lastM1CloseTs + 60000;
-        if (predicted > now()) return predicted;
-      }
-    }catch(_){ }
-    return now() + 3000;
-  }
-
-  function formatNum(val){
-    if (val == null) return '—';
-    if (typeof val === 'number' && isFinite(val)){
-      if (Math.abs(val) >= 100) return val.toFixed(0);
-      if (Math.abs(val) >= 10) return val.toFixed(1);
-      return val.toFixed(2);
-    }
-    return String(val);
-  }
-
-  function rebindDom(){
-    let ok = true;
-    try{
-      const tooltipList = document.getElementsByClassName('tooltip-text') || [];
-      const text = 'Winnings amount you receive';
-      let rebound = null;
-      for (let i=0;i<tooltipList.length;i++){
-        const el = tooltipList[i];
-        const txt = (el.textContent || el.innerText || '');
-        if (txt && txt.indexOf(text) !== -1){ rebound = el; break; }
-      }
-      if (rebound){ targetElement2 = rebound; } else { ok = false; }
-    }catch(e){ ok = false; }
-    try{
-      const canvas = document.getElementById('chart-canvas');
-      if (canvas){ chartCanvas = canvas; } else { ok = false; }
-    }catch(e){ ok = false; }
-    try{ if (typeof updateTradingSymbolUI === 'function') updateTradingSymbolUI(); }catch(_){ }
-    try{ if (typeof updateWarmupUI === 'function') updateWarmupUI(); }catch(_){ }
-    return ok && !!targetElement2 && !!chartCanvas;
-  }
-
-  function healthCheck(meta){
-    const snapshot = meta || ctx;
-    const ts = now();
-    if (isTradeOpen){ return { ok:false, reason:'trade-open' }; }
-    if (typeof isPaused === 'function' && isPaused()){ return { ok:false, reason:'paused' }; }
-    if (ts - lastTradeTime < minTimeBetweenTrades){ return { ok:false, reason:'min-delay' }; }
-    if (snapshot && snapshot.allow === false){ return { ok:false, reason:'allow' }; }
-    let payout = snapshot && snapshot.payout;
-    if (!isFinite(payout)){
-      try{ payout = getPayoutPercent(); }catch(_){ }
-    }
-    if (!isFinite(payout)){ return { ok:false, reason:'payout-na' }; }
-    if (payout < CFG.minPayoutToTrade){ return { ok:false, reason:'payout-low', payout }; }
-    const autoState = (window.__autoSwitch && window.__autoSwitch.state) || {};
-    if (autoState.switchInProgress){ return { ok:false, reason:'switching' }; }
-    if (!autoState.warmupReady){ return { ok:false, reason:'warmup' }; }
-    if (ts < (autoState.cooldownUntil || 0)){ return { ok:false, reason:'cooldown' }; }
-    if (typeof isReady === 'function'){
-      try{ if (!isReady()){ return { ok:false, reason:'chs-warmup' }; } }catch(_){ }
-    }
-    if (!targetElement2){ return { ok:false, reason:'dom-price' }; }
-    if (!balanceDiv){ return { ok:false, reason:'dom-balance' }; }
-    if (!chartCanvas){ return { ok:false, reason:'dom-chart' }; }
-    return { ok:true, payout, allow: snapshot ? snapshot.allow : undefined, EV: snapshot ? snapshot.EV : undefined, sys: snapshot ? snapshot.sys : undefined };
-  }
-
-  function cancel(reason){
-    const stageName = stage;
-    clearScheduler();
-    resetContext();
-    lastCancelReason = reason || null;
-    setStage(STATES.CANCEL);
-    if (reason){ console.warn(`[CANCEL] reason=${reason} stage=${stageName}`); }
-  }
-
-  function runPrepare(){
-    setStage(STATES.PREPARE_SIZE);
-    const gate = healthCheck();
-    if (!gate.ok && CFG.preArming.prepareAbortOnGateFail){
-      cancel(gate.reason || 'gate');
-      return;
-    }
-    prepareBetSize(ctx.step, ctx.direction, 'prearm');
-  }
-
-  function runRebind(){
-    if (!rebindDom()){
-      cancel('rebind');
-      return;
-    }
-    const gate = healthCheck();
-    if (!gate.ok){
-      cancel(gate.reason || 'gate');
-    }
-  }
-
-  function runCandidate(){
-    setStage(STATES.ARMED);
-    ctx.candidateTs = now();
-    if (!ctx.direction || ctx.direction === 'flat'){
-      cancel('no-direction');
-      return;
-    }
-    if (!ctx.candidateLogged){
-      console.log(`[ARMED] dir=${ctx.direction} diff=${formatNum(ctx.diff)} thr=${formatNum(ctx.thr)}`);
-      ctx.candidateLogged = true;
-    }
-  }
-
-  function runGate(){
-    setStage(STATES.WAIT_SIGNAL);
-    const gate = healthCheck();
-    if (!gate.ok){
-      cancel(gate.reason || 'gate');
-      return;
-    }
-    if (!ctx.gateLogged){
-      const payout = isFinite(gate.payout) ? gate.payout.toFixed(1) + '%' : 'unknown';
-      const ev = ctx.EV != null && isFinite(ctx.EV) ? ctx.EV.toFixed(4) : 'unknown';
-      const allow = gate.allow === undefined ? (ctx.allow ? 'true' : 'false') : String(gate.allow);
-      const sys = gate.sys || ctx.sys || 'NONE';
-      console.log(`[GATE] payout=${payout} EV=${ev} allow=${allow} (sys=${sys})`);
-      ctx.gateLogged = true;
-    }
-    if (typeof shouldTradeNow === 'function'){
-      try{ if (!shouldTradeNow()){ cancel('minute-limit'); } }catch(_){ }
-    }
-  }
-
-  function runHealth(){
-    const gate = healthCheck();
-    if (!gate.ok){
-      cancel(gate.reason || 'health');
-      return;
-    }
-    if (typeof shouldTradeNow === 'function'){
-      try{ if (!shouldTradeNow()){ cancel('minute-limit'); } }catch(_){ }
-    }
-  }
-
-  function runExecute(){
-    const gate = healthCheck();
-    if (!gate.ok){
-      cancel(gate.reason || 'execute');
-      return;
-    }
-    if (typeof shouldTradeNow === 'function'){
-      try{ if (!shouldTradeNow()){ cancel('minute-limit'); return; } }catch(_){ }
-    }
-    if (typeof ctx.onExecute !== 'function'){
-      cancel('no-executor');
-      return;
-    }
-    setStage(STATES.EXECUTE);
-    try{
-      ctx.onExecute();
-      if (typeof markTradeDecision === 'function'){
-        try{ markTradeDecision(); }catch(_){ }
-      }
-    }catch(err){
-      console.warn('[PreArm][EXEC] error', err);
-      cancel('exec-error');
-    }
-  }
-
-  function startPreArm(step){
-    resetContext();
-    ctx.step = step;
-    ctx.pressCount = getPressCount(step);
-    ctx.amount = getBetValue(step);
-    ctx.startedAt = now();
-    ctx.t0 = computeT0();
-    lastCancelReason = null;
-    setStage(STATES.PREPARE_SIZE);
-    console.log(`[PREP] step=${step} pressCount=${ctx.pressCount}`);
-    schedule('prepare', ctx.t0 - CFG.preArming.t_prepare_ms, runPrepare);
-    schedule('rebind', ctx.t0 - CFG.preArming.t_rebind_ms, runRebind);
-    schedule('candidate', ctx.t0 - CFG.preArming.t_candidate_ms, runCandidate);
-    schedule('gate', ctx.t0 - CFG.preArming.t_gate_ms, runGate);
-    schedule('health', ctx.t0 - CFG.preArming.t_health_ms, runHealth);
-    schedule('execute', ctx.t0, runExecute);
-    return true;
-  }
-
-  function ensure(meta){
-    if (!CFG.preArmingEnabled){
-      if (stage !== STATES.IDLE){ cancel('prearm-disabled'); }
-      return false;
-    }
-    if (!meta){ return false; }
-    ctx.direction = meta.direction || ctx.direction;
-    ctx.allow = !!meta.allow;
-    ctx.payout = meta.payout != null ? meta.payout : ctx.payout;
-    ctx.EV = meta.EV != null ? meta.EV : ctx.EV;
-    ctx.sys = meta.sys || ctx.sys;
-    ctx.diff = meta.diff != null ? meta.diff : ctx.diff;
-    ctx.thr = meta.thr != null ? meta.thr : ctx.thr;
-    ctx.onExecute = meta.onExecute || ctx.onExecute;
-    ctx.payload = meta.payload || ctx.payload;
-
-    if (stage === STATES.IDLE || stage === STATES.CANCEL){
-      if (ctx.direction === 'flat' || !ctx.allow){ return false; }
-      return startPreArm(meta.step);
-    }
-
-    if (meta.step != null && ctx.step != null && meta.step !== ctx.step){
-      cancel('step-change');
-      if (ctx.direction !== 'flat' && ctx.allow){
-        return startPreArm(meta.step);
-      }
-      return false;
-    }
-
-    if (ctx.direction === 'flat' || !ctx.allow){
-      cancel(ctx.direction === 'flat' ? 'direction-flat' : 'allow-false');
-      return false;
-    }
-
-    return true;
-  }
-
-  function execOrder(dir){
-    if (dir && dir !== ctx.direction){ ctx.direction = dir; }
-    runExecute();
-  }
-
-  function cancelPreArm(reason){ cancel(reason || 'manual'); }
-
-  function onResult(){
-    setStage(STATES.RESULT);
-    clearScheduler();
-    resetContext();
-    lastCancelReason = null;
-    setStage(STATES.IDLE);
-  }
-
-  function state(){ return stage; }
-
-  function stats(){
-    const base = { state: stage };
-    if (ctx){
-      base.step = ctx.step;
-      base.direction = ctx.direction;
-      base.allow = ctx.allow;
-      base.payout = ctx.payout;
-      base.EV = ctx.EV;
-      base.t0 = ctx.t0;
-    }
-    if (lastCancelReason){ base.lastCancelReason = lastCancelReason; }
-    return base;
-  }
-
-  const api = {
-    consider: ensure,
-    startPreArm,
-    cancelPreArm,
-    execOrder,
-    healthCheck,
-    rebindDom,
-    onResult,
-    state,
-    stats
-  };
-
-  try{
-    window.__preArm = Object.assign(window.__preArm || {}, api);
-  }catch(_){ }
-
-  return api;
-})();
-
-let pendingTradeMeta = null;
-
-function buildTradeSnapshot(meta){
-  const direction = meta && meta.direction ? meta.direction : 'flat';
-  const step = meta && typeof meta.step === 'number' ? meta.step : currentBetStep;
-  const signals = Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : [];
-  const trade = {
-    time: (meta && meta.hTime) ? meta.hTime : humanTime(time),
-    betTime: betTimeDiv.textContent,
-    openPrice: globalPrice,
-    step,
-    betValue: getBetValue(step),
-    betDirection: direction,
-    shortEMA: window.currentShortEMA,
-    longEMA: window.currentLongEMA,
-    emaDiff: (((window.currentShortEMA)!=null ? (window.currentShortEMA) : (0))) - (((window.currentLongEMA)!=null ? (window.currentLongEMA) : (0))),
-    rsi: window.currentRSI,
-    bullishScore: meta && meta.bullishScore != null ? meta.bullishScore : (window.bullishScore || 0),
-    bearishScore: meta && meta.bearishScore != null ? meta.bearishScore : (window.bearishScore || 0),
-    scoreDiff: meta && meta.diff != null ? meta.diff : Math.abs((window.bullishScore||0) - (window.bearishScore||0)),
-    threshold: meta && meta.thr != null ? meta.thr : (11 - signalSensitivity),
-    signalKeys: signals,
-    tsOpen: Date.now(),
-    asset: symbolName,
-    timeframe: currentTF,
-    cloudMode: botState.cloud.mode,
-    cloudLambda: botState.cloud.lambda,
-    cloudSignals: signals.slice(0)
-  };
-  try{ trade.payout = typeof getPayoutPercent === 'function' ? getPayoutPercent() : undefined; }catch(_){ }
-  return trade;
-}
-
-function executePlannedTrade(meta){
-  if (!meta) return false;
-  if (cyclesToPlay <= 0) return false;
-  if (!autoTradingEnabled) return false;
-  if (meta.direction === 'flat') return false;
-  if (isTradeOpen) return false;
-  if (enteringTrade) return false;
-
-  const tradeCard = buildTradeSnapshot(meta);
-  const step = meta.step != null ? meta.step : currentBetStep;
-  const direction = meta.direction;
-
-  enteringTrade = true;
-  smartBet(step, direction, function(placed, info){
-    enteringTrade = false;
-    if (!placed){
-      try{ if (PreArmingController && typeof PreArmingController.cancelPreArm === 'function'){ PreArmingController.cancelPreArm('exec-abort'); } }catch(_){ }
-      return;
-    }
-    isTradeOpen = true;
-    lastTradeTime = time;
-    window.lastTradeDirection = direction;
-    if (info && info.execMeta && info.execMeta.amount != null){
-      try{ tradeCard.betValue = info.execMeta.amount; }catch(_){ }
-    }
-    if (enableCloud){ cloudRecordTradeOpen(); }
-    if (typeof logTradeOpen === 'function') logTradeOpen(tradeCard);
-    betHistory.push(tradeCard);
-    totalWager += tradeCard.betValue;
-    wagerDiv.innerHTML = totalWager;
-    maxStepInCycle = Math.max(maxStepInCycle, tradeCard.step);
-    maxStepDiv.innerHTML = maxStepInCycle;
-    window.activeSignalsThisTrade = tradeCard.signalKeys.slice(0);
-    pendingTradeMeta = null;
-  });
-  return true;
 }
 
 function tradeLogic(){
@@ -3479,7 +1630,6 @@ function tradeLogic(){
   else if (lastStatus === 'lost') currentBetStep = Math.min(prevBetStep + 1, betArray.length - 1);
   else currentBetStep = prevBetStep;
   if (typeof MG_WARMUP_TRADES === "number" && betHistory.length < MG_WARMUP_TRADES) { currentBetStep = 0; }
-  currentBetStep = cloudGuardStep(currentBetStep);
 
   // оценки/сигнал
   const bullishScore = window.bullishScore || 0;
@@ -3498,47 +1648,6 @@ function tradeLogic(){
     tradeDirectionDiv.style.background = '#555555';
   }
   tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`;
-
-  // === Cloud influence ===
-  if (enableCloud && botState.cloud.enabled && botState.cloud.perf){
-    const lambda = botState.cloud.lambda;
-    const perf = botState.cloud.perf;
-    const active = Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot : [];
-    let cloudBias = 0;
-    let weightSum = 0;
-    for (let i = 0; i < active.length; i++){
-      const sig = active[i];
-      const stats = perf.signals ? perf.signals[sig] : null;
-      if (!stats) continue;
-      if (!CloudStats.shouldTrade(sig, perf, botState.cloud.policy)) continue;
-      const bias = signalBias(sig);
-      if (!bias) continue;
-      const score = estimateCloudScore(stats);
-      cloudBias += bias * score;
-      weightSum += Math.abs(score);
-    }
-    const cloudValue = weightSum ? (cloudBias / weightSum) : 0;
-    const localValue = directionValue(tradeDirection);
-    const combinedValue = (1 - lambda) * localValue + lambda * cloudValue;
-    let finalDirection = valueToDirection(combinedValue, tradeDirection);
-    if (finalDirection === 'flat' && botState.cloud.mode === 'HOT' && Math.abs(cloudValue) > 0.1){
-      if (Math.random() < CLOUD_EXPLORE_RATE && !shouldThrottleByTraining()){
-        finalDirection = cloudValue >= 0 ? 'buy' : 'sell';
-      }
-    }
-    tradeDirection = finalDirection;
-    tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold}) λ=${lambda.toFixed(2)}`;
-  }
-
-  if (shouldThrottleByTraining()){
-    tradeDirection = 'flat';
-    tradeDirectionDiv.style.background = '#555555';
-    tradeDirectionDiv.innerHTML = `TRAINING (${botState.cloud.mode})`;
-  }
-  let gateAllow = false;
-  let gateSys = 'NONE';
-  let gatePayout = NaN;
-  let gateEV = null;
 /* [PORTFOLIO GATE v2 SAFE] — trend/mean-reversion switch + EV gate + one-per-minute aggregation */
 (function(){
   try{
@@ -3575,11 +1684,6 @@ function tradeLogic(){
     const EV = (p_est!=null && r!=null) ? (p_est*r - (1-p_est)) : null;
 
     if (EV != null && EV < 0){ allow = false; }
-
-    gateAllow = allow;
-    gateSys = sys;
-    gatePayout = payout;
-    gateEV = EV;
 
     if (!allow){
       tradeDirection = 'flat';
@@ -3771,33 +1875,51 @@ function tradeLogic(){
   }
 
   // ВХОД В СДЕЛКУ
-  const autoReady = cyclesToPlay > 0 && autoTradingEnabled;
-  const tradeMeta = {
-    step: currentBetStep,
-    direction: tradeDirection,
-    allow: gateAllow,
-    payout: gatePayout,
-    EV: gateEV,
-    sys: gateSys,
-    diff: scoreDifference,
-    thr: adjustedThreshold,
-    bullishScore,
-    bearishScore,
-    hTime,
-    betTime
-  };
-  pendingTradeMeta = tradeMeta;
+  if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
+    // открываем ТОЛЬКО если сделки нет
+    if (!isTradeOpen){
+      // сформируем карточку сделки заранее
+      const currentTrade = {
+        time: hTime,
+        betTime: betTime,
+        openPrice: globalPrice,
+        step: currentBetStep,
+        betValue: getBetValue(currentBetStep),
+        betDirection: tradeDirection,
+        shortEMA: window.currentShortEMA,
+        longEMA: window.currentLongEMA,
+        emaDiff: (((window.currentShortEMA)!=null ? (window.currentShortEMA) : (0))) - (((window.currentLongEMA)!=null ? (window.currentLongEMA) : (0))),
+        rsi: window.currentRSI,
+        bullishScore,
+        bearishScore,
+        scoreDiff: scoreDifference,
+        threshold: adjustedThreshold,
+        // NEW: запоминаем активные сигналы, по которым принималось решение
+        signalKeys: Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot.slice(0) : []
+      };
 
-  if (CFG.preArmingEnabled){
-    const metaForPreArm = Object.assign({}, tradeMeta, {
-      allow: gateAllow && autoReady,
-      direction: autoReady ? tradeDirection : 'flat',
-      onExecute: function(){ executePlannedTrade(pendingTradeMeta); }
-    });
-    try{ PreArmingController.consider(metaForPreArm); }catch(e){ }
-  } else {
-    if (autoReady && gateAllow && tradeDirection !== 'flat'){
-      executePlannedTrade(tradeMeta);
+      // пытаемся реально поставить
+      const placed = smartBet(currentBetStep, tradeDirection);
+
+      if (placed){
+        // отмечаем открытие, время троттлинга, логируем и пушим В ИСТОРИЮ
+        isTradeOpen = true;
+        lastTradeTime = time;
+
+        if (typeof logTradeOpen === 'function') logTradeOpen(currentTrade);
+        betHistory.push(currentTrade);
+
+        totalWager += currentTrade.betValue;
+        wagerDiv.innerHTML = totalWager;
+
+        maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
+        maxStepDiv.innerHTML = maxStepInCycle;
+
+        // NEW: фиксируем список активных сигналов конкретно для этой сделки
+        window.activeSignalsThisTrade = currentTrade.signalKeys.slice(0);
+      } else {
+        // ничего не делаем (не ставим isTradeOpen/lastTradeTime), чтобы не было фантомных входов
+      }
     }
   }
 
@@ -3880,7 +2002,9 @@ const observer = new MutationObserver(muts=>{
       isTradeOpen=false;
       if (tradeStatus==='won') currentBetStep=0;
       else if (tradeStatus==='lost') currentBetStep=Math.min(currentBetStep+1, betArray.length-1);
-      try{ prepareArmedForStep(currentBetStep, 'result-'+tradeStatus); }catch(e){}
+
+      symbolName = symbolDiv.textContent.replace("/", " ");
+      if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
       betTime = betTimeDiv.textContent;
 
     }catch(e){ console.warn('[DealsObserver] parse error:', e); }
@@ -3914,8 +2038,6 @@ initChart();
 setInterval(renderChart, 1000);
 setInterval(queryPrice, 100);
 _attachDealsObserver();
-try{ prepareArmedForStep(currentBetStep, 'startup'); }catch(e){}
-maybeInitCloud();
 
 })();
 
@@ -3926,7 +2048,7 @@ maybeInitCloud();
   if (window.__FAV_AUTOSWITCH_PATCH_V2__) return;
   window.__FAV_AUTOSWITCH_PATCH_V2__ = true;
 
-  const AS_CFG = {
+  const CFG = {
     minPayoutToTrade: 90,
     payoutDebounceChecks: 3,
     assetSwitchCooldownMs: 5000,
@@ -3942,10 +2064,6 @@ maybeInitCloud();
     warmupReady: true,
     lastSeenSymbol: null
   };
-
-  try{
-    window.__autoSwitch = Object.assign(window.__autoSwitch || {}, { state: ST, config: AS_CFG });
-  }catch(_){ }
 
   function now(){ return Date.now(); }
   function getElByClassOne(cls){
@@ -3988,10 +2106,10 @@ maybeInitCloud();
     document.dispatchEvent(new KeyboardEvent("keyup", evInit));
   }
   function shouldSwitchAsset(){
-    if (!AS_CFG.autoSwitchEnabled) return false;
+    if (!CFG.autoSwitchEnabled) return false;
     const p = getPayoutPercent(); if (!isFinite(p)) return false;
-    if (p < AS_CFG.minPayoutToTrade) ST.belowCount++; else ST.belowCount = 0;
-    return ST.belowCount >= AS_CFG.payoutDebounceChecks;
+    if (p < CFG.minPayoutToTrade) ST.belowCount++; else ST.belowCount = 0;
+    return ST.belowCount >= CFG.payoutDebounceChecks;
   }
   function refreshDomRefs(){ updateTradingSymbolUI(); }
   function resetAssetContext(){
@@ -4006,7 +2124,7 @@ maybeInitCloud();
     const baseLen = (window.priceHistory && window.priceHistory.length) || 0;
     (function loop(){
       const len = (window.priceHistory && window.priceHistory.length) || 0;
-      const okTicks = (len - baseLen) >= AS_CFG.dataWarmupTicks;
+      const okTicks = (len - baseLen) >= CFG.dataWarmupTicks;
       if (okTicks || now() > timeoutAt){
         done && done(); return;
       }
@@ -4015,10 +2133,9 @@ maybeInitCloud();
   }
   function switchToNextFavorite(){
     if (ST.switchInProgress) return;
-    try{ if (PreArmingController && typeof PreArmingController.cancelPreArm === 'function'){ PreArmingController.cancelPreArm('asset_switch'); } }catch(_){ }
     ST.switchInProgress = true;
     ST.warmupReady = false;
-    ST.cooldownUntil = now() + AS_CFG.assetSwitchCooldownMs;
+    ST.cooldownUntil = now() + CFG.assetSwitchCooldownMs;
     console.log("🟡 [ASSET] Low payout — requesting switch via Shift+Tab");
     emulateKey("Shift",{shift:true}); emulateKey("Tab",{shift:true});
     setTimeout(()=>{
@@ -4028,7 +2145,6 @@ maybeInitCloud();
         ST.switchInProgress = false;
         ST.warmupReady = true;
         ST.belowCount = 0;
-        try{ if (PreArmingController && typeof PreArmingController.rebindDom === 'function'){ PreArmingController.rebindDom(); } }catch(_){ }
         console.log("⏱️ [ASSET] Warmup ready");
       });
     }, 500);
