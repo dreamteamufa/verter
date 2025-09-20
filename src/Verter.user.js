@@ -1,4 +1,3 @@
-// BUILD: StakeFix app18 port — CHS compliant (2025-09)
 (function(){
   try{
     if (window.top !== window) { return; }             // do not run in iframes
@@ -10,47 +9,10 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.3.0 (SlowBet v1, StakeFix)";
-
-// --- SlowBet (ultra-light, no UI, no storage) ---
-var SB_ENABLED = true;                 // всегда включён
-var SB_FIRST_SECONDS = 4;              // вход только в первые N секунд новой M1
-var SB_MIN_INTERVAL_MS = 120000;       // минимум 2 минуты между сделками
-var SB_LOSS_COOLDOWN_COUNT = 3;        // после N подряд лоссов
-var SB_LOSS_COOLDOWN_MIN = 30;         // пауза X минут
-
-var __sbLastTradeTs = 0;
-var __sbCooldownUntil = 0;
-var __sbLossStreak = 0;
-
-// допускаем торговать только если соблюдены интервалы/окно M1/кулдаун
-function SB_allow(nowTs){
-  if (!SB_ENABLED) return true;
-  if (nowTs < __sbCooldownUntil) return false;
-  if (nowTs - __sbLastTradeTs < SB_MIN_INTERVAL_MS) return false;
-  // оценка фазы M1 без внешних хуков: позиция в минуте
-  var msInMinute = nowTs % 60000;
-  if (msInMinute > SB_FIRST_SECONDS * 1000) return false;
-  // (при желании) не входить в последние 12с:
-  // if (60000 - msInMinute < 12000) return false;
-  return true;
-}
-function SB_markTrade(nowTs){ __sbLastTradeTs = nowTs; }
-function SB_onTradeResult(isWin){
-  if (isWin) {
-    __sbLossStreak = 0;
-  } else {
-    __sbLossStreak++;
-    if (__sbLossStreak >= SB_LOSS_COOLDOWN_COUNT){
-      __sbCooldownUntil = Date.now() + (SB_LOSS_COOLDOWN_MIN * 60000);
-      __sbLossStreak = 0; // серия зафиксирована → обнуляем счётчик
-    }
-  }
-}
-// --- /SlowBet ---
+const appversion = "Verter ver. 5.11.1";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
-var BOT_BUILD = "5.12.0-CAN CHS StakeFix";
+var BOT_BUILD = "5.11.1-CAN CHS AllStages";
 var QUIET_CONSOLE = true; // only errors by default
 try{ console.log("[BUILD]", BOT_BUILD, { CHS:true, ts:1757974218 }); }catch(_){
 }
@@ -104,32 +66,6 @@ const betArray3 = [
     {step: 4, value: 1800, pressCount: 42}
 ];
 
-const MG = (window.MG = window.MG || { step: 0 });
-const locks = (window.__VERTER_LOCKS__ = window.__VERTER_LOCKS__ || { placing: false, inflight: false });
-
-const AG_MIN_PAYOUT = (typeof window.AG_MIN_PAYOUT === 'number' ? window.AG_MIN_PAYOUT : 0.92);
-const DRY_RUN = Boolean(window.DRY_RUN);
-
-function getStepEntry(step){
-  if (!Array.isArray(betArray)) return null;
-  for (let i = 0; i < betArray.length; i++){
-    if (step === betArray[i].step) return betArray[i];
-  }
-  return null;
-}
-
-function getPressCountForStep(step){
-  const entry = getStepEntry(step);
-  return entry && Number.isFinite(entry.pressCount) ? entry.pressCount : 0;
-}
-
-function getTargetValueForStep(step){
-  const entry = getStepEntry(step);
-  return entry && Number.isFinite(entry.value) ? entry.value : 0;
-}
-window.getPressCountForStep = getPressCountForStep;
-window.getTargetValueForStep = getTargetValueForStep;
-
 function logActiveBetArray(name){
   try{ console.log("[DEBUG] Active bet array:", name); }catch(_){ }
 }
@@ -158,7 +94,6 @@ let lastTradeTime = 0;
 let lastSignalCheck = 0;
 let signalSensitivity = 3;
 let autoTradingEnabled = true;
-let minuteBoundarySynced = false;
 
 /* ====== NEW: Signal Stats (QWEN-like) ====== */
 // структура для учёта точности по каждому сигналу
@@ -272,49 +207,6 @@ function cur(n){ return (n < 0 ? '-' : '') + '$' + Math.abs(Number(n)).toFixed(2
 function pct(n){ return Number(n).toFixed(2) + '%'; }
 function humanTime(t){ let d=new Date(t); let h=String(d.getHours()).padStart(2,'0'), m=String(d.getMinutes()).padStart(2,'0'), s=String(d.getSeconds()).padStart(2,'0'); return `${h}:${m}:${s}`; }
 function ts(ms){ return humanTime(ms || Date.now()); }
-
-function delay(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
-
-function hudLog(prefix, message){
-  try{
-    if (typeof window.VERTER_LOG === 'function'){
-      window.VERTER_LOG(`${prefix} ${message}`);
-    } else {
-      console.log(`${prefix} ${message}`);
-    }
-  }catch(e){
-    try{ console.log(`${prefix} ${message}`); }catch(_){}
-  }
-}
-
-function getPayout(){
-  let el = null;
-  try{ if (typeof percentProfitDiv !== 'undefined' && percentProfitDiv) el = percentProfitDiv; }catch(e){}
-  if (!el) el = document.querySelector('.trade-profit') || document.querySelector('.value__val-start');
-  if (!el) return NaN;
-  const txt = (el.textContent || el.innerText || '').replace(',', '.');
-  const m = txt.match(/(\d{1,3})(?:[.,](\d+))?\s*%/);
-  if (!m) return NaN;
-  const whole = parseInt(m[1], 10);
-  const frac = m[2] ? parseFloat(`0.${m[2]}`) : 0;
-  return (whole + frac) / 100;
-}
-window.getPayout = getPayout;
-
-async function waitForMinuteBoundary(){
-  if (!minuteBoundarySynced){
-    const now = Date.now();
-    const ms = now % 60000;
-    const waitMs = (ms === 0) ? 0 : (60000 - ms);
-    if (waitMs > 0){ await delay(waitMs); }
-    minuteBoundarySynced = true;
-    return;
-  }
-  const diff = Date.now() - lastTradeTime;
-  if (diff < minTimeBetweenTrades){
-    await delay(minTimeBetweenTrades - diff);
-  }
-}
 
 /* ====== Pause after loss streak (NEW) ====== */
 let pauseEnabled = true;    // master switch
@@ -1681,268 +1573,7 @@ function getBetValue(step){
   return 1;
 }
 
-function normalizeBetToStep(step){
-  let pressCount = 0;
-  for (let i = 0; i < betArray.length; i++){
-    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
-  }
-
-  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
-  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
-}
-
-(function(){
-  if (window.AmountGuard) return;
-
-  const rawInterval = window.AG_PRESS_INTERVAL_MS;
-  const rawSettle = window.AG_SETTLE_RANGE_MS;
-
-  const cfg = {
-    maxToMinPresses: typeof window.AG_MAX_TO_MIN_PRESSES === 'number' ? window.AG_MAX_TO_MIN_PRESSES : 30,
-    pressIntervalRange: Array.isArray(rawInterval)
-      ? rawInterval
-      : (typeof rawInterval === 'number' ? [rawInterval, rawInterval] : [15, 25]),
-    settleRangeMs: Array.isArray(rawSettle)
-      ? rawSettle
-      : (typeof rawSettle === 'number' ? [rawSettle, rawSettle] : [120, 180]),
-    retryLimit: typeof window.AG_RETRY_LIMIT === 'number' ? window.AG_RETRY_LIMIT : 2,
-    moneyDecimals: typeof window.AG_DECIMALS === 'number' ? window.AG_DECIMALS : 2,
-    readDelayMs: typeof window.AG_READ_DELAY_MS === 'number' ? window.AG_READ_DELAY_MS : 40,
-    fixPressLimit: typeof window.AG_FIX_LIMIT === 'number' ? window.AG_FIX_LIMIT : 8,
-    amountSelectors: (function(){
-      const custom = Array.isArray(window.AG_AMOUNT_SELECTORS) ? window.AG_AMOUNT_SELECTORS : [];
-      return custom.concat([
-        '.call-put-block__in input',
-        'input[data-test="deal-amount"]',
-        'input.trade-amount',
-        'input[name="deal-amount"]'
-      ]);
-    })()
-  };
-
-  const state = {
-    cachedInput: null,
-    lastActual: null
-  };
-
-  function rand(min, max){
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-  }
-
-  function pickInterval(){
-    if (Array.isArray(cfg.pressIntervalRange) && cfg.pressIntervalRange.length === 2){
-      return rand(cfg.pressIntervalRange[0], cfg.pressIntervalRange[1]);
-    }
-    return typeof cfg.pressIntervalRange === 'number' ? cfg.pressIntervalRange : 18;
-  }
-
-  function pickSettle(){
-    if (Array.isArray(cfg.settleRangeMs) && cfg.settleRangeMs.length === 2){
-      return rand(cfg.settleRangeMs[0], cfg.settleRangeMs[1]);
-    }
-    return typeof cfg.settleRangeMs === 'number' ? cfg.settleRangeMs : 150;
-  }
-
-  function getAmountInput(){
-    if (state.cachedInput && document.contains(state.cachedInput)) return state.cachedInput;
-    for (let i = 0; i < cfg.amountSelectors.length; i++){
-      const el = document.querySelector(cfg.amountSelectors[i]);
-      if (el){ state.cachedInput = el; return el; }
-    }
-    if (typeof betInput !== 'undefined' && betInput){ state.cachedInput = betInput; return betInput; }
-    return null;
-  }
-
-  function readAmount(){
-    const input = getAmountInput();
-    if (!input) return NaN;
-    const raw = (input.value || input.getAttribute('value') || '').replace(/[^\d.,-]/g, '').replace(',', '.');
-    if (!raw) return NaN;
-    const num = parseFloat(raw);
-    return Number.isFinite(num) ? num : NaN;
-  }
-
-  function focusAmount(){
-    const input = getAmountInput();
-    if (!input) return false;
-    try{
-      input.focus({ preventScroll: true });
-      if (typeof input.select === 'function') input.select();
-    }catch(e){ try{ input.focus(); }catch(_){} }
-    return true;
-  }
-
-  async function pressSeries(fn, times){
-    if (!times || times <= 0) return 0;
-    let count = 0;
-    for (let i = 0; i < times; i++){
-      try{ fn(); }catch(e){}
-      count++;
-      await delay(pickInterval());
-    }
-    return count;
-  }
-
-  async function pressToMin(){
-    await pressSeries(decreaseBet, cfg.maxToMinPresses);
-    await delay(pickSettle());
-  }
-
-  async function pressToTarget(times){
-    await pressSeries(increaseBet, Math.max(0, times));
-    await delay(cfg.readDelayMs);
-  }
-
-  function isClose(actual, target){
-    if (!Number.isFinite(actual) || !Number.isFinite(target)) return false;
-    const tol = Math.pow(10, -cfg.moneyDecimals);
-    return Math.abs(actual - target) <= tol;
-  }
-
-  async function ensure(step){
-    const targetValue = getTargetValueForStep(step);
-    const pressCount = getPressCountForStep(step);
-    if (!Number.isFinite(targetValue)){
-      hudLog('[AG]', 'ABORT unknown step');
-      return { ok: false, aborted: true };
-    }
-
-    for (let attempt = 0; attempt <= cfg.retryLimit; attempt++){
-      if (!focusAmount()){
-        hudLog('[AG]', 'ABORT amount input not found');
-        return { ok: false, aborted: true };
-      }
-
-      await pressToMin();
-      await pressToTarget(pressCount);
-
-      let actual = readAmount();
-      if (isClose(actual, targetValue)){
-        hudLog('[AG]', `BET_OK actual=$${actual.toFixed(cfg.moneyDecimals)}`);
-        state.lastActual = actual;
-        return { ok: true, actual, target: targetValue, attempt: attempt + 1, fixCount: 0 };
-      }
-
-      let fixes = 0;
-      while (actual < targetValue && fixes < cfg.fixPressLimit){
-        await pressSeries(increaseBet, 1);
-        fixes++;
-        await delay(cfg.readDelayMs);
-        actual = readAmount();
-        if (isClose(actual, targetValue)) break;
-      }
-
-      if (isClose(actual, targetValue)){
-        if (fixes > 0){
-          hudLog('[AG]', `FIX +${fixes} → $${actual.toFixed(cfg.moneyDecimals)}`);
-        }
-        hudLog('[AG]', `BET_OK actual=$${actual.toFixed(cfg.moneyDecimals)}`);
-        state.lastActual = actual;
-        return { ok: true, actual, target: targetValue, attempt: attempt + 1, fixCount: fixes };
-      }
-
-      if (actual > targetValue && attempt < cfg.retryLimit){
-        hudLog('[AG]', 'RETRY overshoot');
-        continue;
-      }
-
-      if (attempt < cfg.retryLimit){
-        hudLog('[AG]', 'RETRY amount mismatch');
-        continue;
-      }
-    }
-
-    hudLog('[AG]', 'ABORT amount mismatch');
-    return { ok: false, aborted: true };
-  }
-
-  function reset(){
-    state.cachedInput = null;
-    state.lastActual = null;
-  }
-
-  window.AmountGuard = {
-    ensure,
-    reset,
-    focusAmount,
-    pressToMin,
-    pressToTarget,
-    _config: cfg
-  };
-})();
-
-async function placeTrade(direction, step){
-  const now = Date.now();
-  if (locks.placing || locks.inflight) return { placed: false, reason: 'LOCKED' };
-  if (!SB_allow(now)) return { placed: false, reason: 'SB_COOLDOWN' };
-
-  const payout = getPayout();
-  if (!isFinite(payout) || payout < AG_MIN_PAYOUT){
-    hudLog('[DEAL]', `SKIP LOW_PAYOUT (${isFinite(payout) ? (payout*100).toFixed(1) : 'NaN'}%)`);
-    return { placed: false, reason: 'LOW_PAYOUT' };
-  }
-
-  locks.placing = true;
-  try{
-    await waitForMinuteBoundary();
-
-    const pressCount = getPressCountForStep(step);
-    const targetValue = getTargetValueForStep(step);
-    hudLog('[AG]', `BET step=${step} press=${pressCount} target=$${Number(targetValue).toFixed(2)}`);
-
-    const guard = window.AmountGuard && typeof window.AmountGuard.ensure === 'function'
-      ? await window.AmountGuard.ensure(step)
-      : { ok: false };
-
-    if (!guard || guard.ok !== true){
-      if (!guard || guard.aborted !== true){
-        hudLog('[AG]', 'ABORT AMOUNT_MISMATCH');
-      }
-      return { placed: false, reason: 'AMOUNT_FAIL', guard };
-    }
-
-    if (DRY_RUN){
-      hudLog('[DEAL]', `DRY_RUN ${String(direction).toUpperCase()} (submit skipped)`);
-      return { placed: false, dryRun: true, guard };
-    }
-
-    if (direction === 'buy') buy(); else sell();
-    SB_markTrade(now);
-    locks.inflight = true;
-    isTradeOpen = true;
-    lastTradeTime = now;
-    return { placed: true, guard, direction, timestamp: now };
-  }finally{
-    locks.placing = false;
-  }
-}
-window.placeTrade = placeTrade;
-
-function formatPayout(p){
-  if (!Number.isFinite(p)) return 'n/a';
-  return `${(p * 100).toFixed(1)}%`;
-}
-
-function onDealClosed(payload){
-  const outcome = payload && payload.result ? String(payload.result) : String(payload || 'unknown');
-  locks.inflight = false;
-  isTradeOpen = false;
-
-  if (outcome === 'lost'){
-    const next = (Number.isFinite(MG.step) ? MG.step : 0) + 1;
-    const maxIdx = Math.max(0, Array.isArray(betArray) ? betArray.length - 1 : 0);
-    MG.step = Math.min(next, maxIdx);
-  } else {
-    MG.step = 0;
-  }
-
-  currentBetStep = Math.min(Math.max(MG.step, 0), Math.max(0, Array.isArray(betArray) ? betArray.length - 1 : 0));
-
-  hudLog('[DEAL]', `CLOSE ${outcome} payout=${formatPayout(payload && payload.payout)}; MG step→${MG.step}`);
-}
-window.onDealClosed = onDealClosed;
-
-async function smartBet(step, direction){
+function smartBet(step, direction){
   // вернём true, если реально отправили ордер; иначе false
   const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
   profitPercentDivAdvisor.innerHTML = currentProfitPercent;
@@ -1955,8 +1586,20 @@ async function smartBet(step, direction){
     return false;
   }
 
-  const placement = await placeTrade(direction, step, { from: 'smartBet' });
-  return placement && placement.placed === true;
+  // найти pressCount по шагу
+  let pressCount = 0;
+  for (let i = 0; i < betArray.length; i++){
+    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
+  }
+
+  // сброс ставки и установка нужного размера
+  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
+  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
+
+  // отправка ордера
+  setTimeout(() => { if (direction === 'buy') buy(); else sell(); }, 100);
+
+  return true;
 }
 
 function resetCycle(winStatus){
@@ -1970,13 +1613,21 @@ function resetCycle(winStatus){
   }
 }
 
-async function tradeLogic(){
+function tradeLogic(){
   let tradeDirection;
   let hTime = humanTime(time);
 
   // предыдущий шаг/результат
-  const mgStep = Number.isFinite(MG.step) ? MG.step : 0;
-  currentBetStep = Math.min(Math.max(mgStep, 0), Math.max(0, betArray.length - 1));
+  let prevBetStep = 0, lastStatus = 'won';
+  if (betHistory.length > 0){
+    prevBetStep = betHistory[betHistory.length - 1].step;
+    if (betHistory[betHistory.length - 1].won) lastStatus = betHistory[betHistory.length - 1].won;
+  }
+
+  // шаг МГ
+  if (lastStatus === 'won') currentBetStep = 0;
+  else if (lastStatus === 'lost') currentBetStep = Math.min(prevBetStep + 1, betArray.length - 1);
+  else currentBetStep = prevBetStep;
   if (typeof MG_WARMUP_TRADES === "number" && betHistory.length < MG_WARMUP_TRADES) { currentBetStep = 0; }
 
   // оценки/сигнал
@@ -2247,10 +1898,13 @@ async function tradeLogic(){
       };
 
       // пытаемся реально поставить
-      const placed = await smartBet(currentBetStep, tradeDirection);
+      const placed = smartBet(currentBetStep, tradeDirection);
 
       if (placed){
         // отмечаем открытие, время троттлинга, логируем и пушим В ИСТОРИЮ
+        isTradeOpen = true;
+        lastTradeTime = time;
+
         if (typeof logTradeOpen === 'function') logTradeOpen(currentTrade);
         betHistory.push(currentTrade);
 
@@ -2262,6 +1916,8 @@ async function tradeLogic(){
 
         // NEW: фиксируем список активных сигналов конкретно для этой сделки
         window.activeSignalsThisTrade = currentTrade.signalKeys.slice(0);
+      } else {
+        // ничего не делаем (не ставим isTradeOpen/lastTradeTime), чтобы не было фантомных входов
       }
     }
   }
@@ -2277,7 +1933,6 @@ function _hasClass(el,cls){ if(!el) return false; if(el.classList) return el.cla
 function _parseProfit(text){ const m=(text||'').replace(/[^\d.-]/g,''); const n=parseFloat(m); return isNaN(n)?0:n; }
 
 let targetDiv = document.getElementsByClassName("scrollbar-container deals-list ps")[0] || document.querySelector(".scrollbar-container.deals-list.ps");
-const dealObserverCallbacks = new Set();
 
 const observer = new MutationObserver(muts=>{
   muts.forEach(m=>{
@@ -2297,9 +1952,6 @@ const observer = new MutationObserver(muts=>{
       if (centerUp && lastUp) tradeStatus='won';
       else if (centerUp && !lastUp) tradeStatus='returned';
       else tradeStatus='lost';
-
-      var result = tradeStatus === 'won' ? 'win' : 'loss';
-      SB_onTradeResult(result === 'win'); // result: 'win' | 'loss'
 
       const betProfit = _parseProfit((lastDiv && lastDiv.textContent));
 
@@ -2346,15 +1998,14 @@ const observer = new MutationObserver(muts=>{
         schedulePause(pauseMinutes);
       }
 
+      isTradeOpen=false;
+      if (tradeStatus==='won') currentBetStep=0;
+      else if (tradeStatus==='lost') currentBetStep=Math.min(currentBetStep+1, betArray.length-1);
+
       symbolName = symbolDiv.textContent.replace("/", " ");
       if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
       betTime = betTimeDiv.textContent;
 
-      const lastEntry = betHistory.length>0 ? betHistory[betHistory.length-1] : null;
-      const baseValue = lastEntry && Number.isFinite(lastEntry.betValue) ? Number(lastEntry.betValue) : NaN;
-      const payoutRatio = Number.isFinite(baseValue) && baseValue !== 0 ? (betProfit + baseValue) / baseValue : (tradeStatus==='won' ? 1 : (tradeStatus==='returned' ? 1 : 0));
-      const payload = { result: tradeStatus, profit: betProfit, amount: baseValue, payout: payoutRatio, node: newDeal };
-      dealObserverCallbacks.forEach(cb=>{ try{ cb(payload); }catch(err){ console.warn('[DealObserver] callback error', err); } });
     }catch(e){ console.warn('[DealsObserver] parse error:', e); }
   });
 });
@@ -2371,15 +2022,6 @@ function _attachDealsObserver(){
   observer.observe(targetDiv, config);
 }
 
-function attachDealObserver(cb){
-  if (typeof cb === 'function') dealObserverCallbacks.add(cb);
-  if (!window.__DEAL_OBSERVER_ATTACHED__){
-    window.__DEAL_OBSERVER_ATTACHED__ = true;
-    _attachDealsObserver();
-  }
-}
-window.attachDealObserver = attachDealObserver;
-
 
 // expose rebind helper for external patch
 try{
@@ -2395,7 +2037,6 @@ initChart();
 setInterval(renderChart, 1000);
 setInterval(queryPrice, 100);
 _attachDealsObserver();
-try{ attachDealObserver(onDealClosed); }catch(e){ console.warn('[DealsObserver] attach failed', e); }
 
 })();
 
@@ -2499,7 +2140,6 @@ try{ attachDealObserver(onDealClosed); }catch(e){ console.warn('[DealsObserver] 
     setTimeout(()=>{
       refreshDomRefs();
       resetAssetContext();
-      try{ if (window.AmountGuard && typeof window.AmountGuard.reset === 'function') window.AmountGuard.reset(); }catch(_){ }
       waitForFreshTicks(()=>{
         ST.switchInProgress = false;
         ST.warmupReady = true;
@@ -2525,11 +2165,7 @@ try{ attachDealObserver(onDealClosed); }catch(e){ console.warn('[DealsObserver] 
   // Watchdog
   setInterval(()=>{
     const name = readSymbolName();
-    if (name && name !== ST.lastSeenSymbol){
-      ST.lastSeenSymbol = name;
-      updateTradingSymbolUI();
-      try{ if (window.AmountGuard && typeof window.AmountGuard.reset === 'function') window.AmountGuard.reset(); }catch(_){ }
-    }
+    if (name && name !== ST.lastSeenSymbol){ ST.lastSeenSymbol = name; updateTradingSymbolUI(); }
     if (ST.switchInProgress) return;
     if (now() < ST.cooldownUntil) return;
     if (shouldSwitchAsset()) switchToNextFavorite();
