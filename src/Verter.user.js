@@ -10,7 +10,44 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.2";
+const appversion = "Verter ver. 5.2.1 (SlowBet v1, Minimal)";
+
+// --- SlowBet (ultra-light, no UI, no storage) ---
+var SB_ENABLED = true;                 // всегда включён
+var SB_FIRST_SECONDS = 4;              // вход только в первые N секунд новой M1
+var SB_MIN_INTERVAL_MS = 120000;       // минимум 2 минуты между сделками
+var SB_LOSS_COOLDOWN_COUNT = 3;        // после N подряд лоссов
+var SB_LOSS_COOLDOWN_MIN = 30;         // пауза X минут
+
+var __sbLastTradeTs = 0;
+var __sbCooldownUntil = 0;
+var __sbLossStreak = 0;
+
+// допускаем торговать только если соблюдены интервалы/окно M1/кулдаун
+function SB_allow(nowTs){
+  if (!SB_ENABLED) return true;
+  if (nowTs < __sbCooldownUntil) return false;
+  if (nowTs - __sbLastTradeTs < SB_MIN_INTERVAL_MS) return false;
+  // оценка фазы M1 без внешних хуков: позиция в минуте
+  var msInMinute = nowTs % 60000;
+  if (msInMinute > SB_FIRST_SECONDS * 1000) return false;
+  // (при желании) не входить в последние 12с:
+  // if (60000 - msInMinute < 12000) return false;
+  return true;
+}
+function SB_markTrade(nowTs){ __sbLastTradeTs = nowTs; }
+function SB_onTradeResult(isWin){
+  if (isWin) {
+    __sbLossStreak = 0;
+  } else {
+    __sbLossStreak++;
+    if (__sbLossStreak >= SB_LOSS_COOLDOWN_COUNT){
+      __sbCooldownUntil = Date.now() + (SB_LOSS_COOLDOWN_MIN * 60000);
+      __sbLossStreak = 0; // серия зафиксирована → обнуляем счётчик
+    }
+  }
+}
+// --- /SlowBet ---
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
 var BOT_BUILD = "5.11.1-CAN CHS AllStages";
@@ -1878,6 +1915,8 @@ function tradeLogic(){
   if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
     // открываем ТОЛЬКО если сделки нет
     if (!isTradeOpen){
+      var __sbPrevTs = __sbLastTradeTs;
+      var __now = Date.now(); if (!SB_allow(__now)) { return; } SB_markTrade(__now);
       // сформируем карточку сделки заранее
       const currentTrade = {
         time: hTime,
@@ -1902,6 +1941,7 @@ function tradeLogic(){
       const placed = smartBet(currentBetStep, tradeDirection);
 
       if (placed){
+        SB_markTrade(__now);
         // отмечаем открытие, время троттлинга, логируем и пушим В ИСТОРИЮ
         isTradeOpen = true;
         lastTradeTime = time;
@@ -1919,6 +1959,7 @@ function tradeLogic(){
         window.activeSignalsThisTrade = currentTrade.signalKeys.slice(0);
       } else {
         // ничего не делаем (не ставим isTradeOpen/lastTradeTime), чтобы не было фантомных входов
+        __sbLastTradeTs = __sbPrevTs;
       }
     }
   }
@@ -1953,6 +1994,9 @@ const observer = new MutationObserver(muts=>{
       if (centerUp && lastUp) tradeStatus='won';
       else if (centerUp && !lastUp) tradeStatus='returned';
       else tradeStatus='lost';
+
+      var result = tradeStatus === 'won' ? 'win' : 'loss';
+      SB_onTradeResult(result === 'win'); // result: 'win' | 'loss'
 
       const betProfit = _parseProfit((lastDiv && lastDiv.textContent));
 
