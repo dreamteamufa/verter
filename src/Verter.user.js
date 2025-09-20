@@ -1611,6 +1611,16 @@ function getBetValue(step){
   return 1;
 }
 
+function normalizeBetToStep(step){
+  let pressCount = 0;
+  for (let i = 0; i < betArray.length; i++){
+    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
+  }
+
+  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
+  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
+}
+
 function smartBet(step, direction){
   // вернём true, если реально отправили ордер; иначе false
   const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
@@ -1624,18 +1634,15 @@ function smartBet(step, direction){
     return false;
   }
 
-  // найти pressCount по шагу
-  let pressCount = 0;
-  for (let i = 0; i < betArray.length; i++){
-    if (step === betArray[i].step){ pressCount = betArray[i].pressCount; break; }
-  }
+  normalizeBetToStep(step);
 
-  // сброс ставки и установка нужного размера
-  for (let i = 0; i < 30; i++) setTimeout(decreaseBet, i);
-  setTimeout(() => { for (let i = 0; i < pressCount; i++) setTimeout(increaseBet, i); }, 50);
+  var __now = Date.now();
+  if (!SB_allow(__now)) { return false; }
 
-  // отправка ордера
-  setTimeout(() => { if (direction === 'buy') buy(); else sell(); }, 100);
+  setTimeout(() => {
+    if (direction === 'buy') buy(); else sell();
+    SB_markTrade(__now);
+  }, 100);
 
   return true;
 }
@@ -1915,8 +1922,6 @@ function tradeLogic(){
   if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
     // открываем ТОЛЬКО если сделки нет
     if (!isTradeOpen){
-      var __sbPrevTs = __sbLastTradeTs;
-      var __now = Date.now(); if (!SB_allow(__now)) { return; } SB_markTrade(__now);
       // сформируем карточку сделки заранее
       const currentTrade = {
         time: hTime,
@@ -1941,7 +1946,6 @@ function tradeLogic(){
       const placed = smartBet(currentBetStep, tradeDirection);
 
       if (placed){
-        SB_markTrade(__now);
         // отмечаем открытие, время троттлинга, логируем и пушим В ИСТОРИЮ
         isTradeOpen = true;
         lastTradeTime = time;
@@ -1957,9 +1961,6 @@ function tradeLogic(){
 
         // NEW: фиксируем список активных сигналов конкретно для этой сделки
         window.activeSignalsThisTrade = currentTrade.signalKeys.slice(0);
-      } else {
-        // ничего не делаем (не ставим isTradeOpen/lastTradeTime), чтобы не было фантомных входов
-        __sbLastTradeTs = __sbPrevTs;
       }
     }
   }
