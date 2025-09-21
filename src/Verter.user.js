@@ -41,11 +41,7 @@ const candleInterval = 60000;
 const minTimeBetweenTrades = 5000;
 const signalCheckInterval = 1000;
 
-/* BEGIN DIFF: +Константы автопереключения */
-var MIN_PROFIT = 85;           // Порог доходности, % (вместо хардкода 80)
-var SWITCH_DELAY_MS = 2000;    // Задержка после переключения, мс
-var WARMUP_M1 = 20;            // Сколько новых M1 накопить перед разблокировкой
-/* END DIFF */
+const MIN_PROFIT = 85;           // единый порог доходности
 
 const redColor   = '#B90000';
 const greenColor = '#009500';
@@ -102,12 +98,8 @@ let lastSignalCheck = 0;
 let signalSensitivity = 3;
 let autoTradingEnabled = true;
 
-/* BEGIN DIFF: +Состояние автопереключения */
-var isSwitchingAsset = false;
-var isWarmup = false;
-var warmupStartLenM1 = 0;
-var lastAssetSymbol = null;
-/* END DIFF */
+let isWarmup = false;             // прогрев после переключения
+let isSwitchingAsset = false;     // прямо сейчас переключаем актив
 
 /* ====== NEW: Signal Stats (QWEN-like) ====== */
 // структура для учёта точности по каждому сигналу
@@ -146,7 +138,6 @@ const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
 const balanceDiv = mode === 'REAL' ? document.getElementsByClassName("js-hd js-balance-real-USD")[0] : document.getElementsByClassName("js-hd js-balance-demo")[0];
 const symbolDiv = document.getElementsByClassName("current-symbol")[0];
 let symbolName = symbolDiv.textContent.replace("/", " ");
-lastAssetSymbol = symbolName;
 const betTimeDiv = document.getElementsByClassName("value__val")[0];
 let betTime = betTimeDiv.textContent;
 
@@ -502,14 +493,19 @@ let lastSeconds = new Date().getSeconds();
 })();    
 function initChart(){
   try{ console.log('[SYNC WAIT] Preparing first M1 candle...'); }catch(e){}
-
-  const now = Date.now();
-  currentCandle = {tOpen:now,tClose:0,open:globalPrice||startPrice,high:globalPrice||startPrice,low:globalPrice||startPrice,close:globalPrice||startPrice,volume:0};
-  candlesM1.push(currentCandle);
+  if (!chartCanvas){
+    try{ chartCanvas = document.getElementById('chart-canvas'); }catch(e){}
+  }
+  try{ renderChart(); }catch(e){}
 }
 
 function updateCandles(currentTime, currentPrice){
-  if (!currentCandle) return;
+  if (!currentCandle){
+    const p = currentPrice;
+    const nowTs = Date.now();
+    currentCandle = { tOpen: nowTs, tClose: 0, open: p, high: p, low: p, close: p, volume: 0 };
+    if (Array.isArray(candlesM1)) candlesM1.push(currentCandle);
+  }
   const now = (currentTime instanceof Date)? currentTime : new Date(currentTime);
   const currentSeconds = now.getSeconds();
 
@@ -523,20 +519,13 @@ function updateCandles(currentTime, currentPrice){
 
     const newCandle = {tOpen:now.getTime(), tClose:0, open:currentPrice, high:currentPrice, low:currentPrice, close:currentPrice, volume:0};
     candlesM1.push(newCandle);
-    /* BEGIN DIFF: завершение прогрева */
-    if (isWarmup){
-      var curLen = Array.isArray(candlesM1) ? candlesM1.length : 0;
-      var baseLen = warmupStartLenM1 || 0;
-      if (curLen - baseLen >= WARMUP_M1){
-        isWarmup = false;
-        warmupStartLenM1 = curLen;
-        if (profitPercentDivAdvisor){
-          profitPercentDivAdvisor.style.background = '';
-          profitPercentDivAdvisor.style.color = '';
-        }
+    if (isWarmup && candlesM1.length >= 20){
+      isWarmup = false;
+      if (profitPercentDivAdvisor){
+        profitPercentDivAdvisor.style.background = '';
+        profitPercentDivAdvisor.style.color = '';
       }
     }
-    /* END DIFF */
     currentCandle = newCandle;
     if (candlesM1.length>240) candlesM1.shift();
   }
@@ -1460,6 +1449,17 @@ function addUI(){
   pauseUntilDiv  = document.getElementById("pause-until");
   chartCanvas = document.getElementById('chart-canvas');
 
+  candlesM1.length = 0;
+  currentCandle = null;
+  lastCandleTime = 0;
+
+  if (typeof initChart === 'function') {
+    try { initChart(); } catch (e) {}
+  } else {
+    const chartHolder = document.querySelector('#candleChart,#candleChartCanvas,.candle-chart');
+    if (chartHolder) chartHolder.innerHTML = '';
+  }
+
   // controls
   document.getElementById('tf-m1').addEventListener('click', ()=>{ currentTF='M1'; renderChart(); });
   document.getElementById('tf-m5').addEventListener('click', ()=>{ currentTF='M5'; renderChart(); });
@@ -1667,21 +1667,11 @@ function smartBet(step, direction){
     profitPercentDivAdvisor.style.color = '';
   }
 
-  /* BEGIN DIFF: предторговая проверка — автопереключение + warmup */
-  if (isSwitchingAsset){
+  if (isSwitchingAsset || isWarmup){
     if (profitPercentDivAdvisor){
       profitPercentDivAdvisor.style.background = '#444';
       profitPercentDivAdvisor.style.color = '#fff';
-      profitPercentDivAdvisor.innerHTML = 'switching...';
-    }
-    return false;
-  }
-
-  if (isWarmup){
-    if (profitPercentDivAdvisor){
-      profitPercentDivAdvisor.style.background = '#555';
-      profitPercentDivAdvisor.style.color = '#fff';
-      profitPercentDivAdvisor.innerHTML = 'warming';
+      profitPercentDivAdvisor.innerHTML = isSwitchingAsset ? 'Switching...' : 'Warmup';
     }
     return false;
   }
@@ -1689,87 +1679,64 @@ function smartBet(step, direction){
   if (!isNaN(currentProfitPercent) && currentProfitPercent < MIN_PROFIT){
     if (profitPercentDivAdvisor){
       profitPercentDivAdvisor.style.background = redColor;
-      profitPercentDivAdvisor.style.color = "#fff";
-      profitPercentDivAdvisor.innerHTML = 'win % low => ' + currentProfitPercent;
+      profitPercentDivAdvisor.style.color = '#fff';
+      profitPercentDivAdvisor.innerHTML = 'Switching...';
     }
     isSwitchingAsset = true;
 
-    (function(beforeSymbol){
-      try{
-        var evDown = new KeyboardEvent('keydown', { key:'Tab', code:'Tab', keyCode:9, which:9, shiftKey:true, bubbles:true });
-        var evUp   = new KeyboardEvent('keyup',   { key:'Tab', code:'Tab', keyCode:9, which:9, shiftKey:true, bubbles:true });
-        document.body.dispatchEvent(evDown);
-        document.body.dispatchEvent(evUp);
-      }catch(e){}
+    try {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', {key:'Tab',code:'Tab',keyCode:9,which:9,shiftKey:true,bubbles:true}));
+      document.body.dispatchEvent(new KeyboardEvent('keyup',   {key:'Tab',code:'Tab',keyCode:9,which:9,shiftKey:true,bubbles:true}));
+    } catch (e) {}
 
+    (function(beforeSymbol){
       setTimeout(function(){
         isSwitchingAsset = false;
 
-        var afterEl = document.querySelector('.current-symbol, .asset__name, .instrument-name');
-        var afterSymbol = afterEl && (afterEl.textContent || afterEl.innerText || '').trim() || null;
+        var el = document.querySelector('.current-symbol, .asset__name, .instrument-name');
+        var afterSymbol = el && (el.textContent||el.innerText||'').trim() || null;
 
-        if (afterSymbol && beforeSymbol !== afterSymbol){
-          lastAssetSymbol = afterSymbol;
+        if (afterSymbol && afterSymbol !== beforeSymbol){
+          if (Array.isArray(candlesM1)) candlesM1.length = 0;
+          currentCandle = null;
+          lastCandleTime = 0;
 
-          if (typeof window.__hardResetChart === 'function'){
-            try { window.__hardResetChart(); } catch (e) {}
-          }
+          if (Array.isArray(priceHistory)) priceHistory.length = 0;
+          if (Array.isArray(priceBuffer)) priceBuffer.length = 0;
+          if (Array.isArray(candlePrices)) candlePrices.length = 0;
 
-          try { if (Array.isArray(candlesM1)) { candlesM1.length = 0; } } catch (e) {}
-          try { if (Array.isArray(priceHistory)) { priceHistory.length = 0; } } catch (e) {}
-          try { if (Array.isArray(priceBuffer)) { priceBuffer.length = 0; } } catch (e) {}
-          try { if (Array.isArray(candlePrices)) { candlePrices.length = 0; } } catch (e) {}
-          try { if (Array.isArray(window.bot_m1_candles)) { window.bot_m1_candles.length = 0; } } catch (e) {}
-          try { if (Array.isArray(window.bot_m5_candles)) { window.bot_m5_candles.length = 0; } } catch (e) {}
-          try { if (Array.isArray(window.bot_signals_cache)) { window.bot_signals_cache.length = 0; } } catch (e) {}
-          try { currentCandle = null; } catch (e) {}
-          try { lastCandleTime = Date.now(); } catch (e) {}
-          try { lastSeconds = new Date().getSeconds(); } catch (e) {}
-          try { lastMin = globalPrice || startPrice; } catch (e) {}
-          try { lastMax = globalPrice || startPrice; } catch (e) {}
-
+          var cache = window.bot_signals_cache;
+          if (cache && cache.splice) cache.splice(0, cache.length);
           try { localStorage.removeItem('bot_m1_candles'); } catch (e) {}
-          try { localStorage.removeItem('bot_m5_candles'); } catch (e) {}
-          try { localStorage.removeItem('bot_signals_cache'); } catch (e) {}
 
-          try { window.bullishScore = 0; } catch (e) {}
-          try { window.bearishScore = 0; } catch (e) {}
-          try { window.activeSignalsSnapshot = []; } catch (e) {}
-          try { window.activeSignalsThisTrade = null; } catch (e) {}
-
-          if (typeof initChart === 'function'){
-            try { initChart(); } catch (e) {}
-          }
-          if (typeof renderChart === 'function'){
-            try { renderChart(); } catch (e) {}
-          } else {
-            var chart = document.querySelector('#candleChart, #candleChartCanvas, .candle-chart');
-            if (chart) chart.innerHTML = '';
+          if (typeof initCandleChart === 'function') { try { initCandleChart(true); } catch (e) {} }
+          else {
+            var ch = document.querySelector('#candleChart,#candleChartCanvas,.candle-chart');
+            if (ch) ch.innerHTML = '';
           }
 
           if (afterSymbol){
             try {
               symbolName = afterSymbol.replace('/', ' ');
               if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
-            } catch (e) {}
+            } catch (_){}
           }
 
-          if (typeof window.lastCandleTime !== 'undefined'){
-            try { window.lastCandleTime = Date.now(); } catch (e) {}
-          }
+          try { window.bullishScore = 0; } catch (_){}
+          try { window.bearishScore = 0; } catch (_){}
+          try { window.activeSignalsSnapshot = []; } catch (_){}
+          try { window.activeSignalsThisTrade = null; } catch (_){}
 
           isWarmup = true;
-          warmupStartLenM1 = Array.isArray(candlesM1) ? candlesM1.length : 0;
         }
-      }, SWITCH_DELAY_MS);
+      }, 2000);
     })((function(){
       var el = document.querySelector('.current-symbol, .asset__name, .instrument-name');
-      return el && (el.textContent || el.innerText || '').trim() || null;
+      return el && (el.textContent||el.innerText||'').trim() || null;
     })());
 
     return false;
   }
-  /* END DIFF */
 
   const stepCfg = Array.isArray(betArray) ? betArray.find(cfg => cfg.step === step) : null;
   const pressCount = stepCfg && typeof stepCfg.pressCount === 'number' ? stepCfg.pressCount : 0;
@@ -2214,162 +2181,12 @@ try{
 }catch(e){ console.warn('[bridge] __rebindDealsObserver inject failed', e); }
 /* ====== Bootstrap ====== */
 addUI();
-initChart();
 setInterval(renderChart, 1000);
 setInterval(queryPrice, 100);
 _attachDealsObserver();
 
 })();
 
-
-
-// === [PATCH v2] Favorites Auto Switch + Context Hard Reset ===
-(function(){
-  if (window.__FAV_AUTOSWITCH_PATCH_V2__) return;
-  window.__FAV_AUTOSWITCH_PATCH_V2__ = true;
-
-  const CFG = {
-    minPayoutToTrade: 90,
-    payoutDebounceChecks: 3,
-    assetSwitchCooldownMs: 5000,
-    dataWarmupTicks: 8,
-    minuteBoundarySync: false, // do not wait :00 on switch
-    autoSwitchEnabled: true
-  };
-
-  const ST = {
-    belowCount: 0,
-    switchInProgress: false,
-    cooldownUntil: 0,
-    warmupReady: true,
-    lastSeenSymbol: null
-  };
-
-  function now(){ return Date.now(); }
-  function getElByClassOne(cls){
-    const list = document.getElementsByClassName(cls);
-    return list && list[0] || null;
-  }
-  function readSymbolName(){
-    const el = getElByClassOne("current-symbol") || getElByClassOne("asset-name");
-    return el ? (el.textContent||'').replace('/',' ').trim() : null;
-  }
-  function updateTradingSymbolUI(){
-    try{
-      const name = readSymbolName();
-      if (name){
-        const el = document.getElementById('trading-symbol');
-        if (el) el.textContent = name;
-      }
-    }catch(e){}
-  }
-  function getPayoutPercent(){
-    let el = null;
-    try{ el = (typeof percentProfitDiv!=='undefined' && percentProfitDiv) ? percentProfitDiv : null; }catch(e){}
-    if (!el) el = getElByClassOne("value__val-start") || getElByClassOne("trade-profit");
-    if (!el) return NaN;
-    const txt = (el.textContent || el.innerText || "").replace(",", ".").trim();
-    const m = txt.match(/(\d{1,3})(?:\.\d+)?\s*%/);
-    if (m) return parseInt(m[1],10);
-    const m2 = txt.match(/[+]?(\d{1,3})/);
-    return m2 ? parseInt(m2[1],10) : NaN;
-  }
-  function emulateKey(key, opts={}){
-    const evInit = {
-      key, code: key==='Tab'?'Tab':'Key'+key.toUpperCase(),
-      keyCode: key==='Tab'?9:key.toUpperCase().charCodeAt(0),
-      which: key==='Tab'?9:key.toUpperCase().charCodeAt(0),
-      bubbles: true, cancelable: true,
-      altKey:!!opts.alt, ctrlKey:!!opts.ctrl, shiftKey:!!opts.shift, metaKey:!!opts.meta
-    };
-    document.dispatchEvent(new KeyboardEvent("keydown", evInit));
-    document.dispatchEvent(new KeyboardEvent("keyup", evInit));
-  }
-  function shouldSwitchAsset(){
-    if (!CFG.autoSwitchEnabled) return false;
-    const p = getPayoutPercent(); if (!isFinite(p)) return false;
-    if (p < CFG.minPayoutToTrade) ST.belowCount++; else ST.belowCount = 0;
-    return ST.belowCount >= CFG.payoutDebounceChecks;
-  }
-  function refreshDomRefs(){ updateTradingSymbolUI(); }
-  function resetAssetContext(){
-    try{
-      if (typeof window.__hardResetChart === 'function') window.__hardResetChart();
-      if (typeof window.__rebindDealsObserver === 'function') window.__rebindDealsObserver();
-      console.log("🧹 [ASSET] Context reset (hard reset via bridge)");
-    }catch(e){ console.warn('[PATCH] resetAssetContext failed', e); }
-  }
-  function waitForFreshTicks(done){
-    const timeoutAt = now() + 30000; // 30s safety
-    const baseLen = (window.priceHistory && window.priceHistory.length) || 0;
-    (function loop(){
-      const len = (window.priceHistory && window.priceHistory.length) || 0;
-      const okTicks = (len - baseLen) >= CFG.dataWarmupTicks;
-      if (okTicks || now() > timeoutAt){
-        done && done(); return;
-      }
-      setTimeout(loop, 250);
-    })();
-  }
-  function switchToNextFavorite(){
-    if (ST.switchInProgress) return;
-    ST.switchInProgress = true;
-    ST.warmupReady = false;
-    ST.cooldownUntil = now() + CFG.assetSwitchCooldownMs;
-    console.log("🟡 [ASSET] Low payout — requesting switch via Shift+Tab");
-    emulateKey("Shift",{shift:true}); emulateKey("Tab",{shift:true});
-    setTimeout(()=>{
-      refreshDomRefs();
-      resetAssetContext();
-      waitForFreshTicks(()=>{
-        ST.switchInProgress = false;
-        ST.warmupReady = true;
-        ST.belowCount = 0;
-        console.log("⏱️ [ASSET] Warmup ready");
-      });
-    }, 500);
-  }
-
-  // Gate tradeLogic during switching only if exposed
-  try{
-    if (typeof window.tradeLogic === "function"){
-      const __orig = window.tradeLogic;
-      window.tradeLogic = function(){
-        if (ST.switchInProgress) return;
-        if (now() < ST.cooldownUntil) return;
-        if (!ST.warmupReady) return;
-        return __orig.apply(this, arguments);
-      };
-    }
-  }catch(e){}
-
-  // Watchdog
-  setInterval(()=>{
-    const name = readSymbolName();
-    if (name && name !== ST.lastSeenSymbol){ ST.lastSeenSymbol = name; updateTradingSymbolUI(); }
-    if (ST.switchInProgress) return;
-    if (now() < ST.cooldownUntil) return;
-    if (shouldSwitchAsset()) switchToNextFavorite();
-  }, 800);
-
-  // Minimal UI
-  try{
-    const at = document.getElementById("auto-trading-toggle");
-    if (at && !document.getElementById("auto-switch-toggle")){
-      const wrap = document.createElement("span");
-      wrap.style.marginLeft="8px"; wrap.style.display="inline-flex"; wrap.style.alignItems="center"; wrap.style.gap="6px";
-      wrap.innerHTML = '<label style="font-size:12px;cursor:pointer;user-select:none;"><input id="auto-switch-toggle" type="checkbox" checked style="vertical-align:middle;margin-right:4px;">Auto-switch</label><button id="next-fav-btn" style="font-size:12px; padding:2px 6px; border-radius:6px; cursor:pointer;">Next favorite</button>';
-      at.parentElement && at.parentElement.appendChild(wrap);
-      const chk = document.getElementById("auto-switch-toggle");
-      const btn = document.getElementById("next-fav-btn");
-      chk.checked = true;
-      chk.addEventListener("change", ()=>{});
-      btn.addEventListener("click", ()=> switchToNextFavorite());
-    }
-  }catch(e){}
-
-  console.log("✅ [PATCH v2] Favorites Auto Switch + Hard Reset loaded");
-})();
 
 
 // === CHS MODULE (Stages 2..6) ===
