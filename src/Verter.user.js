@@ -41,6 +41,12 @@ const candleInterval = 60000;
 const minTimeBetweenTrades = 5000;
 const signalCheckInterval = 1000;
 
+/* BEGIN DIFF: +Константы автопереключения */
+var MIN_PROFIT = 85;           // Порог доходности, % (вместо хардкода 80)
+var SWITCH_DELAY_MS = 2000;    // Задержка после переключения, мс
+var WARMUP_M1 = 20;            // Сколько новых M1 накопить перед разблокировкой
+/* END DIFF */
+
 const redColor   = '#B90000';
 const greenColor = '#009500';
 
@@ -96,6 +102,13 @@ let lastSignalCheck = 0;
 let signalSensitivity = 3;
 let autoTradingEnabled = true;
 
+/* BEGIN DIFF: +Состояние автопереключения */
+var isSwitchingAsset = false;
+var isWarmup = false;
+var warmupStartLenM1 = 0;
+var lastAssetSymbol = null;
+/* END DIFF */
+
 /* ====== NEW: Signal Stats (QWEN-like) ====== */
 // структура для учёта точности по каждому сигналу
 const _signalList = [
@@ -133,6 +146,7 @@ const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
 const balanceDiv = mode === 'REAL' ? document.getElementsByClassName("js-hd js-balance-real-USD")[0] : document.getElementsByClassName("js-hd js-balance-demo")[0];
 const symbolDiv = document.getElementsByClassName("current-symbol")[0];
 let symbolName = symbolDiv.textContent.replace("/", " ");
+lastAssetSymbol = symbolName;
 const betTimeDiv = document.getElementsByClassName("value__val")[0];
 let betTime = betTimeDiv.textContent;
 
@@ -509,6 +523,20 @@ function updateCandles(currentTime, currentPrice){
 
     const newCandle = {tOpen:now.getTime(), tClose:0, open:currentPrice, high:currentPrice, low:currentPrice, close:currentPrice, volume:0};
     candlesM1.push(newCandle);
+    /* BEGIN DIFF: завершение прогрева */
+    if (isWarmup){
+      var curLen = Array.isArray(candlesM1) ? candlesM1.length : 0;
+      var baseLen = warmupStartLenM1 || 0;
+      if (curLen - baseLen >= WARMUP_M1){
+        isWarmup = false;
+        warmupStartLenM1 = curLen;
+        if (profitPercentDivAdvisor){
+          profitPercentDivAdvisor.style.background = '';
+          profitPercentDivAdvisor.style.color = '';
+        }
+      }
+    }
+    /* END DIFF */
     currentCandle = newCandle;
     if (candlesM1.length>240) candlesM1.shift();
   }
@@ -1639,14 +1667,109 @@ function smartBet(step, direction){
     profitPercentDivAdvisor.style.color = '';
   }
 
-  if (!isNaN(currentProfitPercent) && currentProfitPercent < 90){
+  /* BEGIN DIFF: предторговая проверка — автопереключение + warmup */
+  if (isSwitchingAsset){
     if (profitPercentDivAdvisor){
-      profitPercentDivAdvisor.style.background = redColor;
-      profitPercentDivAdvisor.style.color = "#fff";
-      profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => ' + currentProfitPercent;
+      profitPercentDivAdvisor.style.background = '#444';
+      profitPercentDivAdvisor.style.color = '#fff';
+      profitPercentDivAdvisor.innerHTML = 'switching...';
     }
     return false;
   }
+
+  if (isWarmup){
+    if (profitPercentDivAdvisor){
+      profitPercentDivAdvisor.style.background = '#555';
+      profitPercentDivAdvisor.style.color = '#fff';
+      profitPercentDivAdvisor.innerHTML = 'warming';
+    }
+    return false;
+  }
+
+  if (!isNaN(currentProfitPercent) && currentProfitPercent < MIN_PROFIT){
+    if (profitPercentDivAdvisor){
+      profitPercentDivAdvisor.style.background = redColor;
+      profitPercentDivAdvisor.style.color = "#fff";
+      profitPercentDivAdvisor.innerHTML = 'win % low => ' + currentProfitPercent;
+    }
+    isSwitchingAsset = true;
+
+    (function(beforeSymbol){
+      try{
+        var evDown = new KeyboardEvent('keydown', { key:'Tab', code:'Tab', keyCode:9, which:9, shiftKey:true, bubbles:true });
+        var evUp   = new KeyboardEvent('keyup',   { key:'Tab', code:'Tab', keyCode:9, which:9, shiftKey:true, bubbles:true });
+        document.body.dispatchEvent(evDown);
+        document.body.dispatchEvent(evUp);
+      }catch(e){}
+
+      setTimeout(function(){
+        isSwitchingAsset = false;
+
+        var afterEl = document.querySelector('.current-symbol, .asset__name, .instrument-name');
+        var afterSymbol = afterEl && (afterEl.textContent || afterEl.innerText || '').trim() || null;
+
+        if (afterSymbol && beforeSymbol !== afterSymbol){
+          lastAssetSymbol = afterSymbol;
+
+          if (typeof window.__hardResetChart === 'function'){
+            try { window.__hardResetChart(); } catch (e) {}
+          }
+
+          try { if (Array.isArray(candlesM1)) { candlesM1.length = 0; } } catch (e) {}
+          try { if (Array.isArray(priceHistory)) { priceHistory.length = 0; } } catch (e) {}
+          try { if (Array.isArray(priceBuffer)) { priceBuffer.length = 0; } } catch (e) {}
+          try { if (Array.isArray(candlePrices)) { candlePrices.length = 0; } } catch (e) {}
+          try { if (Array.isArray(window.bot_m1_candles)) { window.bot_m1_candles.length = 0; } } catch (e) {}
+          try { if (Array.isArray(window.bot_m5_candles)) { window.bot_m5_candles.length = 0; } } catch (e) {}
+          try { if (Array.isArray(window.bot_signals_cache)) { window.bot_signals_cache.length = 0; } } catch (e) {}
+          try { currentCandle = null; } catch (e) {}
+          try { lastCandleTime = Date.now(); } catch (e) {}
+          try { lastSeconds = new Date().getSeconds(); } catch (e) {}
+          try { lastMin = globalPrice || startPrice; } catch (e) {}
+          try { lastMax = globalPrice || startPrice; } catch (e) {}
+
+          try { localStorage.removeItem('bot_m1_candles'); } catch (e) {}
+          try { localStorage.removeItem('bot_m5_candles'); } catch (e) {}
+          try { localStorage.removeItem('bot_signals_cache'); } catch (e) {}
+
+          try { window.bullishScore = 0; } catch (e) {}
+          try { window.bearishScore = 0; } catch (e) {}
+          try { window.activeSignalsSnapshot = []; } catch (e) {}
+          try { window.activeSignalsThisTrade = null; } catch (e) {}
+
+          if (typeof initChart === 'function'){
+            try { initChart(); } catch (e) {}
+          }
+          if (typeof renderChart === 'function'){
+            try { renderChart(); } catch (e) {}
+          } else {
+            var chart = document.querySelector('#candleChart, #candleChartCanvas, .candle-chart');
+            if (chart) chart.innerHTML = '';
+          }
+
+          if (afterSymbol){
+            try {
+              symbolName = afterSymbol.replace('/', ' ');
+              if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
+            } catch (e) {}
+          }
+
+          if (typeof window.lastCandleTime !== 'undefined'){
+            try { window.lastCandleTime = Date.now(); } catch (e) {}
+          }
+
+          isWarmup = true;
+          warmupStartLenM1 = Array.isArray(candlesM1) ? candlesM1.length : 0;
+        }
+      }, SWITCH_DELAY_MS);
+    })((function(){
+      var el = document.querySelector('.current-symbol, .asset__name, .instrument-name');
+      return el && (el.textContent || el.innerText || '').trim() || null;
+    })());
+
+    return false;
+  }
+  /* END DIFF */
 
   const stepCfg = Array.isArray(betArray) ? betArray.find(cfg => cfg.step === step) : null;
   const pressCount = stepCfg && typeof stepCfg.pressCount === 'number' ? stepCfg.pressCount : 0;
