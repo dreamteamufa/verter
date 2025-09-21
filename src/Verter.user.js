@@ -381,72 +381,13 @@ function calculateBollingerBands(prices, period=20, mult=2){
   const std = Math.sqrt(variance);
   return {upper: mid + mult*std, middle: mid, lower: mid - mult*std};
 }
-function calculateStochastic(prices, period=14){
-  if (prices.length < period) return {k:50, d:50};
-  const recent = prices.slice(-period);
-  const cur = recent[recent.length-1], low=Math.min(...recent), high=Math.max(...recent);
-  const k = high===low ? 50 : ((cur-low)/(high-low))*100;
-  return {k, d:k};
-}
 function calculateROC(prices, period=12){ if (prices.length<period+1) return 0; const cur=prices[prices.length-1], past=prices[prices.length-1-period]; return ((cur-past)/past)*100; }
-function calculateAwesomeOscillator(prices){ if (prices.length<34) return 0; const sma5=prices.slice(-5).reduce((s,p)=>s+p,0)/5; const sma34=prices.slice(-34).reduce((s,p)=>s+p,0)/34; return sma5 - sma34; }
-function calculateParabolicSAR(prices, acc=0.02, max=0.2){
-  if (prices.length < 2) return {sar: prices[0], isUpTrend: true};
-  let sar=prices[0], ep=prices[1], af=acc, isUpTrend=prices[1]>prices[0];
-  for (let i=2;i<prices.length;i++){
-    const prevSar = sar;
-    if (isUpTrend){
-      sar = prevSar + af*(ep - prevSar);
-      if (prices[i] > ep){ ep=prices[i]; af=Math.min(af+acc,max); }
-      if (prices[i] < sar){ isUpTrend=false; sar=ep; ep=prices[i]; af=acc; }
-    } else {
-      sar = prevSar + af*(ep - prevSar);
-      if (prices[i] < ep){ ep=prices[i]; af=Math.min(af+acc,max); }
-      if (prices[i] > sar){ isUpTrend=true; sar=ep; ep=prices[i]; af=acc; }
-    }
-  }
-  return {sar, isUpTrend};
-}
 function detectTrend(prices, period=10){
   if (prices.length<period) return 'flat';
   const recent=prices.slice(-period);
   let hh=0,ll=0; for (let i=1;i<recent.length;i++){ if (recent[i]>recent[i-1]) hh++; if (recent[i]<recent[i-1]) ll++; }
   const r = hh/(hh+ll);
   if (r>0.7) return 'strong_up'; if (r>0.6) return 'up'; if (r<0.3) return 'strong_down'; if (r<0.4) return 'down'; return 'flat';
-}
-function analyzePriceAction(prices){
-  if (prices.length<10) return {pattern:'insufficient_data', isConsolidating:false};
-  const recent=prices.slice(-10); const cur=recent[recent.length-1], prev=recent[recent.length-2];
-  const high=Math.max(...recent), low=Math.min(...recent), range=high-low;
-  const avg=recent.reduce((s,p)=>s+p,0)/recent.length;
-  const isConsolidating = range < (avg*0.001);
-  let pattern='neutral';
-  if (cur>prev && cur>avg) pattern = cur>high*0.99 ? 'bullish_breakout':'bullish_continuation';
-  else if (cur<prev && cur<avg) pattern = cur<low*1.01 ? 'bearish_breakdown':'bearish_continuation';
-  const momentum = (cur - recent[0])/recent[0]*100;
-  if (momentum>0.05 && recent.slice(0,5).every(p=>p<avg)) pattern='bullish_reversal';
-  else if (momentum<-0.05 && recent.slice(0,5).every(p=>p>avg)) pattern='bearish_reversal';
-  return {pattern, isConsolidating};
-}
-function findFractals(prices, period=5){
-  if (prices.length<period*2+1) return {bullish:false, bearish:false};
-  const c = prices.length - period - 1, cp=prices[c];
-  let bull=true; for (let i=c-period;i<=c+period;i++){ if (i!==c && prices[i]<=cp){ bull=false; break; } }
-  let bear=true; for (let i=c-period;i<=c+period;i++){ if (i!==c && prices[i]>=cp){ bear=false; break; } }
-  return {bullish:bull, bearish:bear};
-}
-function findSupportResistance(prices){
-  if (prices.length<20) return {nearSupport:false, nearResistance:false};
-  const cur=prices[prices.length-1], recent=prices.slice(-20);
-  const highs=[], lows=[];
-  for (let i=2;i<recent.length-2;i++){
-    if (recent[i]>recent[i-1]&&recent[i]>recent[i+1]&&recent[i]>recent[i-2]&&recent[i]>recent[i+2]) highs.push(recent[i]);
-    if (recent[i]<recent[i-1]&&recent[i]<recent[i+1]&&recent[i]<recent[i-2]&&recent[i]<recent[i+2]) lows.push(recent[i]);
-  }
-  const th = cur*0.0005;
-  const nearSupport = lows.some(v=>Math.abs(cur-v)<th && cur>v);
-  const nearResistance = highs.some(v=>Math.abs(cur-v)<th && cur<v);
-  return {nearSupport, nearResistance};
 }
 
 
