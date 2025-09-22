@@ -9,7 +9,7 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.11.1";
+const appversion = "Verter ver. 5.12.0 (Codex Update)";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
 var BOT_BUILD = "5.11.1-CAN CHS AllStages";
@@ -46,31 +46,189 @@ const MIN_PROFIT = 85;           // единый порог доходности
 const redColor   = '#B90000';
 const greenColor = '#009500';
 
+/* ====== SWITCH CONFIG ====== */
+let AUTO_SWITCH_ENABLED = true;
+const PAYOUT_DEBOUNCE_CHECKS = 3;
+const SWITCH_COOLDOWN_MS = 5000;
+let __belowCount = 0;
+let __switchCooldownUntil = 0;
+let PORTFOLIO_GATE_MODE = 'STRICT'; // 'SOFT' для диагностики
+let EV_GATE_ENABLED = true;
+let DEFAULT_SIGNAL_SENS = 5;
+let ASSET_STATS_ENABLED = true;
+const ASSET_STATS_TIMER_MS = 30 * 60 * 1000;
+
 const betArray1 = [
     {step: 0, value: 10,  pressCount: 9},
-    {step: 1, value: 30,  pressCount: 13},
-    {step: 2, value: 80,  pressCount: 20},
-    {step: 3, value: 200, pressCount: 24},
-    {step: 4, value: 450, pressCount: 111}
+    {step: 1, value: 25,  pressCount: 12},
+    {step: 2, value: 65,  pressCount: 18},
+    {step: 3, value: 170, pressCount: 22},
+    {step: 4, value: 440, pressCount: 30}
 ];
 const betArray2 = [
-    {step: 0, value: 30,  pressCount: 13},
-    {step: 1, value: 80,  pressCount: 20},
-    {step: 2, value: 200, pressCount: 24},
-    {step: 3, value: 400, pressCount: 27},
-    {step: 4, value: 900, pressCount: 33}
-];
-const betArray3 = [
-    {step: 0, value: 80,   pressCount: 20},
-    {step: 1, value: 200,  pressCount: 24},
-    {step: 2, value: 400,  pressCount: 27},
-    {step: 3, value: 900,  pressCount: 33},
-    {step: 4, value: 1800, pressCount: 42}
+    {step: 0, value: 25,  pressCount: 12},
+    {step: 1, value: 65,  pressCount: 18},
+    {step: 2, value: 170, pressCount: 22},
+    {step: 3, value: 360, pressCount: 27},
+    {step: 4, value: 780, pressCount: 34}
 ];
 
 function logActiveBetArray(name){
   try{ console.log("[DEBUG] Active bet array:", name); }catch(_){ }
 }
+
+function checkPayoutSwitch(payout){
+  try{
+    if (!AUTO_SWITCH_ENABLED) return;
+    if (!isFinite(payout)) { __belowCount = 0; return; }
+    if (payout < MIN_PROFIT) __belowCount++; else __belowCount = 0;
+    if (__belowCount >= PAYOUT_DEBOUNCE_CHECKS && Date.now() >= __switchCooldownUntil){
+      __switchCooldownUntil = Date.now() + SWITCH_COOLDOWN_MS;
+      __belowCount = 0;
+      isSwitchingAsset = true;
+      try{ console.debug('[SWITCH] auto triggered'); }catch(_){ }
+      if (!document || !document.body){ isSwitchingAsset = false; return; }
+      try{
+        document.body.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',code:'Tab',keyCode:9,which:9,shiftKey:true,bubbles:true}));
+        document.body.dispatchEvent(new KeyboardEvent('keyup',  {key:'Tab',code:'Tab',keyCode:9,which:9,shiftKey:true,bubbles:true}));
+      }catch(_){ }
+      setTimeout(()=>{ try{ isSwitchingAsset = false; }catch(_){ } }, SWITCH_COOLDOWN_MS);
+    }
+  }catch(_){ }
+}
+
+window.__ASSET_STATS = window.__ASSET_STATS || Object.create(null);
+window.__LAST_TRADE_SIGNALS = window.__LAST_TRADE_SIGNALS || [];
+
+function __assetStatsEnsure(symbol){
+  if (!ASSET_STATS_ENABLED) return null;
+  if (!symbol) return null;
+  const store = window.__ASSET_STATS;
+  let entry = store[symbol];
+  if (!entry){
+    entry = store[symbol] = { opens:0, wins:0, losses:0, profit:0, lastPayout:null, lastSignals:[], signalUses:Object.create(null) };
+  }else if (!entry.signalUses){
+    entry.signalUses = Object.create(null);
+  }
+  return entry;
+}
+
+function __assetStatsPushOpen(symbol, payoutPercent){
+  if (!ASSET_STATS_ENABLED) return;
+  const entry = __assetStatsEnsure(symbol);
+  if (!entry) return;
+  entry.opens = (entry.opens||0) + 1;
+  if (isFinite(payoutPercent)) entry.lastPayout = payoutPercent;
+  entry.lastOpenTs = Date.now();
+  entry.lastSignals = Array.isArray(window.__LAST_TRADE_SIGNALS) ? window.__LAST_TRADE_SIGNALS.slice(0, 8) : [];
+}
+
+function __assetStatsPushResult(symbol, isWin, pnl, signalsUsed){
+  if (!ASSET_STATS_ENABLED) return;
+  const entry = __assetStatsEnsure(symbol);
+  if (!entry) return;
+  if (isWin === true) entry.wins = (entry.wins||0) + 1;
+  else if (isWin === false) entry.losses = (entry.losses||0) + 1;
+  const profit = Number(pnl);
+  if (!isNaN(profit)) entry.profit = (entry.profit||0) + profit;
+  if (Array.isArray(signalsUsed) && signalsUsed.length){
+    signalsUsed.forEach(sig=>{
+      if (!sig) return;
+      const rec = entry.signalUses[sig] || {count:0,wins:0,losses:0};
+      rec.count += 1;
+      if (isWin === true) rec.wins += 1;
+      else if (isWin === false) rec.losses += 1;
+      entry.signalUses[sig] = rec;
+    });
+    entry.lastSignals = signalsUsed.slice(0, 8);
+  }
+}
+
+function printAssetSummary(){
+  if (!ASSET_STATS_ENABLED) return;
+  try{
+    const store = window.__ASSET_STATS;
+    const rows = Object.keys(store || {}).map(symbol=>{
+      const data = store[symbol] || {};
+      const opens = data.opens||0;
+      const wins = data.wins||0;
+      const losses = data.losses||0;
+      const wr = opens ? (wins/opens)*100 : NaN;
+      const lastSignals = Array.isArray(data.lastSignals) && data.lastSignals.length ? data.lastSignals.join(', ') : '—';
+      return {
+        symbol,
+        opens,
+        wins,
+        losses,
+        wr: isFinite(wr) ? wr.toFixed(1)+'%' : '—',
+        profit: (Number(data.profit)||0).toFixed(2),
+        lastPayout: data.lastPayout!=null ? data.lastPayout + '%' : '—',
+        lastSignals
+      };
+    }).filter(row=>row.opens>0);
+    if (!rows.length) return;
+    const stamp = new Date().toLocaleTimeString();
+    console.groupCollapsed(`[ASSET-STATS] ${stamp}`);
+    try{ console.table(rows); }catch(_){ console.log(rows); }
+    console.groupEnd();
+  }catch(e){ console.warn('[ASSET-STATS] print failed', e); }
+}
+
+if (ASSET_STATS_ENABLED){
+  try{ setInterval(()=>{ try{ printAssetSummary(); }catch(_){ } }, ASSET_STATS_TIMER_MS); }catch(_){ }
+}
+
+window.VERTER = window.VERTER || {};
+window.VERTER.manualAssetReset = function(reason){
+  try{
+    console.debug('[ASSET][RESET] by', reason);
+    try{ __belowCount = 0; }catch(_){ }
+    try{ isSwitchingAsset = false; }catch(_){ }
+    if (typeof candlesM1 !== 'undefined') candlesM1 = [];
+    if (typeof priceHistory !== 'undefined') priceHistory = [];
+    if (typeof priceBuffer !== 'undefined') priceBuffer = [];
+    if (typeof candlePrices !== 'undefined') candlePrices = [];
+    if (typeof currentCandle !== 'undefined') currentCandle = null;
+    if (typeof candlesM5 !== 'undefined') candlesM5 = [];
+    window.activeSignalsSnapshot = [];
+    window.activeSignalsThisTrade = null;
+    try{ const cache = window.bot_signals_cache; if (cache && cache.splice) cache.splice(0, cache.length); }catch(_){ }
+    try{ localStorage.removeItem('bot_m1_candles'); }catch(_){ }
+    try{ window.bullishScore = 0; }catch(_){ }
+    try{ window.bearishScore = 0; }catch(_){ }
+    if (typeof betHistory !== 'undefined' && Array.isArray(betHistory)) betHistory.length = 0;
+    if (typeof __hardResetChart === 'function') __hardResetChart();
+    currentBetStep = 0;
+    consecutiveLosses = 0;
+    totalWager = 0;
+    maxStepInCycle = 0;
+    lastTradeTime = 0;
+    lastBetExecutionTs = 0;
+    pauseUntil = null;
+    isWarmup = true;
+    isTradeOpen = false;
+    currentProfit = 0;
+    if (profitDiv){
+      profitDiv.innerHTML = '0';
+      profitDiv.style.background = 'inherit';
+    }
+    if (profitPercentDivAdvisor){
+      profitPercentDivAdvisor.style.background = '#444';
+      profitPercentDivAdvisor.style.color = '#fff';
+      profitPercentDivAdvisor.innerHTML = 'Warmup';
+    }
+    if (lossStreakDiv) lossStreakDiv.textContent = '0';
+    if (wagerDiv) wagerDiv.innerHTML = '0';
+    if (maxStepDiv) maxStepDiv.innerHTML = '0';
+    if (pauseUntilDiv) pauseUntilDiv.textContent = '—';
+    try{
+      if (symbolDiv && symbolDiv.textContent){
+        symbolName = symbolDiv.textContent.replace('/', ' ');
+        if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
+      }
+    }catch(_){ }
+  }catch(e){ console.warn('[RESET failed]', e); }
+};
 
 let betArray = betArray1;
 logActiveBetArray("betArray1");
@@ -95,7 +253,7 @@ let globalPrice;
 let lastTradeTime = 0;
 let lastBetExecutionTs = 0;
 let lastSignalCheck = 0;
-let signalSensitivity = 3;
+let signalSensitivity = DEFAULT_SIGNAL_SENS || 5;
 let autoTradingEnabled = true;
 
 let isWarmup = false;             // прогрев после переключения
@@ -460,7 +618,8 @@ function updateCandles(currentTime, currentPrice){
 
     const newCandle = {tOpen:now.getTime(), tClose:0, open:currentPrice, high:currentPrice, low:currentPrice, close:currentPrice, volume:0};
     candlesM1.push(newCandle);
-    if (isWarmup && candlesM1.length >= 20){
+    const priceTicks = Array.isArray(priceHistory) ? priceHistory.length : 0;
+    if (isWarmup && (candlesM1.length >= 10 || priceTicks >= 8)){
       isWarmup = false;
       if (profitPercentDivAdvisor){
         profitPercentDivAdvisor.style.background = '';
@@ -1166,6 +1325,7 @@ function addUI(){
       display:flex;justify-content:space-between;align-items:center;gap:6px;
     }
     .panel-header .version{font-size:11px;color:#7a7a7a;font-weight:normal;}
+    .panel-header .panel-actions{display:flex;align-items:center;gap:4px;}
 
     /* Сетка и строки в Trading */
     .info-grid{
@@ -1259,6 +1419,7 @@ function addUI(){
 
     /* Управляющие кнопки графика */
     #tf-m1,#tf-m5,#live-btn{ padding:2px 6px; margin-right:4px; font-size:11px; }
+    #asset-reset-btn{ padding:2px 6px; font-size:11px; }
 
     /* ВАЖНО: фиксируем ширину Trading и запрещаем рост/сжатие */
     .fixed-trading{
@@ -1279,7 +1440,7 @@ function addUI(){
   tradingPanel.className = 'bot-trading-panel fixed-trading';
   tradingPanel.innerHTML = `
     <div class="panel-header">
-      <span>Trading</span><span class="version">${appversion}</span><span id="time" class="info-value">0:00</span>
+      <span>Trading</span><span class="version">${appversion}</span><div class="panel-actions"><button id="asset-reset-btn" class="btn btn-xs">Reset</button><span id="time" class="info-value">0:00</span></div>
     </div>
 
     <div class="info-grid">
@@ -1372,6 +1533,12 @@ function addUI(){
   newDiv.appendChild(contentRow);
 
   document.body.appendChild(newDiv);
+  const resetBtn = document.getElementById('asset-reset-btn');
+  if (resetBtn){
+    resetBtn.addEventListener('click',()=>{
+      window.VERTER && window.VERTER.manualAssetReset('button');
+    });
+  }
   enableDrag(newDiv, dragHandle);
 
   // DOM refs
@@ -1535,6 +1702,15 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
         detail: { status: st, prevStep, nextStep: currentBetStep, lossStreak: consecutiveLosses }
       }));
     } catch(e){}
+
+    try{
+      const sym = symbolDiv && symbolDiv.textContent ? symbolDiv.textContent.trim() : (symbolName || '');
+      const usedSignals = (meta && Array.isArray(meta.signalKeys) && meta.signalKeys.length)
+        ? meta.signalKeys.slice(0)
+        : (Array.isArray(window.activeSignalsThisTrade) ? window.activeSignalsThisTrade.slice(0) : []);
+      const flag = st === 'won' ? true : (st === 'lost' ? false : null);
+      __assetStatsPushResult(sym, flag, pnl, usedSignals);
+    }catch(_){ }
   } catch (err) {
     console.error('[recordTradeResult:MG-FIX] error:', err);
   }
@@ -1621,66 +1797,20 @@ function smartBet(step, direction){
     if (profitPercentDivAdvisor){
       profitPercentDivAdvisor.style.background = redColor;
       profitPercentDivAdvisor.style.color = '#fff';
-      profitPercentDivAdvisor.innerHTML = 'Switching...';
+      profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT => ' + currentProfitPercent;
     }
-    isSwitchingAsset = true;
-
-    try {
-      document.body.dispatchEvent(new KeyboardEvent('keydown', {key:'Tab',code:'Tab',keyCode:9,which:9,shiftKey:true,bubbles:true}));
-      document.body.dispatchEvent(new KeyboardEvent('keyup',   {key:'Tab',code:'Tab',keyCode:9,which:9,shiftKey:true,bubbles:true}));
-    } catch (e) {}
-
-    (function(beforeSymbol){
-      setTimeout(function(){
-        isSwitchingAsset = false;
-
-        var el = document.querySelector('.current-symbol, .asset__name, .instrument-name');
-        var afterSymbol = el && (el.textContent||el.innerText||'').trim() || null;
-
-        if (afterSymbol && afterSymbol !== beforeSymbol){
-          if (Array.isArray(candlesM1)) candlesM1.length = 0;
-          currentCandle = null;
-          lastCandleTime = 0;
-
-          if (Array.isArray(priceHistory)) priceHistory.length = 0;
-          if (Array.isArray(priceBuffer)) priceBuffer.length = 0;
-          if (Array.isArray(candlePrices)) candlePrices.length = 0;
-
-          var cache = window.bot_signals_cache;
-          if (cache && cache.splice) cache.splice(0, cache.length);
-          try { localStorage.removeItem('bot_m1_candles'); } catch (e) {}
-
-          if (typeof initCandleChart === 'function') { try { initCandleChart(true); } catch (e) {} }
-          else {
-            var ch = document.querySelector('#candleChart,#candleChartCanvas,.candle-chart');
-            if (ch) ch.innerHTML = '';
-          }
-
-          if (afterSymbol){
-            try {
-              symbolName = afterSymbol.replace('/', ' ');
-              if (tradingSymbolDiv) tradingSymbolDiv.innerHTML = symbolName;
-            } catch (_){}
-          }
-
-          try { window.bullishScore = 0; } catch (_){}
-          try { window.bearishScore = 0; } catch (_){}
-          try { window.activeSignalsSnapshot = []; } catch (_){}
-          try { window.activeSignalsThisTrade = null; } catch (_){}
-
-          isWarmup = true;
-        }
-      }, 2000);
-    })((function(){
-      var el = document.querySelector('.current-symbol, .asset__name, .instrument-name');
-      return el && (el.textContent||el.innerText||'').trim() || null;
-    })());
-
-    return false;
+    try{ checkPayoutSwitch(currentProfitPercent); }catch(_){ }
+    return false; // без переключения
   }
+  try{ checkPayoutSwitch(currentProfitPercent); }catch(_){ }
 
   const stepCfg = Array.isArray(betArray) ? betArray.find(cfg => cfg.step === step) : null;
   const pressCount = stepCfg && typeof stepCfg.pressCount === 'number' ? stepCfg.pressCount : 0;
+
+  try{
+    const sym = symbolDiv && symbolDiv.textContent ? symbolDiv.textContent.trim() : (symbolName || '');
+    __assetStatsPushOpen(sym, currentProfitPercent);
+  }catch(_){ }
 
   const prepDuration = prepareBetAmount(pressCount);
   openOrder(direction, prepDuration + KEY_PRESS_DELAY);
@@ -1742,6 +1872,7 @@ function tradeLogic(){
     const act = Array.isArray(window.activeSignalsSnapshot) ? window.activeSignalsSnapshot : [];
     const trendKeys = act.filter(s => /^(ema_|macd_|ao_|psar_|trend_|mtf_)/.test(s));
     const mrKeys    = act.filter(s => /^(bb_(lower|upper)_touch|rsi_|stoch_|pa_|sr_)/.test(s));
+    try{ window.__LAST_TRADE_SIGNALS = act.slice(0); }catch(_){ }
 
     // Determine system
     let sys = 'NONE';
@@ -1750,8 +1881,12 @@ function tradeLogic(){
 
     // Stricter allow
     let allow = false;
-    if (sys === 'T') allow = (trendKeys.length >= 2 && mrKeys.length === 0);
-    else if (sys === 'M') allow = (mrKeys.length >= 2 && trendKeys.length === 0);
+    if (sys === 'T') allow = (PORTFOLIO_GATE_MODE==='SOFT')
+      ? (trendKeys.length >= 2 && mrKeys.length <= 1)
+      : (trendKeys.length >= 2 && mrKeys.length === 0);
+    else if (sys === 'M') allow = (PORTFOLIO_GATE_MODE==='SOFT')
+      ? (mrKeys.length >= 2 && trendKeys.length <= 1)
+      : (mrKeys.length >= 2 && trendKeys.length === 0);
 
     // Quality estimate
     let p_est = null;
@@ -1771,7 +1906,7 @@ function tradeLogic(){
     const r = isFinite(payout) ? payout/100 : null;
     const EV = (p_est!=null && r!=null) ? (p_est*r - (1-p_est)) : null;
 
-    if (EV != null && EV < 0){ allow = false; }
+    if (EV_GATE_ENABLED && EV != null && EV < 0){ allow = false; }
 
     if (!allow){
       tradeDirection = 'flat';
@@ -1946,8 +2081,8 @@ function tradeLogic(){
     else if (limitWin === limitWin2){
       limitWin = limitWin3;
       limitLoss = limitLoss3;
-      betArray = betArray3;
-      logActiveBetArray("betArray3");
+      betArray = betArray2;
+      logActiveBetArray("betArray2");
     }
     else {
       limitWin = limitWin1;
@@ -2070,6 +2205,11 @@ const observer = new MutationObserver(muts=>{
               signalWeights[sig] = Math.max(0.5, Math.min(4.0, newW));
             }
           });
+          try{
+            const sym = symbolDiv && symbolDiv.textContent ? symbolDiv.textContent.trim() : (symbolName || '');
+            const flag = tradeStatus==='won' ? true : (tradeStatus==='lost' ? false : null);
+            __assetStatsPushResult(sym, flag, betProfit, Array.isArray(signals) ? signals.slice(0) : []);
+          }catch(_){ }
           // для чистоты: сбрасываем фиксацию активных сигналов сделки
           window.activeSignalsThisTrade = null;
 
@@ -2125,6 +2265,25 @@ addUI();
 setInterval(renderChart, 1000);
 setInterval(queryPrice, 100);
 _attachDealsObserver();
+
+(function(){
+  try{
+    const el = document.querySelector('.current-symbol');
+    if(!el) return;
+    let last = el.textContent;
+    const mo = new MutationObserver(()=>{
+      try{
+        const now = el.textContent;
+        if(now && now !== last){
+          last = now;
+          window.VERTER && window.VERTER.manualAssetReset('symbol-change');
+        }
+      }catch(_){ }
+    });
+    mo.observe(el,{childList:true,subtree:true,characterData:true});
+    window._symbolObserver = mo;
+  }catch(e){ console.warn('[OBSERVE] symbol-change failed', e); }
+})();
 
 })();
 
