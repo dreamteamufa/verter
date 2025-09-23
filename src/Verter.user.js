@@ -9,7 +9,7 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.12.0 (Codex Update)";
+const appversion = "Verter ver. 5.12.2 (Pre-set Bet Amount)";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
 var BOT_BUILD = "5.11.1-CAN CHS AllStages";
@@ -42,6 +42,7 @@ const minTimeBetweenTrades = 5000;
 const signalCheckInterval = 1000;
 
 const MIN_PROFIT = 85;           // единый порог доходности
+const PREP_KEY_DELAY_MS = 18; // пауза между «вирт. клавишами»
 
 const redColor   = '#B90000';
 const greenColor = '#009500';
@@ -353,6 +354,43 @@ loseCycle.style.lineHeight = '1.1';
 loseCycle.style.flex = '0 0 auto';
 
 /* ====== Keyboard emulation ====== */
+function __emitKey(code, shift, delay){
+  return new Promise(r=>{
+    setTimeout(()=>{
+      const opt={bubbles:true,which:code,keyCode:code,shiftKey:!!shift};
+      const target = (document && document.body) ? document.body : document;
+      if (target){
+        target.dispatchEvent(new KeyboardEvent('keydown',opt));
+        target.dispatchEvent(new KeyboardEvent('keyup',  opt));
+      }
+      r();
+    }, delay|0);
+  });
+}
+
+const __AMOUNT_INPUT_SEL = 'input[name="amount"], .js-amount input, .amount-input input';
+let __betPrepLock = false;
+
+async function __prepareNextBet(stepCfg){
+  if (!stepCfg || __betPrepLock) return;
+  __betPrepLock = true;
+  try{
+    const el = document.querySelector(__AMOUNT_INPUT_SEL);
+    if (el){ el.focus(); }
+
+    const RESET = 30;
+    const DELAY = (typeof window !== 'undefined' && window && window.PREP_KEY_DELAY_MS != null)
+      ? window.PREP_KEY_DELAY_MS
+      : PREP_KEY_DELAY_MS;
+    for(let i=0;i<RESET;i++) await __emitKey(65, true, DELAY);
+    for(let i=0;i<stepCfg.pressCount;i++) await __emitKey(68, true, DELAY);
+
+    await new Promise(r=>setTimeout(r, Math.max(100, DELAY*4)));
+    try{ console.debug('[BET][PREP] ready:', stepCfg.value); }catch(_){ }
+  }catch(e){ }
+  finally{ __betPrepLock = false; }
+}
+
 const KEY_CODES = { BUY: 87, SELL: 83, DOWN: 65, UP: 68 };
 const KEY_PRESS_DELAY = 24; // ~24ms between key presses (fits 18-30ms window)
 const RESET_PRESS_COUNT = 30;
@@ -625,6 +663,10 @@ function updateCandles(currentTime, currentPrice){
         profitPercentDivAdvisor.style.background = '';
         profitPercentDivAdvisor.style.color = '';
       }
+      try{
+        const first = (currentBetArray || betArray || betArray1).find(x=>x.step===0);
+        __prepareNextBet(first);
+      }catch(_){ }
     }
     currentCandle = newCandle;
     if (candlesM1.length>240) candlesM1.shift();
@@ -1683,6 +1725,12 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
     } else {
       // return/cancel/draw — шаг не меняем
     }
+
+    try{
+      const arr = (currentBetArray || betArray || betArray1);
+      const next = arr.find(x => x.step === currentBetStep);
+      __prepareNextBet(next);
+    }catch(_){ }
 
     // === обновление UI (если элементы существуют) ===
     setText('loss-streak', consecutiveLosses);
