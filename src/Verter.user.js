@@ -272,6 +272,7 @@
 
     const root = document.createElement('div');
     root.id = 'verter-root';
+    Object.assign(root.style,{position:'fixed',bottom:'8px',left:'50%',transform:'translateX(-50%)',maxWidth:'calc(100% - 24px)',zIndex:2147483647});
 
     const tradingSection = document.createElement('div');
     tradingSection.className = 'verter-section verter-wide';
