@@ -354,42 +354,40 @@ loseCycle.style.lineHeight = '1.1';
 loseCycle.style.flex = '0 0 auto';
 
 /* ====== Keyboard emulation ====== */
-function __emitKey(code, shift, delay){
-  return new Promise(r=>{
-    setTimeout(()=>{
-      const opt={bubbles:true,which:code,keyCode:code,shiftKey:!!shift};
-      const target = (document && document.body) ? document.body : document;
-      if (target){
-        target.dispatchEvent(new KeyboardEvent('keydown',opt));
-        target.dispatchEvent(new KeyboardEvent('keyup',  opt));
-      }
-      r();
-    }, delay|0);
-  });
-}
+// [VERTER][BET-PREP] v5.12.2 — do not remove
+(function(){
+  if (window.__VERTER_BET_PREP_VER) return;
+  window.__VERTER_BET_PREP_VER = '1.0';
+  function __emitKey(code, shift, delay){
+    return new Promise(r=>{
+      setTimeout(()=>{
+        const opt={bubbles:true,which:code,keyCode:code,shiftKey:!!shift};
+        document.body.dispatchEvent(new KeyboardEvent('keydown',opt));
+        document.body.dispatchEvent(new KeyboardEvent('keyup',opt));
+        r();
+      }, delay|0);
+    });
+  }
+  const PREP_KEY_DELAY_MS = 18;
+  let __betPrepLock = false;
+  async function __prepareNextBet(stepCfg){
+    if (!stepCfg || __betPrepLock) return;
+    __betPrepLock = true;
+    try{
+      const el = document.querySelector('input[name="amount"], .js-amount input, .amount-input input');
+      if (el) el.focus();
+      for (let i=0;i<30;i++) await __emitKey(65,true,PREP_KEY_DELAY_MS);                // Shift+A
+      for (let i=0;i<stepCfg.pressCount;i++) await __emitKey(68,true,PREP_KEY_DELAY_MS); // Shift+D
+      await new Promise(r=>setTimeout(r, Math.max(100, PREP_KEY_DELAY_MS*4)));
+    }finally{ __betPrepLock=false; }
+  }
+  window.__prepareNextBet = __prepareNextBet;
+})();
 
-const __AMOUNT_INPUT_SEL = 'input[name="amount"], .js-amount input, .amount-input input';
-let __betPrepLock = false;
-
-async function __prepareNextBet(stepCfg){
-  if (!stepCfg || __betPrepLock) return;
-  __betPrepLock = true;
-  try{
-    const el = document.querySelector(__AMOUNT_INPUT_SEL);
-    if (el){ el.focus(); }
-
-    const RESET = 30;
-    const DELAY = (typeof window !== 'undefined' && window && window.PREP_KEY_DELAY_MS != null)
-      ? window.PREP_KEY_DELAY_MS
-      : PREP_KEY_DELAY_MS;
-    for(let i=0;i<RESET;i++) await __emitKey(65, true, DELAY);
-    for(let i=0;i<stepCfg.pressCount;i++) await __emitKey(68, true, DELAY);
-
-    await new Promise(r=>setTimeout(r, Math.max(100, DELAY*4)));
-    try{ console.debug('[BET][PREP] ready:', stepCfg.value); }catch(_){ }
-  }catch(e){ }
-  finally{ __betPrepLock = false; }
-}
+const __prepareNextBet = function(stepCfg){
+  const fn = window.__prepareNextBet;
+  if (typeof fn === 'function') return fn(stepCfg);
+};
 
 const KEY_CODES = { BUY: 87, SELL: 83, DOWN: 65, UP: 68 };
 const KEY_PRESS_DELAY = 24; // ~24ms between key presses (fits 18-30ms window)
@@ -659,14 +657,18 @@ function updateCandles(currentTime, currentPrice){
     const priceTicks = Array.isArray(priceHistory) ? priceHistory.length : 0;
     if (isWarmup && (candlesM1.length >= 10 || priceTicks >= 8)){
       isWarmup = false;
+      // [VERTER][BET-PREP:first]
+      try{
+        const __arr = (typeof currentBetArray!=='undefined' && currentBetArray) ? currentBetArray
+                    : (typeof betArray!=='undefined' ? betArray
+                    : (typeof betArray1!=='undefined' ? betArray1 : null));
+        const __first = __arr && __arr.find(x=>x.step===0);
+        if (__first && typeof __prepareNextBet==='function') __prepareNextBet(__first);
+      }catch(_){ }
       if (profitPercentDivAdvisor){
         profitPercentDivAdvisor.style.background = '';
         profitPercentDivAdvisor.style.color = '';
       }
-      try{
-        const first = (currentBetArray || betArray || betArray1).find(x=>x.step===0);
-        __prepareNextBet(first);
-      }catch(_){ }
     }
     currentCandle = newCandle;
     if (candlesM1.length>240) candlesM1.shift();
@@ -1726,12 +1728,6 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
       // return/cancel/draw — шаг не меняем
     }
 
-    try{
-      const arr = (currentBetArray || betArray || betArray1);
-      const next = arr.find(x => x.step === currentBetStep);
-      __prepareNextBet(next);
-    }catch(_){ }
-
     // === обновление UI (если элементы существуют) ===
     setText('loss-streak', consecutiveLosses);
     setText('mg-step', currentBetStep);
@@ -1758,6 +1754,15 @@ function recordTradeResult(rawStatus, pnl = 0, meta = {}) {
         : (Array.isArray(window.activeSignalsThisTrade) ? window.activeSignalsThisTrade.slice(0) : []);
       const flag = st === 'won' ? true : (st === 'lost' ? false : null);
       __assetStatsPushResult(sym, flag, pnl, usedSignals);
+    }catch(_){ }
+
+    // [VERTER][BET-PREP:next]
+    try{
+      const __arr = (typeof currentBetArray!=='undefined' && currentBetArray) ? currentBetArray
+                  : (typeof betArray!=='undefined' ? betArray
+                  : (typeof betArray1!=='undefined' ? betArray1 : null));
+      const __next = __arr && __arr.find(x=>x.step===currentBetStep);
+      if (__next && typeof __prepareNextBet==='function') __prepareNextBet(__next);
     }catch(_){ }
   } catch (err) {
     console.error('[recordTradeResult:MG-FIX] error:', err);
