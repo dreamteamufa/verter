@@ -9,7 +9,7 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.12.1 (UI + Bets + Wager Fix)";
+const appversion = "Verter ver. 5.12.1 (UI Panel 1.5x Expansion v3)";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
 var BOT_BUILD = "5.11.1-CAN CHS AllStages";
@@ -287,6 +287,37 @@ let signalWeights  = {};
     if (!signalWeights[name])  signalWeights[name]  = 2; // базовый вес
   });
 })();
+const SIGNAL_LABELS = {
+  ema_bullish: 'EMA Bullish',
+  ema_bearish: 'EMA Bearish',
+  rsi_oversold: 'RSI Oversold',
+  rsi_overbought: 'RSI Overbought',
+  macd_bull: 'MACD Bullish',
+  macd_bear: 'MACD Bearish',
+  bb_lower_touch: 'Bollinger Lower Touch',
+  bb_upper_touch: 'Bollinger Upper Touch',
+  stoch_oversold: 'Stochastic Oversold',
+  stoch_overbought: 'Stochastic Overbought',
+  roc_up: 'ROC Up',
+  roc_down: 'ROC Down',
+  ao_up: 'Awesome Osc Up',
+  ao_down: 'Awesome Osc Down',
+  psar_up: 'Parabolic SAR Up',
+  psar_down: 'Parabolic SAR Down',
+  trend_up: 'Trend Up',
+  trend_down: 'Trend Down',
+  pa_bullish: 'Price Action Bullish',
+  pa_bearish: 'Price Action Bearish',
+  sr_support: 'Support Nearby',
+  sr_resistance: 'Resistance Nearby',
+  mtf_buy: 'MTF Buy',
+  mtf_sell: 'MTF Sell'
+};
+function formatSignalName(name){
+  if (!name) return '';
+  if (SIGNAL_LABELS[name]) return SIGNAL_LABELS[name];
+  return name.replace(/_/g,' ').replace(/\b\w/g, ch=>ch.toUpperCase());
+}
 // снимок активных сигналов, сработавших в момент принятия решения
 window.activeSignalsSnapshot  = [];
 window.activeSignalsThisTrade = null;
@@ -578,6 +609,60 @@ function calculateBollingerBands(prices, period=20, mult=2){
   const std = Math.sqrt(variance);
   return {upper: mid + mult*std, middle: mid, lower: mid - mult*std};
 }
+function calculateTrueRange(candle, prevClose){
+  if (!candle) return 0;
+  const hl = (candle.high - candle.low) || 0;
+  if (prevClose == null) return Math.abs(hl);
+  const hc = Math.abs(candle.high - prevClose);
+  const lc = Math.abs(candle.low - prevClose);
+  return Math.max(hl, hc, lc);
+}
+function calculateATR(candles, period=20){
+  if (!candles || candles.length < Math.max(2, period+1)) return null;
+  const start = Math.max(1, candles.length - period);
+  let sum = 0;
+  let count = 0;
+  for (let i=start;i<candles.length;i++){
+    const prev = candles[i-1] || candles[i];
+    sum += calculateTrueRange(candles[i], prev ? prev.close : candles[i].close);
+    count++;
+  }
+  return count ? sum/count : null;
+}
+function calculateKeltnerChannels(candles, period=20, mult=1.5){
+  if (!candles || candles.length < Math.max(2, period+1)) return null;
+  const closes = candles.map(c=>c.close);
+  const middle = calculateEMA(closes, period);
+  const atr = calculateATR(candles, period);
+  if (!isFinite(middle) || !isFinite(atr)) return null;
+  return { middle, upper: middle + mult*atr, lower: middle - mult*atr, atr };
+}
+function detectSqueeze(bb, keltner){
+  if (!bb || !keltner) return null;
+  const squeezeOn = bb.upper <= keltner.upper && bb.lower >= keltner.lower;
+  const squeezeOff = bb.upper >= keltner.upper && bb.lower <= keltner.lower;
+  return { squeezeOn, squeezeOff };
+}
+function calculateMAMAFAMA(prices, fastLimit=0.5, slowLimit=0.05){
+  const len = Array.isArray(prices) ? prices.length : 0;
+  if (!len){ return {mama:0, fama:0}; }
+  let mama = prices[0];
+  let fama = prices[0];
+  for (let i=1;i<len;i++){
+    const price = prices[i];
+    const prev = prices[i-1];
+    const prev2 = prices[i-2] != null ? prices[i-2] : prev;
+    const volatility = Math.abs(prev - prev2) || 1e-6;
+    let ratio = Math.abs(price - prev) / volatility;
+    if (!isFinite(ratio)) ratio = 0;
+    ratio = Math.max(0, Math.min(1, ratio));
+    const alpha = slowLimit + (fastLimit - slowLimit) * ratio;
+    mama = alpha * price + (1 - alpha) * mama;
+    const famaAlpha = alpha * 0.5;
+    fama = famaAlpha * mama + (1 - famaAlpha) * fama;
+  }
+  return {mama, fama};
+}
 function calculateROC(prices, period=12){ if (prices.length<period+1) return 0; const cur=prices[prices.length-1], past=prices[prices.length-1-period]; return ((cur-past)/past)*100; }
 function detectTrend(prices, period=10){
   if (prices.length<period) return 'flat';
@@ -731,7 +816,7 @@ function renderChart(){
     }
     for (let i=1;i<5;i++){ let y=i*H/5; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.strokeStyle='#888'; ctx.setLineDash([5,5]); ctx.stroke(); }
     ctx.setLineDash([]);
-    ctx.fillStyle='#fff'; ctx.font='12px Arial'; ctx.fillText(`Баров: ${v.length}/${total}`, 10, 20);
+    ctx.fillStyle='#fff'; ctx.font='10px Arial'; ctx.fillText(`Баров: ${v.length}/${total}`, 10, 18);
 
     const ss=document.getElementById('scroll-slider');
     if (ss){ ss.max=Math.max(0,total-zoom); ss.value=scrollPos; }
@@ -906,6 +991,9 @@ function calculateIndicators(){
   const pa       = analyzePriceActionOHLC(candlesM1);
   const sr       = findSupportResistanceOHLC(candlesM1);
   const mtf      = getMultiTimeframeSignal();
+  const keltner  = calculateKeltnerChannels(candlesM1);
+  const squeeze  = detectSqueeze(bb, keltner);
+  const mamaFama = calculateMAMAFAMA(data);
 
   const currentPrice = data[data.length-1];
   let bullishScore=0, bearishScore=0;
@@ -1088,7 +1176,26 @@ function calculateIndicators(){
   // сохраняем снимок активных сигналов для возможного входа
   window.activeSignalsSnapshot = Array.from(new Set(activeSignals));
 
-  updateIndicatorDisplay(false, { shortEMA, longEMA, emaDifference:emaDiff, rsiValue, macdData, bollingerBands:bb, stochastic:stoch, rocValue, awesomeOsc:ao, parabolicSAR:psar, trend, priceAction:pa, mtfSignal:mtf, candlePrices, currentTime });
+  updateIndicatorDisplay(false, {
+    shortEMA,
+    longEMA,
+    emaDifference:emaDiff,
+    rsiValue,
+    macdData,
+    bollingerBands:bb,
+    squeeze,
+    stochastic:stoch,
+    rocValue,
+    awesomeOsc:ao,
+    parabolicSAR:psar,
+    trend,
+    priceAction:pa,
+    supportResistance:sr,
+    mtfSignal:mtf,
+    mamaFama,
+    activeSignals: window.activeSignalsSnapshot ? window.activeSignalsSnapshot.slice(0) : [],
+    currentTime
+  });
 }
 /* ====== UI Panels ====== */
 function addSensitivityControl(){
@@ -1154,18 +1261,35 @@ function renderPauseFooter(){
 
 function createIndicatorPanels(){
   const container = document.getElementById('indicators-container'); if (!container) return;
-  const rows = [
-    { id: 'ema-value', label: 'EMA', initial: 'N/A' },
-    { id: 'macd-value', label: 'MACD', initial: 'N/A' },
-    { id: 'roc-value', label: 'ROC', initial: 'N/A' },
-    { id: 'sar-value', label: 'SAR', initial: 'N/A' },
+  const groupA = [
+    { id: 'signals-active', label: 'Signals', initial: '—' },
+    { id: 'ema-value', label: 'EMA (9/21)', initial: 'N/A' },
+    { id: 'mama-value', label: 'MAMA', initial: 'N/A' },
+    { id: 'fama-value', label: 'FAMA', initial: 'N/A' },
+    { id: 'rsi-value', label: 'RSI (14)', initial: 'N/A' },
+    { id: 'macd-value', label: 'MACD Hist', initial: 'N/A' },
+    { id: 'bb-value', label: 'Bollinger ±2σ', initial: 'N/A' },
+    { id: 'squeeze-value', label: 'Squeeze', initial: 'N/A' },
+    { id: 'stoch-value', label: 'Stochastic %K/%D', initial: 'N/A' }
+  ];
+  const groupB = [
+    { id: 'roc-value', label: 'ROC (12)', initial: 'N/A' },
+    { id: 'ao-value', label: 'AO', initial: 'N/A' },
+    { id: 'sar-value', label: 'Parabolic SAR', initial: 'N/A' },
+    { id: 'trend-value', label: 'Trend', initial: '—' },
     { id: 'pattern-value', label: 'Pattern', initial: 'neutral' },
+    { id: 'sr-value', label: 'S/R', initial: '—' },
+    { id: 'mtf-value', label: 'MTF Signal', initial: '—' },
     { id: 'candle-count', label: 'Candles', initial: '0 (1m)' },
     { id: 'next-candle', label: 'Next Candle', initial: '60s' }
   ];
-  container.innerHTML = rows.map(row=>`<div class="t-row" data-row="${row.id}"><span>${row.label}</span><span id="${row.id}">${row.initial}</span></div>`).join('');
+  const renderRows = rows => rows.map(row=>`<div class="t-row" data-row="${row.id}"><span>${row.label}</span><span id="${row.id}">${row.initial}</span></div>`).join('');
+  container.innerHTML = `
+    <div class="indicator-panel">${renderRows(groupA)}</div>
+    <div class="indicator-panel">${renderRows(groupB)}</div>
+  `;
 }
-function updateIndicatorDisplay(insufficient, ind){
+function updateIndicatorDisplay(insufficient, ind = {}){
   const toggleTechRow = (id, rawValue, displayValue) => {
     const row = document.querySelector(`.t-row[data-row="${id}"]`);
     const span = document.getElementById(id);
@@ -1174,18 +1298,23 @@ function updateIndicatorDisplay(insufficient, ind){
     if (val == null || val === 'N/A' || val === '—'){
       span.textContent = TECH_HIDE_NA ? (displayValue != null ? displayValue : '') : '—';
       span.style.color = '';
-      row.style.display = TECH_HIDE_NA ? 'none' : '';
+      row.style.display = TECH_HIDE_NA && id !== 'signals-active' ? 'none' : '';
     } else {
       span.textContent = displayValue != null ? displayValue : val;
       row.style.display = '';
     }
   };
 
+  const resetIds = [
+    'signals-active','ema-value','mama-value','fama-value','rsi-value','macd-value','bb-value','squeeze-value','stoch-value',
+    'roc-value','ao-value','sar-value','trend-value','pattern-value','sr-value','mtf-value','candle-count','next-candle'
+  ];
+
   if (insufficient){
-    toggleTechRow('ema-value', 'N/A');
-    toggleTechRow('macd-value', 'N/A');
-    toggleTechRow('roc-value', 'N/A');
-    toggleTechRow('sar-value', 'N/A');
+    resetIds.forEach(id=>{
+      if (id === 'signals-active'){ toggleTechRow(id, null, '—'); return; }
+      toggleTechRow(id, 'N/A');
+    });
     const patEl=document.getElementById('pattern-value');
     if (patEl){ patEl.textContent = 'Waiting for data...'; patEl.style.color=''; }
     const patternRow = document.querySelector('.t-row[data-row="pattern-value"]');
@@ -1196,40 +1325,115 @@ function updateIndicatorDisplay(insufficient, ind){
     if (nextEl){ nextEl.textContent='60s'; nextEl.style.color=''; }
     return;
   }
-  const { shortEMA, longEMA, emaDifference, macdData, rocValue, parabolicSAR, priceAction, currentTime } = ind;
+  const {
+    shortEMA,
+    longEMA,
+    emaDifference,
+    macdData,
+    bollingerBands,
+    squeeze,
+    rsiValue,
+    stochastic,
+    rocValue,
+    awesomeOsc,
+    parabolicSAR,
+    trend,
+    priceAction,
+    supportResistance,
+    mtfSignal,
+    mamaFama,
+    activeSignals,
+    currentTime
+  } = ind;
+
+  const activeSignalsText = Array.isArray(activeSignals) && activeSignals.length
+    ? activeSignals.map(formatSignalName).join(', ')
+    : '—';
+  toggleTechRow('signals-active', activeSignalsText, activeSignalsText);
+
   const emaText = `${shortEMA.toFixed(5)} / ${longEMA.toFixed(5)}`;
   toggleTechRow('ema-value', emaText, emaText);
   const emaEl=document.getElementById('ema-value');
   if (emaEl) emaEl.style.color = emaDifference>0?greenColor:(emaDifference<0?redColor:'#fff');
 
-  const macdText = macdData.histogram.toFixed(5);
+  const mamaText = mamaFama && isFinite(mamaFama.mama) ? mamaFama.mama.toFixed(5) : 'N/A';
+  toggleTechRow('mama-value', mamaText, mamaText);
+  const famaText = mamaFama && isFinite(mamaFama.fama) ? mamaFama.fama.toFixed(5) : 'N/A';
+  toggleTechRow('fama-value', famaText, famaText);
+
+  const rsiText = `${rsiValue.toFixed(2)}`;
+  toggleTechRow('rsi-value', rsiText, rsiText);
+  const rsiEl=document.getElementById('rsi-value');
+  if (rsiEl) rsiEl.style.color = rsiValue>70?redColor:(rsiValue<30?greenColor:'#fff');
+
+  const macdHist = macdData && isFinite(macdData.histogram) ? macdData.histogram : 0;
+  const macdText = macdHist.toFixed(5);
   toggleTechRow('macd-value', macdText, macdText);
   const macdEl=document.getElementById('macd-value');
-  if (macdEl) macdEl.style.color = macdData.histogram>0?greenColor:(macdData.histogram<0?redColor:'#fff');
+  if (macdEl) macdEl.style.color = macdHist>0?greenColor:(macdHist<0?redColor:'#fff');
 
-  const rocText = rocValue.toFixed(4)+'%';
+  if (bollingerBands && isFinite(bollingerBands.lower) && isFinite(bollingerBands.middle) && isFinite(bollingerBands.upper)){
+    const bbText = `${bollingerBands.lower.toFixed(5)} / ${bollingerBands.middle.toFixed(5)} / ${bollingerBands.upper.toFixed(5)}`;
+    toggleTechRow('bb-value', bbText, bbText);
+  } else {
+    toggleTechRow('bb-value', 'N/A');
+  }
+
+  const squeezeStatus = squeeze ? (squeeze.squeezeOn ? 'ON' : (squeeze.squeezeOff ? 'OFF' : 'Neutral')) : 'N/A';
+  toggleTechRow('squeeze-value', squeezeStatus, squeezeStatus);
+  const squeezeEl=document.getElementById('squeeze-value');
+  if (squeezeEl){
+    squeezeEl.style.color = squeezeStatus==='ON'?redColor:(squeezeStatus==='OFF'?greenColor:'#fff');
+  }
+
+  const stochK = stochastic && isFinite(stochastic.k) ? stochastic.k : 50;
+  const stochD = stochastic && isFinite(stochastic.d) ? stochastic.d : stochK;
+  const stochText = `${stochK.toFixed(1)} / ${stochD.toFixed(1)}`;
+  toggleTechRow('stoch-value', stochText, stochText);
+
+  const rocText = `${rocValue.toFixed(4)}%`;
   toggleTechRow('roc-value', rocText, rocText);
   const rocEl=document.getElementById('roc-value');
   if (rocEl) rocEl.style.color = rocValue>0?greenColor:(rocValue<0?redColor:'#fff');
 
-  const sarText = parabolicSAR.isUpTrend?'UP':'DOWN';
+  const aoVal = isFinite(awesomeOsc) ? awesomeOsc : 0;
+  const aoText = aoVal.toFixed(5);
+  toggleTechRow('ao-value', aoText, aoText);
+  const aoEl=document.getElementById('ao-value');
+  if (aoEl) aoEl.style.color = aoVal>0?greenColor:(aoVal<0?redColor:'#fff');
+
+  const sarIsUp = parabolicSAR && parabolicSAR.isUpTrend !== undefined ? parabolicSAR.isUpTrend : true;
+  const sarText = sarIsUp?'UP':'DOWN';
   toggleTechRow('sar-value', sarText, sarText);
   const sarEl=document.getElementById('sar-value');
-  if (sarEl) sarEl.style.color = parabolicSAR.isUpTrend?greenColor:redColor;
+  if (sarEl) sarEl.style.color = sarIsUp?greenColor:redColor;
+
+  const trendValue = typeof trend === 'string' ? trend : 'flat';
+  const trendText = trendValue.replace('_',' ').toUpperCase();
+  toggleTechRow('trend-value', trendText, trendText);
 
   const patEl=document.getElementById('pattern-value');
   if (patEl){
-    patEl.textContent = priceAction.pattern;
-    patEl.style.color = priceAction.pattern.includes('bullish')?greenColor:(priceAction.pattern.includes('bearish')?redColor:'#fff');
+    const patternName = priceAction && typeof priceAction.pattern === 'string' ? priceAction.pattern : 'neutral';
+    patEl.textContent = patternName;
+    patEl.style.color = patternName.includes('bullish')?greenColor:(patternName.includes('bearish')?redColor:'#fff');
   }
   const patternRow = document.querySelector('.t-row[data-row="pattern-value"]');
   if (patternRow) patternRow.style.display='';
+
+  const srNearSupport = supportResistance && supportResistance.nearSupport;
+  const srNearResistance = supportResistance && supportResistance.nearResistance;
+  const srText = srNearSupport ? 'Near support' : (srNearResistance ? 'Near resistance' : '—');
+  toggleTechRow('sr-value', srText, srText);
+
+  const mtfText = typeof mtfSignal === 'string' ? mtfSignal.toUpperCase() : '—';
+  toggleTechRow('mtf-value', mtfText, mtfText);
 
   const candleEl=document.getElementById('candle-count');
   if (candleEl){ candleEl.textContent = `${candlesM1.length} (1m)`; candleEl.style.color=''; }
   const left = candleInterval - (currentTime - lastCandleTime);
   const nextEl=document.getElementById('next-candle');
-  if (nextEl){ nextEl.textContent = `${Math.round(left/1000)}s`; nextEl.style.color=''; }
+  if (nextEl){ nextEl.textContent = `${Math.max(0, Math.round(left/1000))}s`; nextEl.style.color=''; }
 }
 
 /* ====== Draggable root + Trading Panels ====== */
@@ -1311,7 +1515,7 @@ function addUI(){
       gap:6px;
       align-items:stretch;
       width:100%;
-      flex-wrap:nowrap;
+      flex-wrap:wrap;
     }
     .cycles-strip{
       background:#0f0f10;
@@ -1432,23 +1636,28 @@ function addUI(){
       min-width:0;
     }
 
-    .signal-list{font-size:12px;line-height:1.25;display:flex;flex-direction:column;gap:4px}
+    .signal-list{font-size:11px;line-height:1.2;display:flex;flex-direction:column;gap:4px}
 
     .fixed-trading{flex:0 0 320px !important;min-width:320px;max-width:320px}
 
-    .s-row{display:flex;justify-content:space-between;gap:8px}
-    .s-name{flex:0 0 130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .s-val{text-align:right;flex:1}
+    .s-row{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
+    .s-name{flex:1;min-width:0;white-space:normal;overflow:visible;text-overflow:clip;line-height:1.25}
+    .s-val{text-align:right;flex:0 0 auto;white-space:nowrap}
 
-    .ts-row{display:flex;align-items:center;gap:6px}
+    .ts-row{display:flex;align-items:flex-start;gap:6px}
     .ts-top{background:rgba(255,215,0,.08)}
     .ts-rank{font-weight:700;opacity:.8}
 
-    .ts-row .s-name{flex:1;}
-    .ts-row .ts-val{margin-left:auto;text-align:right;}
+    .ts-row .s-name{flex:1;min-width:0;}
+    .ts-row .ts-val{margin-left:auto;text-align:right;white-space:nowrap;}
 
-    .t-row{display:flex;justify-content:space-between;gap:8px}
-    .t-row span:last-child{text-align:right;}
+    .t-row{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;font-size:11px;}
+    .t-row span:last-child{flex:1;text-align:right;white-space:normal;word-break:break-word;}
+
+    .panel-top-signals,.panel-accuracy{flex:0 0 300px;min-width:300px;max-width:340px;}
+    .panel-technical{flex:1 1 360px;min-width:360px;}
+    .panel-chart{flex:1 1 600px;min-width:600px;max-width:600px;}
+    .panel-chart canvas{display:block;width:100%;height:auto;max-width:100%;}
 
     .chart-controls{display:flex;gap:12px;align-items:center;margin-bottom:4px;justify-content:flex-start;flex-wrap:wrap}
     .chart-controls label{margin-right:6px;display:inline-flex;align-items:center;gap:6px}
@@ -1484,10 +1693,9 @@ function addUI(){
 
     /* Индикаторы */
     .indicator-panel{background-color:#0f0f10;border-radius:4px;padding:2px;margin-bottom:2px;}
-    .indicator-row{display:flex;justify-content:space-between;font-size:11px;margin-bottom:0;}
+    .indicator-row{display:flex;justify-content:space-between;font-size:11px;margin-bottom:0;align-items:flex-start;gap:6px;}
     .indicator-row .indicator-value{
-      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0;
-    }
+      overflow:visible; text-overflow:clip; white-space:normal; min-width:0; text-align:right;}
 
     /* Кнопки и инпуты */
     .bot-trading-panel button{
@@ -1559,8 +1767,7 @@ function addUI(){
 
   /* Top Signals */
   const topPanel = document.createElement('div');
-  topPanel.className = 'bot-trading-panel';
-  topPanel.style.flex = "1";
+  topPanel.className = 'bot-trading-panel panel-top-signals';
   topPanel.innerHTML = `
     <div class="panel-header"><span>Top Signals</span></div>
     <div id="signal-top" class="signal-list"></div>
@@ -1568,8 +1775,7 @@ function addUI(){
 
   /* Signals Accuracy */
   const accPanel = document.createElement('div');
-  accPanel.className = 'bot-trading-panel';
-  accPanel.style.flex = "0.7";
+  accPanel.className = 'bot-trading-panel panel-accuracy';
   accPanel.innerHTML = `
     <div class="panel-header"><span>Signals Accuracy</span></div>
     <div id="signal-accuracy" class="signal-list"></div>
@@ -1577,8 +1783,7 @@ function addUI(){
 
   /* Technical */
   const techPanel = document.createElement('div');
-  techPanel.className = 'bot-trading-panel';
-  techPanel.style.flex = "1.7";
+  techPanel.className = 'bot-trading-panel panel-technical';
   techPanel.innerHTML = `
     <div class="panel-header"><span>Technical</span></div>
     <div id="indicators-container"></div>
@@ -1587,8 +1792,7 @@ function addUI(){
 
   /* Candle Chart + Cycles */
   const chartContainer = document.createElement('div');
-  chartContainer.className = 'bot-trading-panel';
-  chartContainer.style.minWidth = '400px';
+  chartContainer.className = 'bot-trading-panel panel-chart';
   chartContainer.innerHTML = `
     <div class="panel-header"><span>Candle Chart</span></div>
     <div class="chart-controls">
@@ -1597,7 +1801,7 @@ function addUI(){
       <label for="scroll-slider">Scroll<input type="range" id="scroll-slider" min="0" max="0" value="0"></label>
       <button id="live-btn">Live</button>
     </div>
-    <div style="background:#0c0c0d;border-radius:4px;"><canvas id="chart-canvas" width="400" height="130"></canvas></div>
+    <div style="background:#0c0c0d;border-radius:4px;"><canvas id="chart-canvas" width="600" height="195"></canvas></div>
   `;
 
   /* Сборка */
@@ -1673,7 +1877,7 @@ function addUI(){
   renderPauseFooter();
   createIndicatorPanels();
 
-  function shortName(n){ return (n && n.length>14) ? (n.slice(0,12)+'…') : n; }
+  function shortName(n){ return n; }
 
   // авто-обновление списков (Top/Accuracy) — без изменений
   setInterval(()=>{
