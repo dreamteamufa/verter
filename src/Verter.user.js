@@ -9,7 +9,7 @@
   }catch(e){}
 'use strict';
 
-const appversion = "Verter ver. 5.12.2 (Pre-set Bet Amount)";
+const appversion = "Verter ver. 5.12.1 (UI + Bets + Wager Fix)";
 
 // === CHS PROTOCOL: flags + compact console + build tag ===
 var BOT_BUILD = "5.11.1-CAN CHS AllStages";
@@ -46,6 +46,7 @@ const PREP_KEY_DELAY_MS = 18; // пауза между «вирт. клавиш�
 
 const redColor   = '#B90000';
 const greenColor = '#009500';
+const TECH_HIDE_NA = true;
 
 /* ====== SWITCH CONFIG ====== */
 let AUTO_SWITCH_ENABLED = true;
@@ -61,17 +62,17 @@ const ASSET_STATS_TIMER_MS = 30 * 60 * 1000;
 
 const betArray1 = [
     {step: 0, value: 10,  pressCount: 9},
-    {step: 1, value: 25,  pressCount: 12},
-    {step: 2, value: 65,  pressCount: 18},
-    {step: 3, value: 170, pressCount: 22},
-    {step: 4, value: 440, pressCount: 30}
+    {step: 1, value: 30,  pressCount: 13},
+    {step: 2, value: 80,  pressCount: 20},
+    {step: 3, value: 200, pressCount: 24},
+    {step: 4, value: 400, pressCount: 27}
 ];
 const betArray2 = [
-    {step: 0, value: 25,  pressCount: 12},
-    {step: 1, value: 65,  pressCount: 18},
-    {step: 2, value: 170, pressCount: 22},
-    {step: 3, value: 360, pressCount: 27},
-    {step: 4, value: 780, pressCount: 34}
+    {step: 0, value: 30,  pressCount: 13},
+    {step: 1, value: 80,  pressCount: 20},
+    {step: 2, value: 200, pressCount: 24},
+    {step: 3, value: 400, pressCount: 27},
+    {step: 4, value: 900, pressCount: 33}
 ];
 
 function logActiveBetArray(name){
@@ -202,6 +203,7 @@ window.VERTER.manualAssetReset = function(reason){
     currentBetStep = 0;
     consecutiveLosses = 0;
     totalWager = 0;
+    currentWager = 0;
     maxStepInCycle = 0;
     lastTradeTime = 0;
     lastBetExecutionTs = 0;
@@ -219,7 +221,7 @@ window.VERTER.manualAssetReset = function(reason){
       profitPercentDivAdvisor.innerHTML = 'Warmup';
     }
     if (lossStreakDiv) lossStreakDiv.textContent = '0';
-    if (wagerDiv) wagerDiv.innerHTML = '0';
+    if (wagerDiv) wagerDiv.textContent = '$0';
     if (maxStepDiv) maxStepDiv.innerHTML = '0';
     if (pauseUntilDiv) pauseUntilDiv.textContent = '—';
     try{
@@ -250,6 +252,7 @@ let priceHistory = [];
 let currentBalance;
 let currentProfit = 0;
 let totalWager = 0;
+let currentWager = 0;
 let globalPrice;
 let lastTradeTime = 0;
 let lastBetExecutionTs = 0;
@@ -691,6 +694,7 @@ function buildM5FromM1(m1){
 }
 
 // Chart
+const BAR_GAP = Math.max(1, (typeof window!=='undefined' && typeof window.BAR_GAP!=='undefined'?window.BAR_GAP:2));
 let chartCanvas, currentTF='M1', zoom=60, scrollPos=0, liveMode=true;
 
 function renderChart(){
@@ -713,13 +717,16 @@ function renderChart(){
     let range = maxHigh - minLow, pad=range*0.05;
     const min=minLow-pad, max=maxHigh+pad; range = max-min;
 
-    const cw = W/visibleCount, bw = cw*0.8; let x=0;
+    const cw = W/visibleCount;
+    const bw = Math.max(1, cw - BAR_GAP);
+    const offset = (cw - bw) / 2;
+    let x=0;
     for (const c of v){
       const oy=((max-c.open)/range)*H, cy=((max-c.close)/range)*H, hy=((max-c.high)/range)*H, ly=((max-c.low)/range)*H;
       ctx.beginPath(); ctx.moveTo(x+cw/2,hy); ctx.lineTo(x+cw/2,ly); ctx.strokeStyle='#888'; ctx.stroke();
       ctx.fillStyle = c.close>=c.open ? '#2ecc71' : '#e74c3c';
       const top=Math.min(oy,cy), bot=Math.max(oy,cy);
-      ctx.fillRect(x+(cw-bw)/2, top, bw, bot-top);
+      ctx.fillRect(x+offset, top, bw, bot-top);
       x += cw;
     }
     for (let i=1;i<5;i++){ let y=i*H/5; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.strokeStyle='#888'; ctx.setLineDash([5,5]); ctx.stroke(); }
@@ -1104,6 +1111,7 @@ function renderPauseFooter(){
   const footer = document.getElementById('trading-footer'); if (!footer) return;
   footer.innerHTML = `
     <div class="footer-title">Pause</div>
+    <div class="pause-title">Auto-pause: after <b>X</b> losses for <b>Y</b> min</div>
     <div class="pause-controls">
       <label>
         <input type="checkbox" id="pause-enabled" ${pauseEnabled ? 'checked' : ''}>
@@ -1115,14 +1123,14 @@ function renderPauseFooter(){
       <label>
         for <input type="number" id="pause-minutes" min="1" max="240" value="${pauseMinutes}"> min
       </label>
-      <button id="pause-resume-btn">Reset</button>
+      <button id="pause-reset-btn" aria-label="Pause Reset">Pause Reset</button>
     </div>
   `;
 
   const enabledEl = document.getElementById('pause-enabled');
   const lossesEl = document.getElementById('pause-losses');
   const minutesEl = document.getElementById('pause-minutes');
-  const resetBtn = document.getElementById('pause-resume-btn');
+  const resetBtn = document.getElementById('pause-reset-btn');
 
   if (enabledEl){
     enabledEl.addEventListener('change', e=>{ pauseEnabled = e.target.checked; if (!pauseEnabled) clearPause(); });
@@ -1146,66 +1154,82 @@ function renderPauseFooter(){
 
 function createIndicatorPanels(){
   const container = document.getElementById('indicators-container'); if (!container) return;
-  const pricePanel = document.createElement('div');
-  pricePanel.id='price-indicators'; pricePanel.className='indicator-panel';
-  pricePanel.innerHTML = `
-    <div class="indicator-row"><span class="indicator-label">EMA:</span><span id="ema-value" class="indicator-value">N/A</span></div>
-    <div class="indicator-row"><span class="indicator-label">MACD:</span><span id="macd-value" class="indicator-value">N/A</span></div>
-  `;
-  const momentumPanel = document.createElement('div');
-  momentumPanel.id='momentum-trend'; momentumPanel.className='indicator-panel';
-  momentumPanel.innerHTML = `
-    <div class="indicator-row"><span class="indicator-label">ROC:</span><span id="roc-value" class="indicator-value">N/A</span></div>
-    <div class="indicator-row"><span class="indicator-label">SAR:</span><span id="sar-value" class="indicator-value">N/A</span></div>
-  `;
-  const patternPanel = document.createElement('div');
-  patternPanel.id='pattern-analysis'; patternPanel.className='indicator-panel';
-  patternPanel.innerHTML = `
-    <div class="indicator-row"><span class="indicator-label">Pattern:</span><span id="pattern-value" class="indicator-value">neutral</span></div>
-  `;
-  const candlePanel = document.createElement('div');
-  candlePanel.id='candle-data'; candlePanel.className='indicator-panel';
-  candlePanel.innerHTML = `
-    <div class="indicator-row"><span class="indicator-label">Candles:</span><span id="candle-count" class="indicator-value">0 (1m)</span></div>
-    <div class="indicator-row"><span class="indicator-label">Next Candle:</span><span id="next-candle" class="indicator-value">60s</span></div>
-  `;
-  container.appendChild(pricePanel); container.appendChild(momentumPanel);
-  container.appendChild(patternPanel); container.appendChild(candlePanel);
+  const rows = [
+    { id: 'ema-value', label: 'EMA', initial: 'N/A' },
+    { id: 'macd-value', label: 'MACD', initial: 'N/A' },
+    { id: 'roc-value', label: 'ROC', initial: 'N/A' },
+    { id: 'sar-value', label: 'SAR', initial: 'N/A' },
+    { id: 'pattern-value', label: 'Pattern', initial: 'neutral' },
+    { id: 'candle-count', label: 'Candles', initial: '0 (1m)' },
+    { id: 'next-candle', label: 'Next Candle', initial: '60s' }
+  ];
+  container.innerHTML = rows.map(row=>`<div class="t-row" data-row="${row.id}"><span>${row.label}</span><span id="${row.id}">${row.initial}</span></div>`).join('');
 }
 function updateIndicatorDisplay(insufficient, ind){
+  const toggleTechRow = (id, rawValue, displayValue) => {
+    const row = document.querySelector(`.t-row[data-row="${id}"]`);
+    const span = document.getElementById(id);
+    if (!row || !span) return;
+    const val = rawValue;
+    if (val == null || val === 'N/A' || val === '—'){
+      span.textContent = TECH_HIDE_NA ? (displayValue != null ? displayValue : '') : '—';
+      span.style.color = '';
+      row.style.display = TECH_HIDE_NA ? 'none' : '';
+    } else {
+      span.textContent = displayValue != null ? displayValue : val;
+      row.style.display = '';
+    }
+  };
+
   if (insufficient){
-    document.getElementById('ema-value').innerHTML='N/A';
-    document.getElementById('macd-value').innerHTML='N/A';
-    document.getElementById('roc-value').innerHTML='N/A';
-    document.getElementById('sar-value').innerHTML='N/A';
-    document.getElementById('pattern-value').innerHTML='Waiting for data...';
-    document.getElementById('candle-count').innerHTML='0 (1m)';
+    toggleTechRow('ema-value', 'N/A');
+    toggleTechRow('macd-value', 'N/A');
+    toggleTechRow('roc-value', 'N/A');
+    toggleTechRow('sar-value', 'N/A');
+    const patEl=document.getElementById('pattern-value');
+    if (patEl){ patEl.textContent = 'Waiting for data...'; patEl.style.color=''; }
+    const patternRow = document.querySelector('.t-row[data-row="pattern-value"]');
+    if (patternRow) patternRow.style.display='';
+    const candleEl=document.getElementById('candle-count');
+    if (candleEl){ candleEl.textContent='0 (1m)'; candleEl.style.color=''; }
+    const nextEl=document.getElementById('next-candle');
+    if (nextEl){ nextEl.textContent='60s'; nextEl.style.color=''; }
     return;
   }
   const { shortEMA, longEMA, emaDifference, macdData, rocValue, parabolicSAR, priceAction, currentTime } = ind;
+  const emaText = `${shortEMA.toFixed(5)} / ${longEMA.toFixed(5)}`;
+  toggleTechRow('ema-value', emaText, emaText);
   const emaEl=document.getElementById('ema-value');
-  emaEl.innerHTML = `${shortEMA.toFixed(5)} / ${longEMA.toFixed(5)}`;
-  emaEl.style.color = emaDifference>0?greenColor:(emaDifference<0?redColor:'#fff');
+  if (emaEl) emaEl.style.color = emaDifference>0?greenColor:(emaDifference<0?redColor:'#fff');
 
+  const macdText = macdData.histogram.toFixed(5);
+  toggleTechRow('macd-value', macdText, macdText);
   const macdEl=document.getElementById('macd-value');
-  macdEl.innerHTML = macdData.histogram.toFixed(5);
-  macdEl.style.color = macdData.histogram>0?greenColor:(macdData.histogram<0?redColor:'#fff');
+  if (macdEl) macdEl.style.color = macdData.histogram>0?greenColor:(macdData.histogram<0?redColor:'#fff');
 
+  const rocText = rocValue.toFixed(4)+'%';
+  toggleTechRow('roc-value', rocText, rocText);
   const rocEl=document.getElementById('roc-value');
-  rocEl.innerHTML = rocValue.toFixed(4)+'%';
-  rocEl.style.color = rocValue>0?greenColor:(rocValue<0?redColor:'#fff');
+  if (rocEl) rocEl.style.color = rocValue>0?greenColor:(rocValue<0?redColor:'#fff');
 
+  const sarText = parabolicSAR.isUpTrend?'UP':'DOWN';
+  toggleTechRow('sar-value', sarText, sarText);
   const sarEl=document.getElementById('sar-value');
-  sarEl.innerHTML = parabolicSAR.isUpTrend?'UP':'DOWN';
-  sarEl.style.color = parabolicSAR.isUpTrend?greenColor:redColor;
+  if (sarEl) sarEl.style.color = parabolicSAR.isUpTrend?greenColor:redColor;
 
   const patEl=document.getElementById('pattern-value');
-  patEl.innerHTML = priceAction.pattern;
-  patEl.style.color = priceAction.pattern.includes('bullish')?greenColor:(priceAction.pattern.includes('bearish')?redColor:'#fff');
+  if (patEl){
+    patEl.textContent = priceAction.pattern;
+    patEl.style.color = priceAction.pattern.includes('bullish')?greenColor:(priceAction.pattern.includes('bearish')?redColor:'#fff');
+  }
+  const patternRow = document.querySelector('.t-row[data-row="pattern-value"]');
+  if (patternRow) patternRow.style.display='';
 
-  document.getElementById('candle-count').innerHTML = `${candlesM1.length} (1m)`;
+  const candleEl=document.getElementById('candle-count');
+  if (candleEl){ candleEl.textContent = `${candlesM1.length} (1m)`; candleEl.style.color=''; }
   const left = candleInterval - (currentTime - lastCandleTime);
-  document.getElementById('next-candle').innerHTML = `${Math.round(left/1000)}s`;
+  const nextEl=document.getElementById('next-candle');
+  if (nextEl){ nextEl.textContent = `${Math.round(left/1000)}s`; nextEl.style.color=''; }
 }
 
 /* ====== Draggable root + Trading Panels ====== */
@@ -1366,10 +1390,11 @@ function addUI(){
     .panel-header{
       font-size:13px;font-weight:bold;color:#bdbdbd;
       margin-bottom:2px;border-bottom:1px solid #2a2a2a;padding-bottom:2px;
-      display:flex;justify-content:space-between;align-items:center;gap:6px;
+      display:flex;align-items:center;justify-content:space-between;gap:8px;
     }
-    .panel-header .version{font-size:11px;color:#7a7a7a;font-weight:normal;}
-    .panel-header .panel-actions{display:flex;align-items:center;gap:4px;}
+    .panel-header .version{font-size:11px;color:#7a7a7a;font-weight:500;opacity:.65;}
+    .panel-header .panel-actions{display:flex;align-items:center;gap:8px;}
+    .panel-section-title{font-weight:600;opacity:.85;margin-bottom:4px;}
 
     /* Сетка и строки в Trading */
     .info-grid{
@@ -1387,12 +1412,12 @@ function addUI(){
       min-width:0; /* важно для усечения текста */
       gap:6px;
     }
-    .info-label{color:#9aa0a6; white-space:nowrap;}
+    .info-label{color:#9aa0a6; white-space:nowrap;opacity:.75;}
     .info-value{
-      font-weight:500;color:#fff;
-      overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+      font-weight:500;color:#fff;font-variant-numeric:tabular-nums;
       min-width:0; /* разрешает сжиматься внутри flex/grid */
     }
+    .info-item .info-value{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:180px;}
 
     /* Нижние строки (Signal/Direction) на всю ширину — тоже с усечением */
     .info-item.full-width{
@@ -1406,6 +1431,28 @@ function addUI(){
       overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
       min-width:0;
     }
+
+    .signal-list{font-size:12px;line-height:1.25;display:flex;flex-direction:column;gap:4px}
+
+    .fixed-trading{flex:0 0 320px !important;min-width:320px;max-width:320px}
+
+    .s-row{display:flex;justify-content:space-between;gap:8px}
+    .s-name{flex:0 0 130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .s-val{text-align:right;flex:1}
+
+    .ts-row{display:flex;align-items:center;gap:6px}
+    .ts-top{background:rgba(255,215,0,.08)}
+    .ts-rank{font-weight:700;opacity:.8}
+
+    .ts-row .s-name{flex:1;}
+    .ts-row .ts-val{margin-left:auto;text-align:right;}
+
+    .t-row{display:flex;justify-content:space-between;gap:8px}
+    .t-row span:last-child{text-align:right;}
+
+    .chart-controls{display:flex;gap:12px;align-items:center;margin-bottom:4px;justify-content:flex-start;flex-wrap:wrap}
+    .chart-controls label{margin-right:6px;display:inline-flex;align-items:center;gap:6px}
+
 
     /* История циклов */
     .cycles-history{
@@ -1484,8 +1531,10 @@ function addUI(){
   tradingPanel.className = 'bot-trading-panel fixed-trading';
   tradingPanel.innerHTML = `
     <div class="panel-header">
-      <span>Trading</span><span class="version">${appversion}</span><div class="panel-actions"><button id="asset-reset-btn" class="btn btn-xs">Reset</button><span id="time" class="info-value">0:00</span></div>
+      <span class="version">${appversion}</span>
+      <div class="panel-actions"><span id="time" class="info-value">0:00</span><button id="asset-reset-btn" class="btn btn-xs" aria-label="Asset Reset">Asset Reset</button></div>
     </div>
+    <div class="panel-section-title">Trading</div>
 
     <div class="info-grid">
       <div class="info-item full-width"><span class="info-label">Trading Symbol:</span><span class="info-value" id="trading-symbol">${symbolName}</span></div>
@@ -1514,7 +1563,7 @@ function addUI(){
   topPanel.style.flex = "1";
   topPanel.innerHTML = `
     <div class="panel-header"><span>Top Signals</span></div>
-    <div id="signal-top" style="font-size:12px;line-height:1.25;"></div>
+    <div id="signal-top" class="signal-list"></div>
   `;
 
   /* Signals Accuracy */
@@ -1523,7 +1572,7 @@ function addUI(){
   accPanel.style.flex = "0.7";
   accPanel.innerHTML = `
     <div class="panel-header"><span>Signals Accuracy</span></div>
-    <div id="signal-accuracy" style="font-size:12px;line-height:1.25;"></div>
+    <div id="signal-accuracy" class="signal-list"></div>
   `;
 
   /* Technical */
@@ -1542,10 +1591,10 @@ function addUI(){
   chartContainer.style.minWidth = '400px';
   chartContainer.innerHTML = `
     <div class="panel-header"><span>Candle Chart</span></div>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:4px;margin-bottom:4px;">
+    <div class="chart-controls">
       <div><button id="tf-m1">M1</button><button id="tf-m5">M5</button></div>
-      <div>Zoom: <input type="range" id="zoom-slider" min="20" max="240" value="60"></div>
-      <div>Scroll: <input type="range" id="scroll-slider" min="0" max="0" value="0"></div>
+      <label for="zoom-slider">Zoom<input type="range" id="zoom-slider" min="20" max="240" value="60"></label>
+      <label for="scroll-slider">Scroll<input type="range" id="scroll-slider" min="0" max="0" value="0"></label>
       <button id="live-btn">Live</button>
     </div>
     <div style="background:#0c0c0d;border-radius:4px;"><canvas id="chart-canvas" width="400" height="130"></canvas></div>
@@ -1624,12 +1673,10 @@ function addUI(){
   renderPauseFooter();
   createIndicatorPanels();
 
+  function shortName(n){ return (n && n.length>14) ? (n.slice(0,12)+'…') : n; }
+
   // авто-обновление списков (Top/Accuracy) — без изменений
   setInterval(()=>{
-    const shortSig = (name) => name
-      .replace(/oversold/g,'os').replace(/overbought/g,'ob')
-      .replace(/bullish/g,'bull').replace(/bearish/g,'bear')
-      .replace(/support/g,'sup').replace(/resistance/g,'res');
     try{
       const accBox = document.getElementById('signal-accuracy');
       if (accBox){
@@ -1640,10 +1687,7 @@ function addUI(){
             const total = val.total||0, hits=val.hits||0;
             const acc = total ? (hits/total*100) : 0;
             const color = acc>60?'#00e676':(acc<40?'#ff5252':'#ffeb3b');
-            return `<div style="display:flex;justify-content:space-between;gap:6px;min-width:0;">
-              <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${shortSig(name)}</span>
-              <span style="color:${color};white-space:nowrap;">${acc.toFixed(1)}% (${hits}/${total})</span>
-            </div>`;
+            return `<div class="s-row"><span class="s-name" title="${name}">${shortName(name)}</span><span class="s-val" style="color:${color};">${acc.toFixed(1)}% (${hits}/${total})</span></div>`;
           }).join('');
         accBox.innerHTML = items || '<div>Недостаточно данных</div>';
       }
@@ -1657,9 +1701,10 @@ function addUI(){
         }).filter(x=>x.total>=5)
           .sort((a,b)=> (b.acc - a.acc) || (b.w - a.w))
           .slice(0,8)
-          .map((x,i)=>`<div style="display:flex;justify-content:space-between;gap:6px;min-width:0;">
-            <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;">${i+1}. ${shortSig(x.name)}</span>
-            <span style="white-space:nowrap;">Acc: ${(x.acc*100).toFixed(1)}% • ${x.hits}/${x.total} • W:${x.w.toFixed(2)}</span>
+          .map((x,i)=>`<div class="ts-row ${i<3?'ts-top':''}">
+            ${i<3?`<span class="ts-rank">#${i+1}</span>`:''}
+            <span class="s-name ts-name" title="${x.name}">${shortName(x.name)}</span>
+            <span class="ts-val">Acc: ${(x.acc*100).toFixed(1)}% • ${x.hits}/${x.total} • W:${x.w.toFixed(2)}</span>
           </div>`).join('');
         topBox.innerHTML = rows || '<div>Недостаточно данных</div>';
       }
@@ -1870,6 +1915,19 @@ function smartBet(step, direction){
 
   lastBetExecutionTs = now;
   try { window.lastTradeDirection = direction; } catch(_){}
+
+  try {
+    const betVal = stepCfg && typeof stepCfg.value === 'number' ? stepCfg.value : undefined;
+    const amount = betVal != null ? betVal : getBetValue(step);
+    const stakeSource = betVal != null ? betVal : (amount != null ? amount : 0);
+    const stake = Number(stakeSource);
+    if (Number.isFinite(stake) && stake > 0) {
+      currentWager += stake;
+      totalWager = currentWager;
+      const wEl = document.getElementById('wager');
+      if (wEl) wEl.textContent = '$' + currentWager.toFixed(2);
+    }
+  } catch(_) {}
 
   return true;
 }
@@ -2185,8 +2243,8 @@ function tradeLogic(){
         if (typeof logTradeOpen === 'function') logTradeOpen(currentTrade);
         betHistory.push(currentTrade);
 
-        totalWager += currentTrade.betValue;
-        wagerDiv.innerHTML = totalWager;
+        totalWager = currentWager;
+        if (wagerDiv) wagerDiv.textContent = '$' + currentWager.toFixed(2);
 
         maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
         maxStepDiv.innerHTML = maxStepInCycle;
