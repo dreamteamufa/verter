@@ -272,7 +272,20 @@
 
     const root = document.createElement('div');
     root.id = 'verter-root';
-    Object.assign(root.style,{position:'fixed',bottom:'8px',left:'50%',transform:'translateX(-50%)',maxWidth:'calc(100% - 24px)',zIndex:2147483647});
+    // стартовая позиция (как было): снизу по центру
+    Object.assign(root.style,{position:'fixed',left:'50%',top:'',bottom:'8px',transform:'translateX(-50%)',maxWidth:'calc(100% - 24px)',zIndex:2147483647});
+
+    // включить перетаскивание
+    root.style.cursor = 'move';
+    root.addEventListener('pointerdown', e => {
+      if (e.button!==0) return;
+      const r = root.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
+      root.setPointerCapture(e.pointerId);
+      root.style.transform=''; root.style.bottom='';
+      const move = ev => { root.style.left=(ev.clientX-dx)+'px'; root.style.top=(ev.clientY-dy)+'px'; };
+      const up = () => { root.releasePointerCapture(e.pointerId); root.removeEventListener('pointermove',move); root.removeEventListener('pointerup',up); };
+      root.addEventListener('pointermove',move); root.addEventListener('pointerup',up);
+    });
 
     const tradingSection = document.createElement('div');
     tradingSection.className = 'verter-section verter-wide';
