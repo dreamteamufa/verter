@@ -1,5 +1,3 @@
-// Verter ver. 5.14.0 – 2024-05-24
-// PCS-8 Preflight: https://github.com/dreamteamufa/verter/blob/main/PCS_report.txt
 (function(){
   'use strict';
 
@@ -10,7 +8,7 @@
   }
   window.__VERTER_ACTIVE__ = true;
 
-  const APP_VERSION = 'Verter ver. 5.14.0 (Zoom Controls, 2024-05-24)';
+  const APP_VERSION = 'Verter 5.15 (PCS-8 Integrated, 2025-09-24)';
   const BUILD_TAG = 'PCS-8';
 
   const PAPER_HORIZON = 1;
@@ -19,6 +17,8 @@
   const MIN_PROFIT = 80;
   const minTimeBetweenTrades = 3000;
   const signalCheckInterval = 250;
+  const MINUTE_WINDOW_MS = 1200;
+  const MINUTE_BOUNDARY_MODE = 'window';
 
   const candleInterval = 60000;
   const MAX_CANDLES = 240;
@@ -47,6 +47,80 @@
   const KEY_CODES = { BUY: 87, SELL: 83, DOWN: 65, UP: 68 };
   const KEY_PRESS_DELAY = 24;
   const RESET_PRESS_COUNT = 30;
+  const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
+  const LOG_THROTTLE_MS = 2000;
+
+  function resolveLogLevel(raw){
+    const key = String(raw || '').toLowerCase();
+    return LOG_LEVELS.hasOwnProperty(key) ? LOG_LEVELS[key] : LOG_LEVELS.info;
+  }
+
+  function detectLogLevel(){
+    let raw = 'info';
+    try {
+      if (typeof window !== 'undefined' && window.VERTER_LOG_LEVEL){
+        raw = window.VERTER_LOG_LEVEL;
+      } else if (typeof localStorage !== 'undefined'){
+        const stored = localStorage.getItem('VERTER_LOG_LEVEL');
+        if (stored) raw = stored;
+      }
+    } catch (err){}
+    return resolveLogLevel(raw);
+  }
+
+  const logState = {
+    level: detectLogLevel(),
+    lastMessages: Object.create(null)
+  };
+
+  function logMessage(level, label, payload, throttleKey){
+    const levelValue = LOG_LEVELS[level];
+    if (levelValue == null || levelValue < logState.level) return;
+    const now = Date.now();
+    let key = throttleKey || label;
+    if (!throttleKey && payload){
+      try {
+        key += ':' + JSON.stringify(payload);
+      } catch (err){}
+    }
+    const last = logState.lastMessages[key];
+    if (last && now - last < LOG_THROTTLE_MS) return;
+    logState.lastMessages[key] = now;
+    const prefix = '[Verter] ' + label;
+    if (payload !== undefined){
+      if (level === 'debug'){ console.debug(prefix, payload); }
+      else if (level === 'info'){ console.log(prefix, payload); }
+      else if (level === 'warn'){ console.warn(prefix, payload); }
+      else { console.error(prefix, payload); }
+    } else {
+      if (level === 'debug'){ console.debug(prefix); }
+      else if (level === 'info'){ console.log(prefix); }
+      else if (level === 'warn'){ console.warn(prefix); }
+      else { console.error(prefix); }
+    }
+  }
+
+  function logInfo(label, payload, throttleKey){
+    logMessage('info', label, payload, throttleKey);
+  }
+
+  function logDebug(label, payload, throttleKey){
+    logMessage('debug', label, payload, throttleKey);
+  }
+
+  function logM1CloseEvent(data){
+    logInfo('M1 Close', data, 'M1 Close');
+  }
+
+  function logTradeResultEvent(data){
+    const key = 'Trade Result:' + data.opened_at + ':' + data.closed_at + ':' + data.step;
+    logInfo('Trade Result', data, key);
+  }
+
+  function logNextBetCalcEvent(data){
+    const key = 'Next Bet Calc:' + data.reason + ':' + data.step;
+    logInfo('Next Bet Calc', data, key);
+  }
 
   const fmt = (n, p = 5) => (Number.isFinite(n) ? n.toFixed(p) : '—');
   const fmt2 = (n, p = 2) => (Number.isFinite(n) ? n.toFixed(p) : '—');
@@ -56,6 +130,43 @@
     const d = new Date(ts);
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
   };
+
+  function applySignClass(node, value){
+    if (!node) return;
+    node.classList.remove('positive', 'negative');
+    if (!Number.isFinite(value) || value === 0) return;
+    node.classList.add(value > 0 ? 'positive' : 'negative');
+  }
+
+  function parseBetTimeMs(){
+    const raw = (betTimeDiv.textContent || betTimeDiv.innerText || '').trim();
+    if (!raw) return NaN;
+    const parts = raw.split(':');
+    let hours = 0;
+    let minutes = 0;
+    let seconds = 0;
+    if (parts.length === 3){
+      hours = parseInt(parts[0], 10);
+      minutes = parseInt(parts[1], 10);
+      seconds = parseInt(parts[2], 10);
+    } else if (parts.length === 2){
+      minutes = parseInt(parts[0], 10);
+      seconds = parseInt(parts[1], 10);
+    } else {
+      const digits = raw.match(/\d+/g);
+      if (!digits || !digits.length) return NaN;
+      if (digits.length === 1){
+        seconds = parseInt(digits[0], 10);
+      } else {
+        minutes = parseInt(digits[0], 10);
+        seconds = parseInt(digits[1], 10);
+      }
+    }
+    hours = Number.isFinite(hours) ? hours : 0;
+    minutes = Number.isFinite(minutes) ? minutes : 0;
+    seconds = Number.isFinite(seconds) ? seconds : 0;
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000;
+  }
 
   function setDirection(direction, note){
     if (!ui.directionBox) return;
@@ -170,7 +281,24 @@
     pauseMinutes: 5,
     betArraySelector: 'A',
     warmup: false,
-    pendingLogs: [],
+    cycleProfit: 0,
+    nextBetAmount: betArray1[0].value,
+    slowBet: minTimeBetweenTrades > 3000,
+    minuteBoundaryMode: MINUTE_BOUNDARY_MODE,
+    minuteTimer: {
+      lastMsLeft: null,
+      lastTick: 0,
+      cycleMs: 60000,
+      activeCycleId: 0,
+      tradeCycleId: -1,
+      lastBoundary: 0,
+      lastDrift: 0,
+      windowActivatedAt: 0,
+      windowConsumed: false,
+      windowSource: 'post',
+      targetCycleId: 0
+    },
+    lastDecision: { direction: 'flat', reason: 'init', at: 0 },
     cycles: []
   };
 
@@ -188,11 +316,15 @@
     profitBox: null,
     winRateBox: null,
     wagerBox: null,
+    payoutBox: null,
+    modeBox: null,
     totalProfitBox: null,
+    cycleProfitBox: null,
     maxStepBox: null,
     lossStreakBox: null,
     pauseBox: null,
     pauseButton: null,
+    badgeBox: null,
     topList: null,
     accuracyList: null,
     chartCanvas: null,
@@ -261,6 +393,73 @@
     if (ui.pauseBox) ui.pauseBox.textContent = '—';
   }
 
+  function updateMinuteBoundary(now){
+    const msLeft = parseBetTimeMs();
+    if (!Number.isFinite(msLeft)) return;
+    const timer = state.minuteTimer;
+    const prevLeft = timer.lastMsLeft;
+    const resetTolerance = 1000;
+
+    if (prevLeft != null && msLeft > prevLeft + resetTolerance){
+      const consumed = timer.windowConsumed;
+      timer.activeCycleId += 1;
+      timer.lastBoundary = now;
+      timer.lastDrift = Number.isFinite(prevLeft) ? prevLeft : 0;
+      timer.windowSource = 'post';
+      timer.windowConsumed = false;
+      timer.targetCycleId = timer.activeCycleId;
+      state.minuteSignalsPending = true;
+
+      if (state.minuteBoundaryMode === 'off'){
+        state.minuteGate = true;
+      } else if (state.minuteBoundaryMode === 'strict'){
+        if (timer.tradeCycleId !== timer.targetCycleId){
+          state.minuteGate = true;
+          timer.windowActivatedAt = now;
+        } else {
+          state.minuteGate = false;
+        }
+      } else if (state.minuteBoundaryMode === 'window'){
+        if (!consumed && timer.tradeCycleId !== timer.targetCycleId){
+          state.minuteGate = true;
+          timer.windowActivatedAt = now;
+        } else {
+          state.minuteGate = false;
+        }
+      }
+    }
+
+    timer.lastMsLeft = msLeft;
+    timer.lastTick = now;
+    if (msLeft > timer.cycleMs) timer.cycleMs = msLeft;
+
+    if (state.minuteBoundaryMode === 'off'){
+      state.minuteGate = true;
+      timer.targetCycleId = timer.activeCycleId + 1;
+      return;
+    }
+
+    if (state.minuteBoundaryMode === 'window'){
+      const targetCycleId = timer.activeCycleId + 1;
+      if (msLeft <= MINUTE_WINDOW_MS){
+        if (!timer.windowConsumed && timer.tradeCycleId !== targetCycleId){
+          state.minuteGate = true;
+          timer.windowActivatedAt = now;
+          timer.windowSource = 'pre';
+          timer.targetCycleId = targetCycleId;
+        }
+      }
+
+      if (state.minuteGate && now - timer.windowActivatedAt > MINUTE_WINDOW_MS){
+        state.minuteGate = false;
+      }
+    } else if (state.minuteBoundaryMode === 'strict'){
+      if (state.minuteGate && now - timer.windowActivatedAt > 200){
+        state.minuteGate = false;
+      }
+    }
+  }
+
   function buildUI(){
     const existing = document.getElementById('verter-root');
     if (existing){ existing.remove(); }
@@ -268,29 +467,38 @@
     const style = document.createElement('style');
     style.id = 'verter-style';
     style.textContent = `
-      #verter-root{position:fixed;top:20px;right:20px;width:1160px;color:#fff;font-family:'Inter',sans-serif;z-index:20000;}
+      #verter-root{position:fixed;left:50%;bottom:8px;transform:translateX(-50%);max-width:calc(100% - 24px);color:#fff;font-family:'Inter',sans-serif;z-index:2147483647;}
       #verter-root *{box-sizing:border-box;}
-      .verter-panel{background:#111113;border:1px solid #262629;border-radius:8px;padding:12px;margin-bottom:8px;}
-      .verter-grid{display:flex;gap:8px;align-items:flex-start;}
-      .verter-column{display:flex;flex-direction:column;gap:8px;}
+      .verter-container{display:flex;flex-direction:column;gap:8px;}
       .verter-section{background:#161618;border:1px solid #2a2a2d;border-radius:6px;padding:10px;}
       .verter-section h3{margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:0.08em;color:#9ea0a8;}
-      .verter-info{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;font-size:12px;}
-      .verter-info div{display:flex;justify-content:space-between;gap:8px;}
-      .verter-info span{white-space:nowrap;}
-      .verter-wide{width:360px;}
-      .verter-top{width:360px;}
-      .verter-chart{width:600px;height:300px;}
-      #verter-chart{width:100%;height:100%;background:#101014;border-radius:6px;}
+      .verter-top-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;}
+      .verter-bottom-row{display:flex;flex-wrap:wrap;gap:8px;}
+      .verter-trading{flex:0 0 360px;min-width:320px;max-width:360px;}
+      .verter-accuracy{flex:0 0 220px;min-width:200px;}
+      .verter-top-signals{flex:1 1 220px;min-width:200px;}
+      .verter-chart{flex:1 0 520px;min-width:420px;height:300px;}
+      .verter-chart canvas{width:100%;height:100%;background:#101014;border-radius:6px;}
       .verter-chart-controls{display:flex;align-items:center;gap:8px;font-size:11px;margin-bottom:8px;color:#9ea0a8;}
       .verter-chart-controls label{font-weight:600;text-transform:uppercase;letter-spacing:0.08em;}
       .verter-chart-controls input[type="range"]{flex:1;}
+      .verter-badges{display:flex;flex-wrap:wrap;gap:4px;margin:-2px 0 6px;}
+      .verter-badge{padding:2px 6px;border-radius:4px;font-size:10px;text-transform:uppercase;letter-spacing:0.08em;background:#1f1f23;border:1px solid #2f2f35;color:#c6c8d0;}
+      .verter-badge.on{border-color:${colors.green};color:${colors.green};}
+      .verter-badge.off{border-color:#2f2f35;color:#7c7d85;}
+      .verter-info-table{display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:12px;}
+      .verter-info-label{opacity:0.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .verter-info-value{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;}
+      .verter-info-value.positive{color:${colors.green};}
+      .verter-info-value.negative{color:${colors.red};}
+      .verter-info-table.verter-mini{margin-top:6px;}
       .verter-signal-list{max-height:260px;overflow:hidden;font-size:11px;display:flex;flex-direction:column;gap:4px;}
       .verter-signal-row{display:flex;justify-content:space-between;align-items:center;padding:3px 6px;background:#1d1d21;border-radius:4px;}
       .verter-signal-row strong{font-weight:600;}
+      .verter-cycles-section{flex:1 1 560px;min-width:360px;}
       .verter-cycles{display:flex;flex-wrap:wrap;gap:4px;max-height:80px;overflow:hidden;}
       .verter-cycle{padding:3px 6px;border-radius:4px;font-size:11px;background:#1f1f23;}
-      .verter-flex{display:flex;gap:8px;}
+      .verter-pause-section{flex:0 0 320px;min-width:260px;}
       .verter-pause{display:flex;justify-content:space-between;align-items:center;font-size:12px;}
       .verter-btn{background:#1f1f23;color:#fff;border:1px solid #303035;border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;}
       .verter-btn:hover{background:#2a2a30;}
@@ -299,54 +507,96 @@
 
     const root = document.createElement('div');
     root.id = 'verter-root';
-    // стартовая позиция (как было): снизу по центру
     Object.assign(root.style,{position:'fixed',left:'50%',top:'',bottom:'8px',transform:'translateX(-50%)',maxWidth:'calc(100% - 24px)',zIndex:2147483647});
-
-    // включить перетаскивание
     root.style.cursor = 'move';
     root.addEventListener('pointerdown', e => {
       if (e.button!==0) return;
       const r = root.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
       root.setPointerCapture(e.pointerId);
-      root.style.transform=''; root.style.bottom='';
-      const move = ev => { root.style.left=(ev.clientX-dx)+'px'; root.style.top=(ev.clientY-dy)+'px'; };
+      root.style.transform='';
+      root.style.bottom='';
+      const move = ev => {
+        root.style.left = (ev.clientX - dx) + 'px';
+        root.style.top = (ev.clientY - dy) + 'px';
+      };
       const up = () => { root.releasePointerCapture(e.pointerId); root.removeEventListener('pointermove',move); root.removeEventListener('pointerup',up); };
       root.addEventListener('pointermove',move); root.addEventListener('pointerup',up);
     });
 
-    const tradingSection = document.createElement('div');
-    tradingSection.className = 'verter-section verter-wide';
-    tradingSection.innerHTML = `
-      <h3>Trading</h3>
-      <div class="verter-info">
-        <div><span>Version</span><span>${APP_VERSION}</span></div>
-        <div><span>Mode</span><span>${mode}</span></div>
-        <div><span>Symbol</span><span id="verter-symbol">${state.symbol}</span></div>
-        <div><span>Start Balance</span><span>${fmtMoney(state.startBalance)}</span></div>
-        <div><span>Current Profit</span><span id="verter-profit">$0.00</span></div>
-        <div><span>Total Profit</span><span id="verter-total">$0.00</span></div>
-        <div><span>Win Rate</span><span id="verter-winrate">0%</span></div>
-        <div><span>Current Wager</span><span id="verter-wager">$0.00</span></div>
-        <div><span>Loss Streak</span><span id="verter-losses">0</span></div>
-        <div><span>Max Step</span><span id="verter-step">0</span></div>
-        <div><span>Pause Until</span><span id="verter-pause">—</span></div>
-        <div><span>Bet Time</span><span id="verter-time">--:--:--</span></div>
-      </div>
-      <div class="verter-info" style="margin-top:6px;grid-template-columns:1fr;">
-        <div><span>Signal</span><span id="verter-signal">—</span></div>
-        <div><span>Direction</span><span id="verter-direction">flat</span></div>
-      </div>
-    `;
+    const container = document.createElement('div');
+    container.className = 'verter-container';
 
-    const signalsSection = document.createElement('div');
-    signalsSection.className = 'verter-section verter-top';
-    signalsSection.innerHTML = `
+    const topRow = document.createElement('div');
+    topRow.className = 'verter-top-row';
+
+    const tradingSection = document.createElement('div');
+    tradingSection.className = 'verter-section verter-trading';
+    const tradingTitle = document.createElement('h3');
+    tradingTitle.textContent = 'Trading';
+    const badgeBox = document.createElement('div');
+    badgeBox.className = 'verter-badges';
+    const tradingTable = document.createElement('div');
+    tradingTable.className = 'verter-info-table';
+
+    function addTradingRow(id, label, value){
+      const labelNode = document.createElement('span');
+      labelNode.className = 'verter-info-label';
+      labelNode.textContent = label;
+      const valueNode = document.createElement('span');
+      valueNode.className = 'verter-info-value';
+      valueNode.id = id;
+      valueNode.textContent = value;
+      tradingTable.appendChild(labelNode);
+      tradingTable.appendChild(valueNode);
+      return valueNode;
+    }
+
+    addTradingRow('verter-version', 'Version', APP_VERSION);
+    ui.modeBox = addTradingRow('verter-mode', 'Mode', mode);
+    ui.tradingSymbol = addTradingRow('verter-symbol', 'Symbol', state.symbol);
+    ui.payoutBox = addTradingRow('verter-payout', 'Payout %', '0');
+    ui.timeBox = addTradingRow('verter-time', 'Bet Time', betTimeDiv.textContent || '--:--:--');
+    ui.wagerBox = addTradingRow('verter-wager', 'Current Wager', fmtMoney(0));
+    ui.cycleProfitBox = addTradingRow('verter-cycle', 'Cycle Profit', fmtMoney(0));
+    ui.profitBox = ui.cycleProfitBox;
+    ui.totalProfitBox = addTradingRow('verter-total', 'Total Profit', fmtMoney(0));
+    ui.winRateBox = addTradingRow('verter-winrate', 'Win Rate %', '0%');
+    ui.lossStreakBox = addTradingRow('verter-losses', 'Loss Streak', '0');
+    ui.maxStepBox = addTradingRow('verter-step', 'Max Step', '0');
+    ui.pauseBox = addTradingRow('verter-pause', 'Pause Until', '—');
+
+    const signalTable = document.createElement('div');
+    signalTable.className = 'verter-info-table verter-mini';
+    const signalLabel = document.createElement('span');
+    signalLabel.className = 'verter-info-label';
+    signalLabel.textContent = 'Signal';
+    const signalValue = document.createElement('span');
+    signalValue.className = 'verter-info-value';
+    signalValue.id = 'verter-signal';
+    signalValue.textContent = '—';
+    const directionLabel = document.createElement('span');
+    directionLabel.className = 'verter-info-label';
+    directionLabel.textContent = 'Direction';
+    const directionValue = document.createElement('span');
+    directionValue.className = 'verter-info-value';
+    directionValue.id = 'verter-direction';
+    directionValue.textContent = 'flat';
+    signalTable.appendChild(signalLabel);
+    signalTable.appendChild(signalValue);
+    signalTable.appendChild(directionLabel);
+    signalTable.appendChild(directionValue);
+
+    tradingSection.append(tradingTitle, badgeBox, tradingTable, signalTable);
+
+    const accuracySection = document.createElement('div');
+    accuracySection.className = 'verter-section verter-accuracy';
+    accuracySection.innerHTML = `
       <h3>Signals Accuracy</h3>
       <div id="verter-accuracy" class="verter-signal-list"></div>
     `;
 
     const topSection = document.createElement('div');
-    topSection.className = 'verter-section verter-top';
+    topSection.className = 'verter-section verter-top-signals';
     topSection.innerHTML = `
       <h3>Top Signals</h3>
       <div id="verter-top" class="verter-signal-list"></div>
@@ -364,15 +614,20 @@
       <canvas id="verter-chart" width="600" height="280"></canvas>
     `;
 
+    topRow.append(tradingSection, accuracySection, topSection, chartSection);
+
+    const bottomRow = document.createElement('div');
+    bottomRow.className = 'verter-bottom-row';
+
     const cyclesSection = document.createElement('div');
-    cyclesSection.className = 'verter-section verter-wide';
+    cyclesSection.className = 'verter-section verter-cycles-section';
     cyclesSection.innerHTML = `
       <h3>Cycles History</h3>
       <div id="verter-cycles" class="verter-cycles"></div>
     `;
 
     const pauseSection = document.createElement('div');
-    pauseSection.className = 'verter-section verter-wide';
+    pauseSection.className = 'verter-section verter-pause-section';
     pauseSection.innerHTML = `
       <div class="verter-pause">
         <span>Auto-pause after loss streak</span>
@@ -380,30 +635,15 @@
       </div>
     `;
 
-    const leftColumn = document.createElement('div');
-    leftColumn.className = 'verter-column';
-    leftColumn.append(tradingSection, cyclesSection, pauseSection);
-
-    const rightColumnTop = document.createElement('div');
-    rightColumnTop.className = 'verter-flex';
-    rightColumnTop.append(signalsSection, topSection);
-
-    const rightColumn = document.createElement('div');
-    rightColumn.className = 'verter-column';
-    rightColumn.append(rightColumnTop, chartSection);
-
-    const grid = document.createElement('div');
-    grid.className = 'verter-grid';
-    grid.append(leftColumn, rightColumn);
-
-    root.appendChild(grid);
+    bottomRow.append(cyclesSection, pauseSection);
+    container.append(topRow, bottomRow);
+    root.appendChild(container);
     document.body.appendChild(root);
 
     ui.root = root;
     ui.signalBox = root.querySelector('#verter-signal');
     ui.directionBox = root.querySelector('#verter-direction');
     ui.timeBox = root.querySelector('#verter-time');
-    ui.profitBox = root.querySelector('#verter-profit');
     ui.winRateBox = root.querySelector('#verter-winrate');
     ui.wagerBox = root.querySelector('#verter-wager');
     ui.totalProfitBox = root.querySelector('#verter-total');
@@ -419,10 +659,11 @@
     ui.chartZoomValue = root.querySelector('#verter-chart-zoom-value');
     ui.cyclesBox = root.querySelector('#verter-cycles');
     ui.tradingSymbol = root.querySelector('#verter-symbol');
+    ui.badgeBox = badgeBox;
 
     ui.pauseButton.addEventListener('click', () => {
       clearPause();
-      console.log('[Verter] pause reset manually');
+      logDebug('Pause Reset', { manual: true });
     });
 
     if (ui.chartZoomSlider){
@@ -446,23 +687,50 @@
       }
     }
 
+    renderBadges();
     updateChartZoomDisplay();
 
     setDirection('flat');
   }
 
   function updateTradingInfo(){
-    setText(ui.timeBox, betTimeDiv.textContent || '--:--:--');
-    setText(ui.tradingSymbol, (symbolDiv.textContent || '').replace('/', ' ').trim());
-    setText(ui.profitBox, fmtMoney(state.currentProfit));
-    setText(ui.totalProfitBox, fmtMoney(state.totalProfit));
+    const timeText = betTimeDiv.textContent || '--:--:--';
+    const symbolText = (symbolDiv.textContent || '').replace('/', ' ').trim();
+    const payoutValue = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
     const winCount = state.betHistory.filter(t => t.result === 'won').length;
-    const rate = state.betHistory.length ? (winCount / state.betHistory.length) * 100 : 0;
-    setText(ui.winRateBox, rate.toFixed(1) + '%');
-    setText(ui.wagerBox, fmtMoney(state.currentWager));
-    setText(ui.maxStepBox, String(state.maxStep || 0));
-    setText(ui.lossStreakBox, String(state.lossStreak));
-    setText(ui.pauseBox, state.pauseUntil ? humanTime(state.pauseUntil) : '—');
+    const tradeCount = state.betHistory.length;
+    const rate = tradeCount ? (winCount / tradeCount) * 100 : 0;
+
+    setText(ui.timeBox, timeText);
+    setText(ui.tradingSymbol, symbolText);
+    if (ui.modeBox) setText(ui.modeBox, mode);
+    if (ui.payoutBox) ui.payoutBox.textContent = Number.isFinite(payoutValue) ? payoutValue + '%' : '—';
+    if (ui.wagerBox) ui.wagerBox.textContent = fmtMoney(state.currentWager);
+    if (ui.cycleProfitBox){
+      ui.cycleProfitBox.textContent = fmtMoney(state.cycleProfit);
+      applySignClass(ui.cycleProfitBox, state.cycleProfit);
+    }
+    if (ui.totalProfitBox){
+      ui.totalProfitBox.textContent = fmtMoney(state.totalProfit);
+      applySignClass(ui.totalProfitBox, state.totalProfit);
+    }
+    if (ui.winRateBox) ui.winRateBox.textContent = rate.toFixed(1) + '%';
+    if (ui.lossStreakBox) ui.lossStreakBox.textContent = String(state.lossStreak);
+    if (ui.maxStepBox) ui.maxStepBox.textContent = String(state.maxStep || 0);
+    if (ui.pauseBox) ui.pauseBox.textContent = state.pauseUntil ? humanTime(state.pauseUntil) : '—';
+    renderBadges();
+  }
+
+  function renderBadges(){
+    if (!ui.badgeBox) return;
+    const items = [
+      { label: 'Auto', active: state.autoTrading },
+      { label: 'Warmup', active: state.warmup },
+      { label: 'MinuteGate ' + state.minuteBoundaryMode.toUpperCase(), active: state.minuteBoundaryMode !== 'off' },
+      { label: 'Array ' + state.betArraySelector, active: true },
+      { label: 'SlowBet', active: state.slowBet }
+    ];
+    ui.badgeBox.innerHTML = items.map(item => `<span class="verter-badge ${item.active ? 'on' : 'off'}">${item.label}</span>`).join('');
   }
 
   function renderSignals(list, data){
@@ -595,8 +863,6 @@
       state.currentCandle = newCandle;
       state.candles.push(newCandle);
       if (state.candles.length > MAX_CANDLES) state.candles.shift();
-      state.minuteGate = true;
-      state.minuteSignalsPending = true;
     } else {
       state.currentCandle.tClose = now;
       state.currentCandle.close = price;
@@ -620,6 +886,20 @@
     const closePrice = list[idx].close;
     const delta = closePrice - openPrice;
     const resultDirection = delta > 0 ? 'buy' : (delta < 0 ? 'sell' : 'flat');
+
+    const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
+    const topSnapshot = state.topSignals.slice(0, 3).map(sig => ({ key: sig.key, wr: Number((sig.wr * 100).toFixed(1)) }));
+    logM1CloseEvent({
+      time: humanTime(Date.now()),
+      symbol,
+      ohlc: { o: candle.open, h: candle.high, l: candle.low, c: candle.close },
+      payout: Number.isFinite(payout) ? payout : null,
+      top: topSnapshot,
+      decision: state.lastDecision.direction,
+      reason: state.lastDecision.reason,
+      drift_ms: Math.round(state.minuteTimer.lastDrift || 0),
+      zoom: state.chartOptions.zoom
+    });
 
     if (resultDirection === 'flat'){ return; }
 
@@ -828,7 +1108,23 @@
     return found ? found.value : arr[0].value;
   }
 
+  function recordNextBet(reason, prevStep, nextStep){
+    const amount = getBetValue(nextStep);
+    state.nextBetAmount = amount;
+    const payload = {
+      time: humanTime(Date.now()),
+      reason,
+      step: prevStep + '→' + nextStep,
+      amount,
+      array: state.betArraySelector,
+      limits: { max_step: state.betArray.length - 1, pause: state.pauseLossThreshold },
+      pause_until: state.pauseUntil ? humanTime(state.pauseUntil) : null
+    };
+    logNextBetCalcEvent(payload);
+  }
+
   function applyMartingale(result){
+    const prevStep = state.currentBetStep;
     if (result === 'won'){
       state.currentBetStep = 0;
       state.lossStreak = 0;
@@ -842,20 +1138,21 @@
     if (!state.maxStep || state.currentBetStep > state.maxStep){
       state.maxStep = state.currentBetStep;
     }
+    recordNextBet('trade_result:' + result, prevStep, state.currentBetStep);
   }
 
-  function placeTrade(direction){
-    const now = Date.now();
+  function placeTrade(direction, timestamp){
+    const now = Number.isFinite(timestamp) ? timestamp : Date.now();
     if (state.isTradeOpen) return false;
     if (now - state.lastTradeTime < minTimeBetweenTrades) return false;
     const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
     if (!Number.isFinite(payout) || payout < MIN_PROFIT){
-      console.log('[Verter] payout below minimum, skip trade');
+      logDebug('Payout Below Minimum', { payout });
       setDirection('flat', 'payout');
       return false;
     }
     if (isPaused()){
-      console.log('[Verter] trading paused');
+      logDebug('Trading Paused', { pause_until: state.pauseUntil });
       setDirection('flat', 'pause');
       return false;
     }
@@ -869,42 +1166,59 @@
 
     const trade = {
       time: humanTime(now),
+      openedAt: now,
       direction,
       step: state.currentBetStep,
       amount: betValue,
-      signals: state.minuteSignals.map(s => s.key)
+      signals: state.minuteSignals.map(s => s.key),
+      cycle: state.minuteTimer.windowSource === 'pre'
+        ? state.minuteTimer.activeCycleId + 1
+        : (state.minuteTimer.targetCycleId || state.minuteTimer.activeCycleId)
     };
     state.betHistory.push(trade);
     state.lastTradeTime = now;
     state.isTradeOpen = true;
-    state.currentWager += betValue;
+    state.currentWager = betValue;
+    state.minuteTimer.windowConsumed = true;
+    state.minuteTimer.tradeCycleId = trade.cycle;
+    if (!state.lastDecision) state.lastDecision = { direction: direction, reason: 'auto', at: now };
+    state.lastDecision.direction = direction;
+    state.lastDecision.at = now;
     setDirection(direction, 'opened');
     updateTradingInfo();
-    console.log('[Verter] trade opened', trade);
     return true;
   }
 
-  function tradeLogic(){
-    if (!state.minuteGate) return;
-    if (!state.autoTrading) {
+  function tradeLogic(now){
+    const gatingRequired = state.minuteBoundaryMode !== 'off';
+    if (gatingRequired && !state.minuteGate) return;
+
+    const finalizeWindow = () => {
+      if (gatingRequired) state.minuteGate = false;
+    };
+
+    if (!state.autoTrading){
+      state.lastDecision = { direction: 'flat', reason: 'manual-off', at: now };
       setDirection('flat', 'manual-off');
-      state.minuteGate = false;
-      return;
-    }
-    if (state.minuteSignalsPending){
-      console.log('[Verter] minute signals not ready, skip');
-      state.minuteGate = false;
+      finalizeWindow();
       return;
     }
 
-    const snapshot = state.latestSignals;
+    if (state.minuteSignalsPending){
+      state.lastDecision = { direction: 'flat', reason: 'signals-pending', at: now };
+      logDebug('Signals Pending', { cycle: state.minuteTimer.activeCycleId });
+      finalizeWindow();
+      return;
+    }
+
     const allowedKeys = new Set(state.topSignals.map(s => s.key));
-    const active = snapshot.filter(sig => allowedKeys.has(sig.key));
+    const active = state.latestSignals.filter(sig => allowedKeys.has(sig.key));
 
     if (!active.length){
-      console.log('[Verter] no eligible top signals this minute');
+      state.lastDecision = { direction: 'flat', reason: 'no-top', at: now };
       setDirection('flat', 'no-top');
-      state.minuteGate = false;
+      logDebug('No Eligible Signals', { cycle: state.minuteTimer.activeCycleId });
+      finalizeWindow();
       return;
     }
 
@@ -912,27 +1226,30 @@
     let sells = 0;
     active.forEach(sig => {
       if (sig.direction === 'buy') buys += 1;
-      if (sig.direction === 'sell') sells += 1;
+      else if (sig.direction === 'sell') sells += 1;
     });
 
     let direction = 'flat';
     if (buys > sells) direction = 'buy';
-    if (sells > buys) direction = 'sell';
+    else if (sells > buys) direction = 'sell';
 
     if (direction === 'flat'){
-      console.log('[Verter] conflicting signals, skip trade');
+      state.lastDecision = { direction: 'flat', reason: 'conflict', at: now };
       setDirection('flat', 'conflict');
-      state.minuteGate = false;
+      logDebug('Conflicting Signals', { cycle: state.minuteTimer.activeCycleId });
+      finalizeWindow();
       return;
     }
 
-    setDirection(direction, 'minute');
-    const placed = placeTrade(direction);
+    const reason = gatingRequired ? ('minute-' + (state.minuteTimer.windowSource || 'window')) : 'auto';
+    state.lastDecision = { direction, reason, at: now };
+    setDirection(direction, gatingRequired ? 'minute' : 'auto');
+    const placed = placeTrade(direction, now);
     if (!placed){
-      console.log('[Verter] trade not placed at minute boundary');
+      state.lastDecision = { direction: 'flat', reason: 'not-placed', at: now };
       setDirection('flat', 'not-placed');
     }
-    state.minuteGate = false;
+    finalizeWindow();
   }
 
   function syncProfit(){
@@ -948,14 +1265,34 @@
     const last = state.betHistory[state.betHistory.length - 1];
     if (!last) return;
     last.result = result.won ? 'won' : 'lost';
+    const prevTotal = state.totalProfit;
     syncProfit();
+    const pnl = state.totalProfit - prevTotal;
+    state.currentWager = 0;
+    state.cycleProfit += Number.isFinite(pnl) ? pnl : 0;
+    if (last.result === 'won') state.cycleProfit = 0;
     applyMartingale(last.result);
-    if (last.result === 'lost' && state.pauseLossThreshold && state.lossStreak >= state.pauseLossThreshold){
-      schedulePause();
-    }
     setDirection('flat', last.result);
     state.cycles.push({ result: last.result, profit: state.currentProfit, step: last.step });
     if (state.cycles.length > 24) state.cycles.shift();
+    const now = Date.now();
+    const tradeCount = state.betHistory.length;
+    const winCount = state.betHistory.filter(t => t.result === 'won').length;
+    const rate = tradeCount ? (winCount / tradeCount) * 100 : 0;
+    state.lastDecision = { direction: last.direction || 'flat', reason: 'result:' + last.result, at: now };
+    logTradeResultEvent({
+      opened_at: humanTime(last.openedAt || now),
+      closed_at: humanTime(now),
+      symbol: state.symbol,
+      direction: last.direction,
+      step: last.step,
+      amount: last.amount,
+      result: last.result,
+      pnl: Number((Number.isFinite(pnl) ? pnl : 0).toFixed(2)),
+      cycle_profit: Number(state.cycleProfit.toFixed(2)),
+      total_profit: Number(state.totalProfit.toFixed(2)),
+      win_rate: Number(rate.toFixed(1))
+    });
     renderCycles();
     updateTradingInfo();
   }
@@ -969,11 +1306,15 @@
   }
 
   function manualAssetReset(){
+    const prevStep = state.currentBetStep;
     state.betHistory = [];
     state.currentBetStep = 0;
     state.lossStreak = 0;
     state.maxStep = 0;
     state.currentWager = 0;
+    state.currentProfit = 0;
+    state.totalProfit = 0;
+    state.cycleProfit = 0;
     state.pauseUntil = 0;
     state.minuteGate = false;
     state.minuteSignals = [];
@@ -982,13 +1323,18 @@
     state.topSignals = [];
     state.virtualStats[state.symbol] = Object.create(null);
     state.cycles = [];
+    state.minuteTimer.tradeCycleId = -1;
+    state.minuteTimer.windowConsumed = false;
+    state.minuteTimer.targetCycleId = state.minuteTimer.activeCycleId;
     updateTradingInfo();
     renderAccuracy();
     renderTopSignals();
     renderCycles();
     setDirection('flat', 'reset');
     setText(ui.signalBox, '—');
-    console.log('[Verter] asset reset');
+    state.lastDecision = { direction: 'flat', reason: 'reset', at: Date.now() };
+    recordNextBet('manual-reset', prevStep, state.currentBetStep);
+    logDebug('Asset Reset', { symbol: state.symbol });
   }
 
   function observeSymbolChanges(){
@@ -1008,9 +1354,10 @@
       const now = Date.now();
       if (now - state.lastSignalCheck >= signalCheckInterval){
         state.lastSignalCheck = now;
+        updateMinuteBoundary(now);
         updatePrice();
         evaluateSignals();
-        tradeLogic();
+        tradeLogic(now);
         updateTradingInfo();
       }
     }, signalCheckInterval);
@@ -1029,6 +1376,7 @@
     observeTradeResults();
     observeSymbolChanges();
     setupTimers();
+    recordNextBet('init', state.currentBetStep, state.currentBetStep);
     updateTradingInfo();
     renderAccuracy();
     renderTopSignals();
