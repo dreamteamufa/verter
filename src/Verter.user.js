@@ -155,6 +155,132 @@
     return value % 1 === 0 ? String(value) : value.toFixed(2);
   }
 
+  function normalizeSymbolLabel(raw){
+    if (!raw) return '';
+    const text = String(raw).replace(/\u00a0/g, ' ').trim();
+    if (!text) return '';
+    const compact = text.replace(/\s*\/\s*/g, '/');
+    if (compact.includes('/')){
+      return compact.split('/').map(part => part.trim().toUpperCase()).join(' ');
+    }
+    return compact.replace(/\s+/g, ' ').toUpperCase();
+  }
+
+  function makeSymbolKey(raw){
+    const label = normalizeSymbolLabel(raw);
+    return label ? label.replace(/[^A-Z0-9]/g, '') : '';
+  }
+
+  function textContainsSymbol(text, symbol){
+    if (!text || !symbol) return false;
+    const normalizedText = String(text).toUpperCase();
+    const normalizedSymbol = normalizeSymbolLabel(symbol);
+    if (!normalizedSymbol) return false;
+    const withSpace = normalizedSymbol;
+    const withSlash = normalizedSymbol.replace(/\s+/g, '/');
+    const compact = normalizedSymbol.replace(/\s+/g, '');
+    return normalizedText.includes(withSpace)
+      || normalizedText.includes(withSlash)
+      || normalizedText.includes(compact);
+  }
+
+  function parseMoneyValue(raw){
+    if (raw == null) return NaN;
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN;
+    const normalized = String(raw).replace(/[^0-9+\-,.]/g, '').replace(/,/g, '');
+    if (!normalized) return NaN;
+    const value = parseFloat(normalized);
+    return Number.isFinite(value) ? value : NaN;
+  }
+
+  function extractMoneyCandidates(text){
+    if (!text) return [];
+    const source = String(text).replace(/\u00a0/g, ' ');
+    const regex = /[-+]?[$€£]?\s*\d+(?:[\s,]\d{3})*(?:\.\d+)?/g;
+    const matches = [];
+    let match;
+    while ((match = regex.exec(source))){
+      matches.push(match[0]);
+    }
+    return matches;
+  }
+
+  function findAmountInText(text, target){
+    const matches = extractMoneyCandidates(text);
+    if (!matches.length) return NaN;
+    if (Number.isFinite(target)){
+      const tolerance = 0.01;
+      for (const token of matches){
+        const value = parseMoneyValue(token);
+        if (Number.isFinite(value) && Math.abs(value - target) <= tolerance){
+          return value;
+        }
+      }
+    }
+    for (const token of matches){
+      const value = parseMoneyValue(token);
+      if (Number.isFinite(value)) return value;
+    }
+    return NaN;
+  }
+
+  function findPnLInText(text){
+    const matches = extractMoneyCandidates(text);
+    if (!matches.length) return NaN;
+    for (let i = matches.length - 1; i >= 0; i -= 1){
+      const token = matches[i];
+      if (/[+$€£-]/.test(token)){
+        const value = parseMoneyValue(token);
+        if (Number.isFinite(value)) return value;
+      }
+    }
+    const fallback = parseMoneyValue(matches[matches.length - 1]);
+    return Number.isFinite(fallback) ? fallback : NaN;
+  }
+
+  function textContainsAmount(text, amount){
+    if (!text || !Number.isFinite(amount)) return false;
+    const normalizedText = String(text).replace(/\u00a0/g, ' ').replace(/\s+/g, '');
+    const fixed2 = amount.toFixed(2);
+    const fixed0 = amount % 1 === 0 ? amount.toFixed(0) : fixed2;
+    const candidates = [
+      '$' + fixed2,
+      '$' + fixed2.replace('.', ','),
+      '$ ' + fixed2,
+      '$' + fixed0,
+      '$' + fixed0.replace('.', ','),
+      '$ ' + fixed0,
+      fixed2,
+      fixed2.replace('.', ','),
+      fixed0,
+      fixed0.replace('.', ',')
+    ].map(token => token.replace(/\s+/g, ''));
+    return candidates.some(token => token && normalizedText.indexOf(token) !== -1);
+  }
+
+  function approxEqual(a, b, tolerance){
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+    const limit = Number.isFinite(tolerance) ? tolerance : 0.01;
+    return Math.abs(a - b) <= limit;
+  }
+
+  function normalizeResultKind(raw){
+    if (raw == null) return null;
+    const value = String(raw).toLowerCase();
+    if (!value) return null;
+    if (/(return|refund|tie|draw|equal|push|back)/.test(value)) return 'returned';
+    if (/(price-up|arrow-up|trend-up|win|won|success|profit|positive|gain)/.test(value)) return 'win';
+    if (/(price-down|arrow-down|trend-down|lose|loss|lost|fail|negative)/.test(value)) return 'loss';
+    return null;
+  }
+
+  function classifyResultFromPnL(pnl){
+    if (!Number.isFinite(pnl)) return null;
+    if (pnl > 0.009) return 'win';
+    if (pnl < -0.009) return 'loss';
+    return 'returned';
+  }
+
   function formatDecisionReason(raw){
     if (!raw) return 'IDLE';
     if (raw === 'minute-strict') return 'STRICT';
@@ -180,7 +306,8 @@
       init: 'startup',
       'manual-reset': 'reset',
       'trade_result:won': 'after_win',
-      'trade_result:lost': 'after_loss'
+      'trade_result:lost': 'after_loss',
+      'trade_result:returned': 'returned'
     };
     if (map.hasOwnProperty(raw)) return map[raw];
     return raw.replace(/[^a-z0-9]+/gi, '_').toLowerCase();
@@ -312,6 +439,7 @@
     lastTradeTime: 0,
     lastSignalCheck: 0,
     isTradeOpen: false,
+    openTrade: null,
     currentWager: 0,
     currentProfit: 0,
     totalProfit: 0,
@@ -363,6 +491,12 @@
     tradeTimer: null,
     signalTimer: null,
     chartTimer: null
+  };
+
+  const closedDealsWatcher = {
+    observer: null,
+    containers: new Set(),
+    scanTimer: null
   };
 
   const ui = {
@@ -870,7 +1004,9 @@
       return;
     }
     ui.cyclesBox.innerHTML = state.cycles.slice(-20).map(item => {
-      const color = item.result === 'won' ? colors.green : colors.red;
+      const color = item.result === 'won'
+        ? colors.green
+        : (item.result === 'lost' ? colors.red : colors.gray);
       return `<div class="verter-cycle" style="background:${color}1a;border:1px solid ${color};">${item.result.toUpperCase()} · ${fmtMoney(item.profit)} · step ${item.step}</div>`;
     }).join('');
   }
@@ -1255,6 +1391,8 @@
       if (state.lossStreak >= state.pauseLossThreshold){
         schedulePause();
       }
+    } else if (result === 'returned'){
+      state.lossStreak = 0;
     }
     if (!state.maxStep || state.currentBetStep > state.maxStep){
       state.maxStep = state.currentBetStep;
@@ -1291,6 +1429,10 @@
       direction,
       step: state.currentBetStep,
       amount: betValue,
+      symbol: state.symbol,
+      pnl: 0,
+      result: null,
+      closedAt: null,
       signals: state.minuteSignals.map(s => s.key),
       trigger: meta && meta.key ? meta.key : null,
       triggerRank: meta && meta.rank ? meta.rank : null,
@@ -1302,6 +1444,15 @@
     state.betHistory.push(trade);
     state.lastTradeTime = now;
     state.isTradeOpen = true;
+    state.openTrade = {
+      symbol: trade.symbol,
+      symbolKey: makeSymbolKey(trade.symbol),
+      amount: trade.amount,
+      step: trade.step,
+      direction: trade.direction,
+      openedAt: trade.openedAt,
+      index: state.betHistory.length - 1
+    };
     state.currentWager = betValue;
     state.minuteTimer.windowConsumed = true;
     state.minuteTimer.tradeCycleId = trade.cycle;
@@ -1368,35 +1519,600 @@
     state.totalProfit = profit;
   }
 
+  function normalizeTradeResultPayload(result, fallbackTrade){
+    if (result == null) return null;
+    const normalized = {
+      displayResult: null,
+      stateResult: null,
+      pnl: NaN,
+      amount: NaN,
+      symbol: null,
+      closedAt: Date.now(),
+      source: null
+    };
+
+    if (typeof result === 'object'){
+      normalized.source = result.source || null;
+      const amountCandidates = [
+        result.amount,
+        result.sum,
+        result.investment,
+        result.volume,
+        result.value,
+        result.bet
+      ];
+      for (const candidate of amountCandidates){
+        const value = parseMoneyValue(candidate);
+        if (Number.isFinite(value)){
+          normalized.amount = value;
+          break;
+        }
+      }
+
+      const pnlCandidates = [
+        result.pnl,
+        result.profit,
+        result.payout,
+        result.delta,
+        result.pl
+      ];
+      for (const candidate of pnlCandidates){
+        const value = parseMoneyValue(candidate);
+        if (Number.isFinite(value)){
+          normalized.pnl = value;
+          break;
+        }
+      }
+
+      if (!Number.isFinite(normalized.pnl) && result.meta){
+        const metaCandidates = [
+          result.meta.pnl,
+          result.meta.profit,
+          result.meta.payout
+        ];
+        for (const candidate of metaCandidates){
+          const value = parseMoneyValue(candidate);
+          if (Number.isFinite(value)){
+            normalized.pnl = value;
+            break;
+          }
+        }
+      }
+
+      if (Number.isFinite(result.closedAt)){
+        normalized.closedAt = result.closedAt;
+      } else if (Number.isFinite(result.closed)){
+        normalized.closedAt = result.closed;
+      } else if (Number.isFinite(result.time)){
+        normalized.closedAt = result.time;
+      }
+
+      const symbolCandidates = [
+        result.symbol,
+        result.asset,
+        result.pair,
+        result.underlying
+      ];
+      for (const candidate of symbolCandidates){
+        if (candidate){
+          const label = normalizeSymbolLabel(candidate);
+          if (label){
+            normalized.symbol = label;
+            break;
+          }
+        }
+      }
+
+      const statusCandidates = [
+        result.displayResult,
+        result.result,
+        result.status,
+        result.state,
+        result.outcome,
+        result.type,
+        result.winStatus
+      ];
+      for (const candidate of statusCandidates){
+        const mapped = normalizeResultKind(candidate);
+        if (mapped){
+          normalized.displayResult = mapped;
+          break;
+        }
+      }
+
+      if (!normalized.displayResult && typeof result.won === 'boolean'){
+        normalized.displayResult = result.won ? 'win' : 'loss';
+      }
+      if (!normalized.displayResult && typeof result.success === 'boolean'){
+        normalized.displayResult = result.success ? 'win' : 'loss';
+      }
+    } else if (typeof result === 'string'){
+      normalized.displayResult = normalizeResultKind(result);
+      if (!normalized.displayResult){
+        const parsed = parseMoneyValue(result);
+        if (Number.isFinite(parsed)){
+          normalized.pnl = parsed;
+          normalized.displayResult = classifyResultFromPnL(parsed);
+        }
+      }
+    } else if (typeof result === 'number'){
+      normalized.pnl = result;
+      normalized.displayResult = classifyResultFromPnL(result);
+    } else if (typeof result === 'boolean'){
+      normalized.displayResult = result ? 'win' : 'loss';
+    }
+
+    if (!normalized.displayResult && Number.isFinite(normalized.pnl)){
+      normalized.displayResult = classifyResultFromPnL(normalized.pnl);
+    }
+    if (!normalized.displayResult && fallbackTrade && Number.isFinite(fallbackTrade.pnl)){
+      normalized.displayResult = classifyResultFromPnL(fallbackTrade.pnl);
+    }
+    if (!normalized.displayResult) normalized.displayResult = 'loss';
+
+    normalized.stateResult = normalized.displayResult === 'win'
+      ? 'won'
+      : (normalized.displayResult === 'loss' ? 'lost' : 'returned');
+
+    return normalized;
+  }
+
   function onTradeResult(result){
     state.isTradeOpen = false;
-    if (!result) return;
+    if (state.openTrade) state.openTrade = null;
     const last = state.betHistory[state.betHistory.length - 1];
     if (!last) return;
-    last.result = result.won ? 'won' : 'lost';
+    if (result == null) return;
+
+    if (!last.symbol) last.symbol = state.symbol;
+
+    const normalized = normalizeTradeResultPayload(result, last);
+    if (!normalized) return;
+
+    if (Number.isFinite(normalized.amount)) last.amount = normalized.amount;
+    if (normalized.symbol) last.symbol = normalized.symbol;
+
     const prevTotal = state.totalProfit;
     syncProfit();
-    const pnl = state.totalProfit - prevTotal;
+    let pnl = Number.isFinite(normalized.pnl) ? normalized.pnl : state.totalProfit - prevTotal;
+    if (!Number.isFinite(pnl)) pnl = 0;
+
+    last.pnl = pnl;
+    last.result = normalized.stateResult;
+    last.closedAt = Number.isFinite(normalized.closedAt) ? normalized.closedAt : Date.now();
+
     state.currentWager = 0;
-    state.cycleProfit += Number.isFinite(pnl) ? pnl : 0;
+    state.cycleProfit += pnl;
     if (last.result === 'won') state.cycleProfit = 0;
     applyMartingale(last.result);
     setDirection('flat', last.result);
     state.cycles.push({ result: last.result, profit: state.currentProfit, step: last.step });
     if (state.cycles.length > 24) state.cycles.shift();
     const now = Date.now();
-    const tradeCount = state.betHistory.length;
-    const winCount = state.betHistory.filter(t => t.result === 'won').length;
-    const rate = tradeCount ? (winCount / tradeCount) * 100 : 0;
     state.lastDecision = { direction: last.direction || 'flat', reason: 'result:' + last.result, at: now };
-    const openTime = humanTime(last.openedAt || now);
-    const closeTime = humanTime(now);
-    const resultText = last.result === 'won' ? 'win' : 'loss';
-    const pnlValue = Number.isFinite(pnl) ? pnl : 0;
-    const message = `${openTime}→${closeTime} ${state.symbol} ${last.direction} step=${last.step} amt=${formatAmount(last.amount)} result=${resultText} pnl=${formatSignedFixed(pnlValue)} cycle=${formatSignedFixed(state.cycleProfit)} total=${formatSignedFixed(state.totalProfit)} WR=${formatPercent(rate)}`;
+    const tradeSymbol = last.symbol || state.symbol;
+    const displayResult = normalized.displayResult || (last.result === 'won' ? 'win' : (last.result === 'lost' ? 'loss' : 'returned'));
+    const message = `symbol=${tradeSymbol} dir=${last.direction} step=${last.step} amt=${formatAmount(last.amount)} result=${displayResult} pnl=${formatSignedFixed(pnl)}`;
     logTradeResultEvent(message);
     renderCycles();
     updateTradingInfo();
+  }
+
+  const CLOSED_DEAL_CONTAINER_QUERIES = [
+    '.trades__list--closed',
+    '.trades-list--closed',
+    '.closed-deals__list',
+    '.history__list--closed',
+    '[data-tab="closed"] .trades-list',
+    '[data-tab="closed"] .deals-list',
+    '.deals-list[data-tab="closed"]',
+    '.deals-list[data-type="closed"]'
+  ];
+
+  const CLOSED_DEAL_PARENT_QUERIES = [
+    '[data-tab="closed"]',
+    '.tabs__content--closed',
+    '.tabs-content--closed',
+    '.trades__tab--closed',
+    '.history__tab--closed',
+    '.closed-deals',
+    '.section--closed'
+  ];
+
+  const CLOSED_DEAL_ROW_QUERIES = [
+    '[data-deal-id]',
+    '[data-transaction-id]',
+    '[data-order-id]',
+    '.trades-list__row',
+    '.trades__row',
+    '.deal-entry',
+    '.deal-item',
+    '.deal-card',
+    '.closed-deal',
+    '.history__row',
+    '.table__row',
+    'li',
+    'tr'
+  ];
+
+  const CLOSED_DEAL_SYMBOL_DATA_KEYS = ['symbol', 'asset', 'assetName', 'pair', 'underlying'];
+  const CLOSED_DEAL_SYMBOL_SELECTORS = [
+    '[data-symbol]',
+    '[data-asset]',
+    '[data-asset-name]',
+    '[data-underlying]',
+    '.deal-asset',
+    '.deal__asset',
+    '.trades-list__asset',
+    '.trades__asset',
+    '.trades__symbol',
+    '.symbol',
+    '.asset-name',
+    '.asset'
+  ];
+
+  const CLOSED_DEAL_AMOUNT_DATA_KEYS = ['amount', 'investment', 'invest', 'sum', 'stake', 'value', 'bet', 'dealAmount'];
+  const CLOSED_DEAL_AMOUNT_SELECTORS = [
+    '[data-amount]',
+    '[data-investment]',
+    '[data-invest]',
+    '[data-sum]',
+    '[data-stake]',
+    '[data-value]',
+    '.deal-amount',
+    '.deal__amount',
+    '.trades-list__amount',
+    '.trades__amount',
+    '.amount',
+    '.value'
+  ];
+
+  const CLOSED_DEAL_PNL_DATA_KEYS = ['pnl', 'profit', 'result', 'outcome', 'pl', 'payout'];
+  const CLOSED_DEAL_PNL_SELECTORS = [
+    '[data-pnl]',
+    '[data-profit]',
+    '[data-result]',
+    '.deal-profit',
+    '.deal__profit',
+    '.trades-list__profit',
+    '.trades__result',
+    '.profit',
+    '.result'
+  ];
+
+  function ensureClosedDealsObserver(){
+    if (!closedDealsWatcher.observer){
+      closedDealsWatcher.observer = new MutationObserver(handleClosedDealsMutation);
+    }
+    scanClosedDealsContainers();
+    if (closedDealsWatcher.scanTimer){
+      clearInterval(closedDealsWatcher.scanTimer);
+    }
+    closedDealsWatcher.scanTimer = setInterval(scanClosedDealsContainers, 2000);
+  }
+
+  function scanClosedDealsContainers(){
+    const found = new Set();
+    CLOSED_DEAL_CONTAINER_QUERIES.forEach(selector => {
+      try {
+        document.querySelectorAll(selector).forEach(node => {
+          if (qualifiesClosedDealsContainer(node)) found.add(node);
+        });
+      } catch (_err){}
+    });
+    try {
+      document.querySelectorAll('.deals-list').forEach(node => {
+        if (qualifiesClosedDealsContainer(node)) found.add(node);
+      });
+    } catch (_err){}
+    found.forEach(attachClosedDealsContainer);
+  }
+
+  function attachClosedDealsContainer(node){
+    if (!node || closedDealsWatcher.containers.has(node)) return;
+    try {
+      closedDealsWatcher.observer.observe(node, { childList: true, subtree: true });
+      closedDealsWatcher.containers.add(node);
+    } catch (err){
+      console.warn('[Verter] closed deals observer attach failed', err);
+    }
+  }
+
+  function qualifiesClosedDealsContainer(node){
+    if (!node || node.nodeType !== 1) return false;
+    if (closedDealsWatcher.containers.has(node)) return true;
+    const dataset = node.dataset || {};
+    if (dataset.tab === 'closed' || dataset.type === 'closed' || dataset.state === 'closed' || dataset.list === 'closed'){
+      return true;
+    }
+    try {
+      if (node.matches && node.matches('.trades__list--closed, .trades-list--closed, .closed-deals__list, .history__list--closed')){
+        return true;
+      }
+    } catch (_err){}
+    const className = (node.className || '').toString().toLowerCase();
+    if (className && className.includes('closed') && (className.includes('deal') || className.includes('trade'))){
+      return true;
+    }
+    for (const selector of CLOSED_DEAL_PARENT_QUERIES){
+      try {
+        if (node.closest && node.closest(selector)) return true;
+      } catch (_err){}
+    }
+    return false;
+  }
+
+  function handleClosedDealsMutation(mutations){
+    if (!state.isTradeOpen || !state.openTrade) return;
+    const containers = new Set();
+    mutations.forEach(mutation => {
+      if (mutation.type !== 'childList') return;
+      const targetContainer = findClosedDealsContainer(mutation.target);
+      if (targetContainer) containers.add(targetContainer);
+      mutation.addedNodes && mutation.addedNodes.forEach(node => {
+        const candidate = findClosedDealsContainer(node);
+        if (candidate) containers.add(candidate);
+      });
+    });
+    containers.forEach(container => processClosedDealsContainer(container));
+  }
+
+  function findClosedDealsContainer(node){
+    if (!node || node.nodeType !== 1) return null;
+    if (closedDealsWatcher.containers.has(node)) return node;
+    for (const container of closedDealsWatcher.containers){
+      if (container.contains(node)) return container;
+    }
+    for (const selector of CLOSED_DEAL_CONTAINER_QUERIES){
+      try {
+        const match = node.closest(selector);
+        if (match) return match;
+      } catch (_err){}
+    }
+    if (node.classList && node.classList.contains('deals-list') && qualifiesClosedDealsContainer(node)){
+      return node;
+    }
+    return null;
+  }
+
+  function processClosedDealsContainer(container){
+    const row = findLastClosedDealRow(container);
+    if (!row) return;
+    const info = parseClosedDealRow(row, state.openTrade);
+    if (!info) return;
+    evaluateClosedDeal(info);
+  }
+
+  function isMeaningfulDealRow(node){
+    if (!node || node.nodeType !== 1) return false;
+    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return false;
+    if (/no (deals|trades)/i.test(text) && text.length < 64) return false;
+    return true;
+  }
+
+  function findLastClosedDealRow(container){
+    if (!container || container.nodeType !== 1) return null;
+    let node = container.lastElementChild;
+    while (node && node.nodeType === 1 && !isMeaningfulDealRow(node)){
+      node = node.previousElementSibling;
+    }
+    if (node && isMeaningfulDealRow(node)) return node;
+    for (const selector of CLOSED_DEAL_ROW_QUERIES){
+      try {
+        const rows = container.querySelectorAll(selector);
+        for (let i = rows.length - 1; i >= 0; i -= 1){
+          if (isMeaningfulDealRow(rows[i])) return rows[i];
+        }
+      } catch (_err){}
+    }
+    return null;
+  }
+
+  function parseClosedDealRow(row, openTrade){
+    if (!row || row.nodeType !== 1) return null;
+    const text = (row.textContent || '').replace(/\u00a0/g, ' ').trim();
+    if (!text) return null;
+    const info = {
+      node: row,
+      text,
+      symbol: null,
+      symbolKey: '',
+      amount: NaN,
+      pnl: NaN,
+      result: null
+    };
+
+    const symbol = readSymbolFromRow(row);
+    if (symbol){
+      info.symbol = symbol;
+      info.symbolKey = makeSymbolKey(symbol);
+    } else if (openTrade && openTrade.symbol && textContainsSymbol(text, openTrade.symbol)){
+      info.symbol = openTrade.symbol;
+      info.symbolKey = openTrade.symbolKey || makeSymbolKey(openTrade.symbol);
+    }
+
+    const amount = readAmountFromRow(row, text, openTrade);
+    if (Number.isFinite(amount)) info.amount = amount;
+
+    const pnl = readPnLFromRow(row, text);
+    if (Number.isFinite(pnl)) info.pnl = pnl;
+
+    const result = detectResultFromRow(row);
+    if (result) info.result = result;
+    if (!info.result){
+      const derived = classifyResultFromPnL(info.pnl);
+      if (derived) info.result = derived;
+    }
+
+    return info;
+  }
+
+  function readSymbolFromRow(row){
+    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
+    for (const element of elements){
+      const dataset = element.dataset || {};
+      for (const key of CLOSED_DEAL_SYMBOL_DATA_KEYS){
+        if (dataset[key]){
+          const label = normalizeSymbolLabel(dataset[key]);
+          if (label) return label;
+        }
+      }
+      for (const key of CLOSED_DEAL_SYMBOL_DATA_KEYS){
+        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+        if (element.hasAttribute && element.hasAttribute(attrName)){
+          const label = normalizeSymbolLabel(element.getAttribute(attrName));
+          if (label) return label;
+        }
+      }
+    }
+    for (const selector of CLOSED_DEAL_SYMBOL_SELECTORS){
+      try {
+        const el = row.querySelector(selector);
+        if (el){
+          const label = normalizeSymbolLabel(el.textContent || el.innerText || (el.getAttribute && el.getAttribute('data-symbol')));
+          if (label) return label;
+        }
+      } catch (_err){}
+    }
+    const text = (row.textContent || '').toUpperCase();
+    let match = text.match(/([A-Z]{2,6}\s*\/\s*[A-Z]{2,6})/);
+    if (match) return normalizeSymbolLabel(match[1]);
+    match = text.match(/([A-Z]{2,6}\s+[A-Z]{2,6})/);
+    if (match) return normalizeSymbolLabel(match[1]);
+    return null;
+  }
+
+  function readAmountFromRow(row, text, openTrade){
+    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
+    for (const element of elements){
+      const dataset = element.dataset || {};
+      for (const key of CLOSED_DEAL_AMOUNT_DATA_KEYS){
+        if (dataset[key] != null){
+          const value = parseMoneyValue(dataset[key]);
+          if (Number.isFinite(value)) return value;
+        }
+      }
+      for (const key of CLOSED_DEAL_AMOUNT_DATA_KEYS){
+        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+        if (element.hasAttribute && element.hasAttribute(attrName)){
+          const value = parseMoneyValue(element.getAttribute(attrName));
+          if (Number.isFinite(value)) return value;
+        }
+      }
+    }
+    for (const selector of CLOSED_DEAL_AMOUNT_SELECTORS){
+      try {
+        const el = row.querySelector(selector);
+        if (el){
+          const value = parseMoneyValue(el.textContent || el.innerText || (el.getAttribute && el.getAttribute('data-value')));
+          if (Number.isFinite(value)) return value;
+        }
+      } catch (_err){}
+    }
+    const target = openTrade ? openTrade.amount : NaN;
+    const fallback = findAmountInText(text, target);
+    return Number.isFinite(fallback) ? fallback : NaN;
+  }
+
+  function readPnLFromRow(row, text){
+    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
+    const datasetKeys = CLOSED_DEAL_PNL_DATA_KEYS.concat(['status', 'state', 'outcome']);
+    for (const element of elements){
+      const dataset = element.dataset || {};
+      for (const key of datasetKeys){
+        if (dataset[key] != null){
+          const value = parseMoneyValue(dataset[key]);
+          if (Number.isFinite(value)) return value;
+        }
+      }
+      for (const key of datasetKeys){
+        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+        if (element.hasAttribute && element.hasAttribute(attrName)){
+          const value = parseMoneyValue(element.getAttribute(attrName));
+          if (Number.isFinite(value)) return value;
+        }
+      }
+    }
+    for (const selector of CLOSED_DEAL_PNL_SELECTORS){
+      try {
+        const el = row.querySelector(selector);
+        if (el){
+          const value = parseMoneyValue(el.textContent || el.innerText || (el.getAttribute && el.getAttribute('data-value')));
+          if (Number.isFinite(value)) return value;
+        }
+      } catch (_err){}
+    }
+    const fallback = findPnLInText(text);
+    return Number.isFinite(fallback) ? fallback : NaN;
+  }
+
+  function detectResultFromRow(row){
+    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
+    const datasetKeys = ['result', 'status', 'state', 'outcome', 'type', 'winStatus'];
+    for (const element of elements){
+      const dataset = element.dataset || {};
+      for (const key of datasetKeys){
+        if (dataset[key] != null){
+          const mapped = normalizeResultKind(dataset[key]);
+          if (mapped) return mapped;
+        }
+      }
+      for (const key of datasetKeys){
+        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+        if (element.hasAttribute && element.hasAttribute(attrName)){
+          const mapped = normalizeResultKind(element.getAttribute(attrName));
+          if (mapped) return mapped;
+        }
+      }
+    }
+    let classBuffer = '';
+    elements.forEach(element => {
+      if (!element) return;
+      if (typeof element.className === 'string'){
+        classBuffer += ' ' + element.className;
+      } else if (element.classList && element.classList.length){
+        classBuffer += ' ' + Array.from(element.classList).join(' ');
+      } else if (element.className && typeof element.className.baseVal === 'string'){
+        classBuffer += ' ' + element.className.baseVal;
+      }
+    });
+    const mappedFromClass = normalizeResultKind(classBuffer);
+    if (mappedFromClass) return mappedFromClass;
+    const text = (row.textContent || '').trim();
+    const mappedFromText = normalizeResultKind(text);
+    return mappedFromText || null;
+  }
+
+  function evaluateClosedDeal(info){
+    if (!state.isTradeOpen || !state.openTrade) return;
+    const open = state.openTrade;
+    const now = Date.now();
+    if (Number.isFinite(open.openedAt) && now - open.openedAt > 90000) return;
+
+    if (info.symbolKey && open.symbolKey && info.symbolKey !== open.symbolKey) return;
+    if (!info.symbol && open.symbol && info.text && !textContainsSymbol(info.text, open.symbol)) return;
+
+    let amountMatches = false;
+    if (Number.isFinite(info.amount)){
+      amountMatches = approxEqual(info.amount, open.amount, 0.02);
+    } else if (info.text){
+      amountMatches = textContainsAmount(info.text, open.amount);
+    }
+    if (!amountMatches) return;
+
+    const resultKind = info.result || classifyResultFromPnL(info.pnl);
+    if (!resultKind) return;
+
+    const payload = {
+      source: 'observer',
+      symbol: info.symbol || open.symbol,
+      amount: Number.isFinite(info.amount) ? info.amount : open.amount,
+      pnl: Number.isFinite(info.pnl) ? info.pnl : NaN,
+      result: resultKind,
+      closedAt: now
+    };
+    onTradeResult(payload);
   }
 
   function observeTradeResults(){
@@ -1405,6 +2121,7 @@
       try { onTradeResult(res); } catch (err) { console.error(err); }
       if (typeof original === 'function') return original.apply(this, arguments);
     };
+    ensureClosedDealsObserver();
   }
 
   function manualAssetReset(){
@@ -1413,6 +2130,8 @@
     state.currentBetStep = 0;
     state.lossStreak = 0;
     state.maxStep = 0;
+    state.isTradeOpen = false;
+    state.openTrade = null;
     state.currentWager = 0;
     state.currentProfit = 0;
     state.totalProfit = 0;
