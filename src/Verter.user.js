@@ -8,7 +8,7 @@
   }
   window.__VERTER_ACTIVE__ = true;
 
-  const APP_VERSION = 'Verter 5.15 (PCS-8 Integrated, 2025-09-24)';
+  const APP_VERSION = 'Verter 5.15 (PCS-8 Integrated, 2025-09-26)';
   const BUILD_TAG = 'PCS-8';
 
   const PAPER_HORIZON = 1;
@@ -18,7 +18,7 @@
   const minTimeBetweenTrades = 3000;
   const signalCheckInterval = 250;
   const MINUTE_WINDOW_MS = 1200;
-  const MINUTE_BOUNDARY_MODE = 'window';
+  const MINUTE_BOUNDARY_MODE = 'off';
 
   const candleInterval = 60000;
   const MAX_CANDLES = 240;
@@ -157,6 +157,7 @@
 
   function formatDecisionReason(raw){
     if (!raw) return 'IDLE';
+    if (raw === 'minute-strict') return 'STRICT';
     if (raw.indexOf('minute-') === 0) return 'WINDOW';
     const map = {
       auto: 'AUTO',
@@ -482,6 +483,7 @@
       if (state.minuteBoundaryMode === 'off'){
         state.minuteGate = true;
       } else if (state.minuteBoundaryMode === 'strict'){
+        timer.windowSource = 'strict';
         if (timer.tradeCycleId !== timer.targetCycleId){
           state.minuteGate = true;
           timer.windowActivatedAt = now;
@@ -523,6 +525,7 @@
         state.minuteGate = false;
       }
     } else if (state.minuteBoundaryMode === 'strict'){
+      timer.windowSource = 'strict';
       if (state.minuteGate && now - timer.windowActivatedAt > 200){
         state.minuteGate = false;
       }
@@ -980,9 +983,14 @@
     const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
     const topNames = state.topSignals.slice(0, 3).map(sig => shortLabelForSignal(sig.key));
     const decisionPlaced = state.lastDecision && state.lastDecision.direction && state.lastDecision.direction !== 'flat';
-    const reasonTag = formatDecisionReason(state.lastDecision && state.lastDecision.reason);
     const triggerTag = state.lastDecision && state.lastDecision.trigger ? shortLabelForSignal(state.lastDecision.trigger) : null;
-    const drift = formatSigned(Number.isFinite(state.minuteTimer.lastDrift) ? state.minuteTimer.lastDrift : 0, 'ms');
+    const includeBoundaryFields = state.minuteBoundaryMode === 'window' || state.minuteBoundaryMode === 'strict';
+    const boundaryReason = includeBoundaryFields
+      ? formatDecisionReason(state.minuteBoundaryMode === 'strict' ? 'minute-strict' : 'minute-window')
+      : null;
+    const driftLabel = includeBoundaryFields
+      ? formatSigned(Number.isFinite(state.minuteTimer.lastDrift) ? state.minuteTimer.lastDrift : 0, 'ms')
+      : null;
     const label = 'M1 ' + humanTime(candle.tClose || Date.now());
     const messageParts = [
       `${symbol}`,
@@ -991,12 +999,14 @@
       `l=${fmt2(candle.low, 5)}`,
       `c=${fmt2(candle.close, 5)}`,
       `payout=${Number.isFinite(payout) ? payout : '—'}`,
-      `top=[${topNames.join(',')}]`,
-      `decision=${decisionPlaced ? 'place' : 'hold'}`,
-      `reason=${reasonTag}`,
-      `drift=${drift}`
+      `top=[${topNames.join(',')}]`
     ];
-    if (triggerTag) messageParts.splice(7, 0, `via=${triggerTag}`);
+    if (triggerTag) messageParts.push(`via=${triggerTag}`);
+    messageParts.push(`decision=${decisionPlaced ? 'place' : 'hold'}`);
+    if (includeBoundaryFields){
+      messageParts.push(`reason=${boundaryReason}`);
+      messageParts.push(`drift_ms=${driftLabel}`);
+    }
     logM1CloseEvent({ label, text: messageParts.join(' ') });
 
     if (resultDirection === 'flat'){ return; }
@@ -1333,7 +1343,14 @@
     }
 
     state.pendingTrade = null;
-    const reason = gatingRequired ? ('minute-' + (state.minuteTimer.windowSource || 'window')) : 'auto';
+    let reason;
+    if (gatingRequired){
+      reason = state.minuteBoundaryMode === 'strict'
+        ? 'minute-strict'
+        : 'minute-' + (state.minuteTimer.windowSource || 'window');
+    } else {
+      reason = 'auto';
+    }
     state.lastDecision = { direction: candidate.direction, reason, trigger: candidate.key, at: now };
     const placed = placeTrade(candidate.direction, now, candidate);
     if (placed){
