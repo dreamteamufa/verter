@@ -1,3 +1,5 @@
+// Verter ver. 5.14.0 – 2024-05-24
+// PCS-8 Preflight: https://github.com/dreamteamufa/verter/blob/main/PCS_report.txt
 (function(){
   'use strict';
 
@@ -8,15 +10,15 @@
   }
   window.__VERTER_ACTIVE__ = true;
 
-  const APP_VERSION = 'Verter ver. 5.13.0 (Virtual Signals + Slim UI)';
+  const APP_VERSION = 'Verter ver. 5.14.0 (Zoom Controls, 2024-05-24)';
   const BUILD_TAG = 'PCS-8';
 
   const PAPER_HORIZON = 1;
   const TOP_K = 5;
-  const MIN_TRADES = 12;
+  const MIN_TRADES = 6;
   const MIN_PROFIT = 80;
   const minTimeBetweenTrades = 3000;
-  const signalCheckInterval = 500;
+  const signalCheckInterval = 250;
 
   const candleInterval = 60000;
   const MAX_CANDLES = 240;
@@ -99,6 +101,28 @@
     setTimeout(() => emitShiftKey(code), Math.max(0, offset|0));
   }
 
+  function clamp(value, min, max){
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+  }
+
+  function updateChartZoomDisplay(){
+    if (ui.chartZoomSlider){ ui.chartZoomSlider.value = String(state.chartOptions.zoom); }
+    if (ui.chartZoomValue){ ui.chartZoomValue.textContent = String(state.chartOptions.zoom); }
+  }
+
+  function setChartZoom(value){
+    const zoom = clamp(Math.round(value), 10, 300);
+    if (state.chartOptions.zoom === zoom){
+      updateChartZoomDisplay();
+      return;
+    }
+    state.chartOptions.zoom = zoom;
+    updateChartZoomDisplay();
+    renderChart();
+  }
+
   const mode = (document.querySelector('.balance .js-hd.js-balance-real-USD') ? 'REAL' : 'DEMO');
   const balanceDiv = mode === 'REAL'
     ? document.querySelector('.js-hd.js-balance-real-USD')
@@ -145,7 +169,7 @@
     pauseLossThreshold: 3,
     pauseMinutes: 5,
     betArraySelector: 'A',
-    warmup: true,
+    warmup: false,
     pendingLogs: [],
     cycles: []
   };
@@ -171,9 +195,10 @@
     pauseButton: null,
     topList: null,
     accuracyList: null,
-    technicalList: null,
     chartCanvas: null,
     chartCtx: null,
+    chartZoomSlider: null,
+    chartZoomValue: null,
     cyclesBox: null,
     tradingSymbol: null
   };
@@ -255,9 +280,11 @@
       .verter-info span{white-space:nowrap;}
       .verter-wide{width:360px;}
       .verter-top{width:360px;}
-      .verter-technical{width:360px;}
       .verter-chart{width:600px;height:300px;}
       #verter-chart{width:100%;height:100%;background:#101014;border-radius:6px;}
+      .verter-chart-controls{display:flex;align-items:center;gap:8px;font-size:11px;margin-bottom:8px;color:#9ea0a8;}
+      .verter-chart-controls label{font-weight:600;text-transform:uppercase;letter-spacing:0.08em;}
+      .verter-chart-controls input[type="range"]{flex:1;}
       .verter-signal-list{max-height:260px;overflow:hidden;font-size:11px;display:flex;flex-direction:column;gap:4px;}
       .verter-signal-row{display:flex;justify-content:space-between;align-items:center;padding:3px 6px;background:#1d1d21;border-radius:4px;}
       .verter-signal-row strong{font-weight:600;}
@@ -325,17 +352,15 @@
       <div id="verter-top" class="verter-signal-list"></div>
     `;
 
-    const technicalSection = document.createElement('div');
-    technicalSection.className = 'verter-section verter-technical';
-    technicalSection.innerHTML = `
-      <h3>Technical</h3>
-      <div id="verter-technical" class="verter-signal-list"></div>
-    `;
-
     const chartSection = document.createElement('div');
     chartSection.className = 'verter-section verter-chart';
     chartSection.innerHTML = `
       <h3>Candle Chart</h3>
+      <div class="verter-chart-controls">
+        <label for="verter-chart-zoom">Zoom</label>
+        <input id="verter-chart-zoom" type="range" min="10" max="300" step="1" value="${state.chartOptions.zoom}">
+        <span id="verter-chart-zoom-value">${state.chartOptions.zoom}</span>
+      </div>
       <canvas id="verter-chart" width="600" height="280"></canvas>
     `;
 
@@ -361,7 +386,7 @@
 
     const rightColumnTop = document.createElement('div');
     rightColumnTop.className = 'verter-flex';
-    rightColumnTop.append(signalsSection, topSection, technicalSection);
+    rightColumnTop.append(signalsSection, topSection);
 
     const rightColumn = document.createElement('div');
     rightColumn.className = 'verter-column';
@@ -388,9 +413,10 @@
     ui.pauseButton = root.querySelector('#verter-pause-reset');
     ui.topList = root.querySelector('#verter-top');
     ui.accuracyList = root.querySelector('#verter-accuracy');
-    ui.technicalList = root.querySelector('#verter-technical');
     ui.chartCanvas = root.querySelector('#verter-chart');
-    ui.chartCtx = ui.chartCanvas.getContext('2d');
+    ui.chartCtx = ui.chartCanvas ? ui.chartCanvas.getContext('2d') : null;
+    ui.chartZoomSlider = root.querySelector('#verter-chart-zoom');
+    ui.chartZoomValue = root.querySelector('#verter-chart-zoom-value');
     ui.cyclesBox = root.querySelector('#verter-cycles');
     ui.tradingSymbol = root.querySelector('#verter-symbol');
 
@@ -398,6 +424,29 @@
       clearPause();
       console.log('[Verter] pause reset manually');
     });
+
+    if (ui.chartZoomSlider){
+      ui.chartZoomSlider.addEventListener('input', ev => {
+        const next = parseInt(ev.target.value, 10);
+        if (!Number.isFinite(next)) return;
+        setChartZoom(next);
+      });
+    }
+
+    if (ui.chartCanvas){
+      const wheelHandler = ev => {
+        ev.preventDefault();
+        const delta = ev.deltaY < 0 ? -5 : 5;
+        setChartZoom(state.chartOptions.zoom + delta);
+      };
+      try {
+        ui.chartCanvas.addEventListener('wheel', wheelHandler, { passive: false });
+      } catch (err){
+        ui.chartCanvas.addEventListener('wheel', wheelHandler);
+      }
+    }
+
+    updateChartZoomDisplay();
 
     setDirection('flat');
   }
@@ -453,14 +502,6 @@
     renderSignals(ui.topList, rows);
   }
 
-  function renderTechnical(){
-    const rows = state.latestSignals.map(sig => ({
-      label: labelForSignal(sig.key),
-      value: sig.direction.toUpperCase()
-    }));
-    renderSignals(ui.technicalList, rows);
-  }
-
   function renderCycles(){
     if (!ui.cyclesBox) return;
     if (!state.cycles.length){
@@ -474,11 +515,12 @@
   }
 
   function renderChart(){
+    const canvas = ui.chartCanvas;
     const ctx = ui.chartCtx;
-    if (!ctx) return;
+    if (!canvas || !ctx) return;
     const candles = state.candles;
-    const W = ui.chartCanvas.width;
-    const H = ui.chartCanvas.height;
+    const W = canvas.width;
+    const H = canvas.height;
     ctx.clearRect(0, 0, W, H);
     if (!candles.length) return;
     const visible = Math.min(state.chartOptions.zoom, candles.length);
@@ -772,7 +814,6 @@
     if (mtf === 'sell'){ snapshot.push({ key: 'mtf_sell', direction: 'sell' }); }
 
     state.latestSignals = snapshot;
-    renderTechnical();
     setText(ui.signalBox, snapshot.length ? snapshot.map(s => labelForSignal(s.key)).join(', ') : '—');
 
     if (state.minuteSignalsPending){
@@ -947,7 +988,6 @@
     renderCycles();
     setDirection('flat', 'reset');
     setText(ui.signalBox, '—');
-    renderTechnical();
     console.log('[Verter] asset reset');
   }
 
@@ -992,7 +1032,7 @@
     updateTradingInfo();
     renderAccuracy();
     renderTopSignals();
-    renderTechnical();
+    renderChart();
     renderCycles();
   }
 
