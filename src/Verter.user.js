@@ -79,25 +79,24 @@
     const now = Date.now();
     let key = throttleKey || label;
     if (!throttleKey && payload){
-      try {
-        key += ':' + JSON.stringify(payload);
-      } catch (err){}
+      key += ':' + String(payload);
     }
     const last = logState.lastMessages[key];
     if (last && now - last < LOG_THROTTLE_MS) return;
     logState.lastMessages[key] = now;
-    const prefix = '[Verter] ' + label;
-    if (payload !== undefined){
+    const prefix = label ? '[Verter][' + label + ']' : '[Verter]';
+    const line = payload !== undefined && typeof payload === 'string' ? prefix + ' ' + payload : prefix;
+    if (payload !== undefined && typeof payload !== 'string'){
       if (level === 'debug'){ console.debug(prefix, payload); }
       else if (level === 'info'){ console.log(prefix, payload); }
       else if (level === 'warn'){ console.warn(prefix, payload); }
       else { console.error(prefix, payload); }
-    } else {
-      if (level === 'debug'){ console.debug(prefix); }
-      else if (level === 'info'){ console.log(prefix); }
-      else if (level === 'warn'){ console.warn(prefix); }
-      else { console.error(prefix); }
+      return;
     }
+    if (level === 'debug'){ console.debug(line); }
+    else if (level === 'info'){ console.log(line); }
+    else if (level === 'warn'){ console.warn(line); }
+    else { console.error(line); }
   }
 
   function logInfo(label, payload, throttleKey){
@@ -108,18 +107,20 @@
     logMessage('debug', label, payload, throttleKey);
   }
 
-  function logM1CloseEvent(data){
-    logInfo('M1 Close', data, 'M1 Close');
+  function logM1CloseEvent(message){
+    logInfo(message.label, message.text, 'M1');
   }
 
-  function logTradeResultEvent(data){
-    const key = 'Trade Result:' + data.opened_at + ':' + data.closed_at + ':' + data.step;
-    logInfo('Trade Result', data, key);
+  function logTradeResultEvent(text){
+    logInfo('TRADE', text);
   }
 
-  function logNextBetCalcEvent(data){
-    const key = 'Next Bet Calc:' + data.reason + ':' + data.step;
-    logInfo('Next Bet Calc', data, key);
+  function logNextBetCalcEvent(text){
+    logInfo('NEXT', text);
+  }
+
+  function logTopHitEvent(text, throttleKey){
+    logInfo('TOP HIT', text, throttleKey);
   }
 
   const fmt = (n, p = 5) => (Number.isFinite(n) ? n.toFixed(p) : '—');
@@ -130,6 +131,59 @@
     const d = new Date(ts);
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
   };
+
+  function formatSigned(value, suffix){
+    if (!Number.isFinite(value)) return '—';
+    const sign = value > 0 ? '+' : (value < 0 ? '-' : '');
+    const abs = Math.abs(Math.round(value));
+    return sign + abs + (suffix || '');
+  }
+
+  function formatSignedFixed(value){
+    if (!Number.isFinite(value)) return '0';
+    const sign = value > 0 ? '+' : (value < 0 ? '-' : '');
+    return sign + Math.abs(value).toFixed(2);
+  }
+
+  function formatPercent(value){
+    if (!Number.isFinite(value)) return '0%';
+    return Math.round(value) + '%';
+  }
+
+  function formatAmount(value){
+    if (!Number.isFinite(value)) return '0';
+    return value % 1 === 0 ? String(value) : value.toFixed(2);
+  }
+
+  function formatDecisionReason(raw){
+    if (!raw) return 'IDLE';
+    if (raw.indexOf('minute-') === 0) return 'WINDOW';
+    const map = {
+      auto: 'AUTO',
+      init: 'INIT',
+      waiting: 'WAIT',
+      blocked: 'BLOCKED',
+      'manual-off': 'MANUAL',
+      'signals-pending': 'PENDING',
+      'trade-open': 'OPEN',
+      'not-placed': 'BLOCKED',
+      'result:won': 'RESULT_WIN',
+      'result:lost': 'RESULT_LOSS'
+    };
+    return map[raw] || raw.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  }
+
+  function formatNextReason(raw){
+    if (!raw) return 'unknown';
+    const map = {
+      init: 'startup',
+      'manual-reset': 'reset',
+      'trade_result:won': 'after_win',
+      'trade_result:lost': 'after_loss'
+    };
+    if (map.hasOwnProperty(raw)) return map[raw];
+    return raw.replace(/[^a-z0-9]+/gi, '_').toLowerCase();
+  }
 
   function applySignClass(node, value){
     if (!node) return;
@@ -298,8 +352,10 @@
       windowSource: 'post',
       targetCycleId: 0
     },
-    lastDecision: { direction: 'flat', reason: 'init', at: 0 },
-    cycles: []
+    lastDecision: { direction: 'flat', reason: 'init', trigger: null, at: 0 },
+    cycles: [],
+    signalCache: Object.create(null),
+    pendingTrade: null
   };
 
   const watchers = {
@@ -358,6 +414,17 @@
     return SIGNAL_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
   }
 
+  function shortLabelForSignal(key){
+    const label = labelForSignal(key);
+    if (!label) return String(key || '').toUpperCase();
+    const parts = label.split(/\s+/).filter(Boolean);
+    if (!parts.length) return String(key || '').toUpperCase();
+    if (parts.length === 1) return parts[0].toUpperCase();
+    const first = parts[0];
+    if (first.length <= 6) return first.toUpperCase();
+    return first.slice(0, 5).toUpperCase();
+  }
+
   function setText(node, text){ if (node) node.textContent = text; }
   function setHtml(node, html){ if (node) node.innerHTML = html; }
 
@@ -409,6 +476,8 @@
       timer.windowConsumed = false;
       timer.targetCycleId = timer.activeCycleId;
       state.minuteSignalsPending = true;
+      state.signalCache = Object.create(null);
+      state.pendingTrade = null;
 
       if (state.minuteBoundaryMode === 'off'){
         state.minuteGate = true;
@@ -474,10 +543,10 @@
       .verter-section h3{margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:0.08em;color:#9ea0a8;}
       .verter-top-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;}
       .verter-bottom-row{display:flex;flex-wrap:wrap;gap:8px;}
-      .verter-trading{flex:0 0 360px;min-width:320px;max-width:360px;}
-      .verter-accuracy{flex:0 0 220px;min-width:200px;}
-      .verter-top-signals{flex:1 1 220px;min-width:200px;}
-      .verter-chart{flex:1 0 520px;min-width:420px;height:300px;}
+      .verter-trading{flex:0 0 360px;min-width:360px;max-width:360px;}
+      .verter-accuracy{flex:0 0 220px;min-width:220px;}
+      .verter-chart{flex:1 0 420px;min-width:420px;height:300px;}
+      .verter-top-signals{flex:1 1 220px;min-width:220px;}
       .verter-chart canvas{width:100%;height:100%;background:#101014;border-radius:6px;}
       .verter-chart-controls{display:flex;align-items:center;gap:8px;font-size:11px;margin-bottom:8px;color:#9ea0a8;}
       .verter-chart-controls label{font-weight:600;text-transform:uppercase;letter-spacing:0.08em;}
@@ -614,7 +683,7 @@
       <canvas id="verter-chart" width="600" height="280"></canvas>
     `;
 
-    topRow.append(tradingSection, accuracySection, topSection, chartSection);
+    topRow.append(tradingSection, accuracySection, chartSection, topSection);
 
     const bottomRow = document.createElement('div');
     bottomRow.className = 'verter-bottom-row';
@@ -705,7 +774,10 @@
     setText(ui.tradingSymbol, symbolText);
     if (ui.modeBox) setText(ui.modeBox, mode);
     if (ui.payoutBox) ui.payoutBox.textContent = Number.isFinite(payoutValue) ? payoutValue + '%' : '—';
-    if (ui.wagerBox) ui.wagerBox.textContent = fmtMoney(state.currentWager);
+    if (ui.wagerBox){
+      ui.wagerBox.textContent = fmtMoney(state.currentWager);
+      applySignClass(ui.wagerBox, state.currentWager);
+    }
     if (ui.cycleProfitBox){
       ui.cycleProfitBox.textContent = fmtMoney(state.cycleProfit);
       applySignClass(ui.cycleProfitBox, state.cycleProfit);
@@ -726,8 +798,8 @@
     const items = [
       { label: 'Auto', active: state.autoTrading },
       { label: 'Warmup', active: state.warmup },
-      { label: 'MinuteGate ' + state.minuteBoundaryMode.toUpperCase(), active: state.minuteBoundaryMode !== 'off' },
-      { label: 'Array ' + state.betArraySelector, active: true },
+      { label: 'MinuteGate(' + state.minuteBoundaryMode + ')', active: state.minuteBoundaryMode !== 'off' },
+      { label: 'Array(' + state.betArraySelector + ')', active: true },
       { label: 'SlowBet', active: state.slowBet }
     ];
     ui.badgeBox.innerHTML = items.map(item => `<span class="verter-badge ${item.active ? 'on' : 'off'}">${item.label}</span>`).join('');
@@ -742,6 +814,24 @@
     list.innerHTML = data.map(item => {
       return `<div class="verter-signal-row"><strong>${item.label}</strong><span>${item.value}</span></div>`;
     }).join('');
+  }
+
+  function handleTopSignalHit(signal, timestamp){
+    const topIndex = state.topSignals.findIndex(item => item.key === signal.key);
+    if (topIndex === -1) return;
+    const topItem = state.topSignals[topIndex] || {};
+    const score = Number.isFinite(topItem.wr) ? Math.round(topItem.wr * 100 - 50) : 0;
+    const message = `${humanTime(timestamp)} ${state.symbol} ${shortLabelForSignal(signal.key)} dir=${signal.direction} rank=${topIndex + 1} score=${formatSigned(score)}`;
+    const throttle = 'TOP:' + signal.key + ':' + signal.direction + ':' + state.minuteTimer.activeCycleId;
+    logTopHitEvent(message, throttle);
+    if (state.isTradeOpen || state.pendingTrade) return;
+    state.pendingTrade = {
+      key: signal.key,
+      direction: signal.direction,
+      rank: topIndex + 1,
+      score,
+      at: timestamp
+    };
   }
 
   function renderAccuracy(){
@@ -888,18 +978,26 @@
     const resultDirection = delta > 0 ? 'buy' : (delta < 0 ? 'sell' : 'flat');
 
     const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
-    const topSnapshot = state.topSignals.slice(0, 3).map(sig => ({ key: sig.key, wr: Number((sig.wr * 100).toFixed(1)) }));
-    logM1CloseEvent({
-      time: humanTime(Date.now()),
-      symbol,
-      ohlc: { o: candle.open, h: candle.high, l: candle.low, c: candle.close },
-      payout: Number.isFinite(payout) ? payout : null,
-      top: topSnapshot,
-      decision: state.lastDecision.direction,
-      reason: state.lastDecision.reason,
-      drift_ms: Math.round(state.minuteTimer.lastDrift || 0),
-      zoom: state.chartOptions.zoom
-    });
+    const topNames = state.topSignals.slice(0, 3).map(sig => shortLabelForSignal(sig.key));
+    const decisionPlaced = state.lastDecision && state.lastDecision.direction && state.lastDecision.direction !== 'flat';
+    const reasonTag = formatDecisionReason(state.lastDecision && state.lastDecision.reason);
+    const triggerTag = state.lastDecision && state.lastDecision.trigger ? shortLabelForSignal(state.lastDecision.trigger) : null;
+    const drift = formatSigned(Number.isFinite(state.minuteTimer.lastDrift) ? state.minuteTimer.lastDrift : 0, 'ms');
+    const label = 'M1 ' + humanTime(candle.tClose || Date.now());
+    const messageParts = [
+      `${symbol}`,
+      `o=${fmt2(candle.open, 5)}`,
+      `h=${fmt2(candle.high, 5)}`,
+      `l=${fmt2(candle.low, 5)}`,
+      `c=${fmt2(candle.close, 5)}`,
+      `payout=${Number.isFinite(payout) ? payout : '—'}`,
+      `top=[${topNames.join(',')}]`,
+      `decision=${decisionPlaced ? 'place' : 'hold'}`,
+      `reason=${reasonTag}`,
+      `drift=${drift}`
+    ];
+    if (triggerTag) messageParts.splice(7, 0, `via=${triggerTag}`);
+    logM1CloseEvent({ label, text: messageParts.join(' ') });
 
     if (resultDirection === 'flat'){ return; }
 
@@ -1093,6 +1191,22 @@
     if (mtf === 'buy'){ snapshot.push({ key: 'mtf_buy', direction: 'buy' }); }
     if (mtf === 'sell'){ snapshot.push({ key: 'mtf_sell', direction: 'sell' }); }
 
+    const nowTs = Date.now();
+    const cache = state.signalCache;
+    const activeKeys = Object.create(null);
+    snapshot.forEach(sig => {
+      activeKeys[sig.key] = true;
+      const prev = cache[sig.key];
+      const changed = !prev || prev.direction !== sig.direction;
+      if (changed){
+        handleTopSignalHit(sig, nowTs);
+      }
+      cache[sig.key] = { direction: sig.direction, at: nowTs };
+    });
+    Object.keys(cache).forEach(key => {
+      if (!activeKeys[key]) delete cache[key];
+    });
+
     state.latestSignals = snapshot;
     setText(ui.signalBox, snapshot.length ? snapshot.map(s => labelForSignal(s.key)).join(', ') : '—');
 
@@ -1111,16 +1225,13 @@
   function recordNextBet(reason, prevStep, nextStep){
     const amount = getBetValue(nextStep);
     state.nextBetAmount = amount;
-    const payload = {
-      time: humanTime(Date.now()),
-      reason,
-      step: prevStep + '→' + nextStep,
-      amount,
-      array: state.betArraySelector,
-      limits: { max_step: state.betArray.length - 1, pause: state.pauseLossThreshold },
-      pause_until: state.pauseUntil ? humanTime(state.pauseUntil) : null
-    };
-    logNextBetCalcEvent(payload);
+    const reasonLabel = formatNextReason(reason);
+    const pauseText = state.pauseUntil ? humanTime(state.pauseUntil) : '—';
+    const limWin = -state.cycleProfit;
+    const baseBet = state.betArray.length ? state.betArray[0].value : 0;
+    const limLoss = -(state.pauseLossThreshold * baseBet);
+    const message = `reason=${reasonLabel} prev=${prevStep}→next=${nextStep} amt=${formatAmount(amount)} arr=${state.betArraySelector} limW=${formatSigned(limWin)} limL=${formatSigned(limLoss)} pause_until=${pauseText}`;
+    logNextBetCalcEvent(message);
   }
 
   function applyMartingale(result){
@@ -1141,7 +1252,7 @@
     recordNextBet('trade_result:' + result, prevStep, state.currentBetStep);
   }
 
-  function placeTrade(direction, timestamp){
+  function placeTrade(direction, timestamp, meta){
     const now = Number.isFinite(timestamp) ? timestamp : Date.now();
     if (state.isTradeOpen) return false;
     if (now - state.lastTradeTime < minTimeBetweenTrades) return false;
@@ -1171,6 +1282,9 @@
       step: state.currentBetStep,
       amount: betValue,
       signals: state.minuteSignals.map(s => s.key),
+      trigger: meta && meta.key ? meta.key : null,
+      triggerRank: meta && meta.rank ? meta.rank : null,
+      triggerScore: meta && Number.isFinite(meta.score) ? meta.score : null,
       cycle: state.minuteTimer.windowSource === 'pre'
         ? state.minuteTimer.activeCycleId + 1
         : (state.minuteTimer.targetCycleId || state.minuteTimer.activeCycleId)
@@ -1181,10 +1295,11 @@
     state.currentWager = betValue;
     state.minuteTimer.windowConsumed = true;
     state.minuteTimer.tradeCycleId = trade.cycle;
-    if (!state.lastDecision) state.lastDecision = { direction: direction, reason: 'auto', at: now };
+    if (!state.lastDecision) state.lastDecision = { direction: direction, reason: 'auto', trigger: meta && meta.key ? meta.key : null, at: now };
     state.lastDecision.direction = direction;
+    state.lastDecision.trigger = meta && meta.key ? meta.key : null;
     state.lastDecision.at = now;
-    setDirection(direction, 'opened');
+    setDirection(direction, meta && meta.key ? shortLabelForSignal(meta.key) : 'opened');
     updateTradingInfo();
     return true;
   }
@@ -1193,63 +1308,40 @@
     const gatingRequired = state.minuteBoundaryMode !== 'off';
     if (gatingRequired && !state.minuteGate) return;
 
-    const finalizeWindow = () => {
-      if (gatingRequired) state.minuteGate = false;
-    };
-
     if (!state.autoTrading){
-      state.lastDecision = { direction: 'flat', reason: 'manual-off', at: now };
-      setDirection('flat', 'manual-off');
-      finalizeWindow();
+      state.lastDecision = { direction: 'flat', reason: 'manual-off', trigger: null, at: now };
+      setDirection('flat', 'manual');
+      if (gatingRequired) state.minuteGate = false;
       return;
     }
 
     if (state.minuteSignalsPending){
-      state.lastDecision = { direction: 'flat', reason: 'signals-pending', at: now };
-      logDebug('Signals Pending', { cycle: state.minuteTimer.activeCycleId });
-      finalizeWindow();
+      state.lastDecision = { direction: 'flat', reason: 'signals-pending', trigger: null, at: now };
       return;
     }
 
-    const allowedKeys = new Set(state.topSignals.map(s => s.key));
-    const active = state.latestSignals.filter(sig => allowedKeys.has(sig.key));
-
-    if (!active.length){
-      state.lastDecision = { direction: 'flat', reason: 'no-top', at: now };
-      setDirection('flat', 'no-top');
-      logDebug('No Eligible Signals', { cycle: state.minuteTimer.activeCycleId });
-      finalizeWindow();
+    if (state.isTradeOpen){
+      state.lastDecision = { direction: 'flat', reason: 'trade-open', trigger: null, at: now };
       return;
     }
 
-    let buys = 0;
-    let sells = 0;
-    active.forEach(sig => {
-      if (sig.direction === 'buy') buys += 1;
-      else if (sig.direction === 'sell') sells += 1;
-    });
-
-    let direction = 'flat';
-    if (buys > sells) direction = 'buy';
-    else if (sells > buys) direction = 'sell';
-
-    if (direction === 'flat'){
-      state.lastDecision = { direction: 'flat', reason: 'conflict', at: now };
-      setDirection('flat', 'conflict');
-      logDebug('Conflicting Signals', { cycle: state.minuteTimer.activeCycleId });
-      finalizeWindow();
+    const candidate = state.pendingTrade;
+    if (!candidate){
+      state.lastDecision = { direction: 'flat', reason: 'waiting', trigger: null, at: now };
+      setDirection('flat', 'waiting');
       return;
     }
 
+    state.pendingTrade = null;
     const reason = gatingRequired ? ('minute-' + (state.minuteTimer.windowSource || 'window')) : 'auto';
-    state.lastDecision = { direction, reason, at: now };
-    setDirection(direction, gatingRequired ? 'minute' : 'auto');
-    const placed = placeTrade(direction, now);
-    if (!placed){
-      state.lastDecision = { direction: 'flat', reason: 'not-placed', at: now };
-      setDirection('flat', 'not-placed');
+    state.lastDecision = { direction: candidate.direction, reason, trigger: candidate.key, at: now };
+    const placed = placeTrade(candidate.direction, now, candidate);
+    if (placed){
+      if (gatingRequired) state.minuteGate = false;
+    } else {
+      state.lastDecision = { direction: 'flat', reason: 'blocked', trigger: candidate.key, at: now };
+      setDirection('flat', 'blocked');
     }
-    finalizeWindow();
   }
 
   function syncProfit(){
@@ -1280,19 +1372,12 @@
     const winCount = state.betHistory.filter(t => t.result === 'won').length;
     const rate = tradeCount ? (winCount / tradeCount) * 100 : 0;
     state.lastDecision = { direction: last.direction || 'flat', reason: 'result:' + last.result, at: now };
-    logTradeResultEvent({
-      opened_at: humanTime(last.openedAt || now),
-      closed_at: humanTime(now),
-      symbol: state.symbol,
-      direction: last.direction,
-      step: last.step,
-      amount: last.amount,
-      result: last.result,
-      pnl: Number((Number.isFinite(pnl) ? pnl : 0).toFixed(2)),
-      cycle_profit: Number(state.cycleProfit.toFixed(2)),
-      total_profit: Number(state.totalProfit.toFixed(2)),
-      win_rate: Number(rate.toFixed(1))
-    });
+    const openTime = humanTime(last.openedAt || now);
+    const closeTime = humanTime(now);
+    const resultText = last.result === 'won' ? 'win' : 'loss';
+    const pnlValue = Number.isFinite(pnl) ? pnl : 0;
+    const message = `${openTime}→${closeTime} ${state.symbol} ${last.direction} step=${last.step} amt=${formatAmount(last.amount)} result=${resultText} pnl=${formatSignedFixed(pnlValue)} cycle=${formatSignedFixed(state.cycleProfit)} total=${formatSignedFixed(state.totalProfit)} WR=${formatPercent(rate)}`;
+    logTradeResultEvent(message);
     renderCycles();
     updateTradingInfo();
   }
@@ -1326,6 +1411,8 @@
     state.minuteTimer.tradeCycleId = -1;
     state.minuteTimer.windowConsumed = false;
     state.minuteTimer.targetCycleId = state.minuteTimer.activeCycleId;
+    state.signalCache = Object.create(null);
+    state.pendingTrade = null;
     updateTradingInfo();
     renderAccuracy();
     renderTopSignals();
