@@ -23,6 +23,7 @@
   const signalCheckInterval = 250;
   const MINUTE_WINDOW_MS = 1200;
   const MINUTE_BOUNDARY_MODE = 'off';
+  const DEFAULT_DEALS_LIST_SELECTOR = '.scrollbar-container.deals-list.ps';
 
   const candleInterval = 60000;
   const MAX_CANDLES = 240;
@@ -586,11 +587,172 @@
     chartTimer: null
   };
 
+  const dealIndicatorWatcher = {
+    observer: null,
+    container: null,
+    scanTimer: null,
+    selector: DEFAULT_DEALS_LIST_SELECTOR
+  };
+
   const closedDealsWatcher = {
     observer: null,
     containers: new Set(),
     scanTimer: null
   };
+
+  const DEAL_INDICATOR_CENTER_PATH = [0, 0, 1, 1];
+  const DEAL_INDICATOR_LAST_PATH = [0, 0, 1, 2];
+  const DEAL_INDICATOR_PROCESSED_FLAG = '__verterDealIndicatorProcessed';
+
+  function detectDealListSelector(){
+    let selector = DEFAULT_DEALS_LIST_SELECTOR;
+    try {
+      if (typeof window !== 'undefined'){
+        const configured = window.VERTER_DEALS_LIST_SELECTOR;
+        if (typeof configured === 'string' && configured.trim()){
+          selector = configured.trim();
+        } else if (typeof localStorage !== 'undefined'){
+          const stored = localStorage.getItem('VERTER_DEALS_LIST_SELECTOR');
+          if (stored && stored.trim()) selector = stored.trim();
+        }
+      }
+    } catch (_err){}
+    return selector;
+  }
+
+  function findDealListContainer(selector){
+    if (!selector) return null;
+    try {
+      return document.querySelector(selector);
+    } catch (_err){
+      return null;
+    }
+  }
+
+  function ensureDealIndicatorObserver(){
+    const selector = detectDealListSelector();
+    if (dealIndicatorWatcher.selector !== selector){
+      dealIndicatorWatcher.selector = selector;
+      if (dealIndicatorWatcher.observer){
+        try { dealIndicatorWatcher.observer.disconnect(); } catch (_err){}
+      }
+      dealIndicatorWatcher.container = null;
+    }
+    if (!dealIndicatorWatcher.observer){
+      dealIndicatorWatcher.observer = new MutationObserver(handleDealIndicatorMutations);
+    }
+    const container = findDealListContainer(dealIndicatorWatcher.selector);
+    if (!container){
+      dealIndicatorWatcher.container = null;
+      return;
+    }
+    if (dealIndicatorWatcher.container === container) return;
+    try {
+      dealIndicatorWatcher.observer.disconnect();
+    } catch (_err){}
+    try {
+      dealIndicatorWatcher.observer.observe(container, { childList: true, subtree: false });
+      dealIndicatorWatcher.container = container;
+    } catch (err){
+      console.warn('[Verter] deal indicator observer attach failed', err);
+      dealIndicatorWatcher.container = null;
+    }
+  }
+
+  function observeDealIndicatorResults(){
+    ensureDealIndicatorObserver();
+    if (dealIndicatorWatcher.scanTimer){
+      clearInterval(dealIndicatorWatcher.scanTimer);
+    }
+    dealIndicatorWatcher.scanTimer = setInterval(ensureDealIndicatorObserver, 2000);
+  }
+
+  function handleDealIndicatorMutations(mutations){
+    if (!mutations) return;
+    mutations.forEach(mutation => {
+      if (!mutation || mutation.type !== 'childList') return;
+      const nodes = mutation.addedNodes;
+      if (!nodes || !nodes.length) return;
+      Array.from(nodes).forEach(node => processDealIndicatorCandidate(node));
+    });
+  }
+
+  function processDealIndicatorCandidate(node){
+    if (!node) return;
+    if (node.nodeType === 1){
+      if (evaluateDealIndicatorNode(node)) return;
+      const children = node.children ? Array.from(node.children) : [];
+      children.forEach(child => processDealIndicatorCandidate(child));
+      return;
+    }
+    if (node.nodeType === 11){
+      Array.from(node.childNodes || []).forEach(child => processDealIndicatorCandidate(child));
+    }
+  }
+
+  function evaluateDealIndicatorNode(node){
+    if (!node || node.nodeType !== 1) return false;
+    if (node[DEAL_INDICATOR_PROCESSED_FLAG]) return false;
+    const centerDiv = findDealIndicatorElementByPath(node, DEAL_INDICATOR_CENTER_PATH);
+    const lastDiv = findDealIndicatorElementByPath(node, DEAL_INDICATOR_LAST_PATH);
+    if (!centerDiv || !lastDiv) return false;
+    const centerUp = hasPriceUpClass(centerDiv);
+    const lastUp = hasPriceUpClass(lastDiv);
+    const result = classifyDealIndicatorResult(centerUp, lastUp);
+    if (!result) return false;
+    node[DEAL_INDICATOR_PROCESSED_FLAG] = true;
+    reportDealIndicatorResult(result);
+    return true;
+  }
+
+  function findDealIndicatorElementByPath(root, path){
+    if (!root || !path || !path.length) return null;
+    let current = root;
+    for (let i = 0; i < path.length; i += 1){
+      current = getDealIndicatorChild(current, path[i]);
+      if (!current) return null;
+    }
+    return current;
+  }
+
+  function getDealIndicatorChild(node, index){
+    if (!node || typeof index !== 'number') return null;
+    if (node.children && node.children.length > index) return node.children[index];
+    if (!node.childNodes) return null;
+    let seen = -1;
+    for (let i = 0; i < node.childNodes.length; i += 1){
+      const child = node.childNodes[i];
+      if (child && child.nodeType === 1){
+        seen += 1;
+        if (seen === index) return child;
+      }
+    }
+    return null;
+  }
+
+  function hasPriceUpClass(node){
+    if (!node || node.nodeType !== 1) return false;
+    if (node.classList && node.classList.contains('price-up')) return true;
+    const className = typeof node.className === 'string' ? node.className : (node.className && node.className.baseVal);
+    if (typeof className === 'string'){
+      return className.split(/\s+/).some(token => token === 'price-up');
+    }
+    return false;
+  }
+
+  function classifyDealIndicatorResult(centerUp, lastUp){
+    if (centerUp && lastUp) return 'won';
+    if (centerUp && !lastUp) return 'returned';
+    if (!centerUp && !lastUp) return 'lost';
+    return null;
+  }
+
+  function reportDealIndicatorResult(result){
+    if (!result) return;
+    const message = 'Indicator trade result detected: ' + result;
+    logTradeResultEvent(message);
+    try { console.log('[Verter]', message); } catch (_err){}
+  }
 
   const ui = {
     root: null,
@@ -2328,6 +2490,15 @@
           watchers[key] = null;
         }
       });
+      if (dealIndicatorWatcher.scanTimer){
+        clearInterval(dealIndicatorWatcher.scanTimer);
+        dealIndicatorWatcher.scanTimer = null;
+      }
+      if (dealIndicatorWatcher.observer && typeof dealIndicatorWatcher.observer.disconnect === 'function'){
+        dealIndicatorWatcher.observer.disconnect();
+      }
+      dealIndicatorWatcher.observer = null;
+      dealIndicatorWatcher.container = null;
       if (closedDealsWatcher.scanTimer){
         clearInterval(closedDealsWatcher.scanTimer);
         closedDealsWatcher.scanTimer = null;
@@ -2429,6 +2600,7 @@
     updateTradingInfo();
     logInfo('BOOT', `start=${state.startTime} startBal=${fmtMoney(state.startBalance)}`);
     observeTradeResults();
+    observeDealIndicatorResults();
     observeSymbolChanges();
     setupTimers();
     recordNextBet('startup', state.currentBetStep, state.currentBetStep);
