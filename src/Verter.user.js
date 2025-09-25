@@ -1,3 +1,8 @@
+// ==UserScript==
+// @name        Verter
+// @version     5.13.0
+// ==/UserScript==
+
 (function(){
   'use strict';
 
