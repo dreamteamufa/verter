@@ -8,7 +8,7 @@
   }
   window.__VERTER_ACTIVE__ = true;
 
-  const APP_VERSION = 'Verter ver. 5.12.0';
+  const APP_VERSION = 'Verter ver. 5.13.0';
   const BUILD_TAG = 'PCS-8|Preflight-8';
 
   const PAPER_HORIZON = 1;
@@ -83,7 +83,7 @@
     const last = logState.lastMessages[key];
     if (last && now - last < LOG_THROTTLE_MS) return;
     logState.lastMessages[key] = now;
-    const prefix = label ? '[Verter][' + label + ']' : '[Verter]';
+    const prefix = label ? '[' + label + ']' : '[Verter]';
     const line = payload !== undefined && typeof payload === 'string' ? prefix + ' ' + payload : prefix;
     if (payload !== undefined && typeof payload !== 'string'){
       if (level === 'debug'){ console.debug(prefix, payload); }
@@ -121,6 +121,11 @@
   const humanTime = ts => {
     const d = new Date(ts);
     return [d.getHours(), d.getMinutes(), d.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
+  };
+
+  const humanTimeHHMM = ts => {
+    const d = new Date(ts);
+    return [d.getHours(), d.getMinutes()].map(v => String(v).padStart(2, '0')).join(':');
   };
 
   function formatSigned(value, suffix){
@@ -447,7 +452,7 @@
     const input = findBetInput();
     state.prepareLock = true;
     if (!input){
-      logInfo('PREPARE', `amount=${formatAmount(expected)} status=fail`);
+      logInfo('PREPARE', `amount=${fmtMoney(Number.isFinite(expected) ? expected : 0)} status=fail`);
       state.prepareLock = false;
       state.prepareTimer = setTimeout(() => runPrepare(reason), 1500);
       return;
@@ -458,7 +463,8 @@
     setTimeout(() => {
       const actual = readBetInputValue();
       const ok = Number.isFinite(actual) && Number.isFinite(next.amount) && approxEqual(actual, next.amount, 0.01);
-      logInfo('PREPARE', `amount=${formatAmount(next.amount)} status=${ok ? 'ok' : 'fail'}`);
+      const targetAmount = Number.isFinite(next.amount) ? next.amount : 0;
+      logInfo('PREPARE', `amount=${fmtMoney(targetAmount)} status=${ok ? 'ok' : 'fail'}`);
       state.prepareLock = false;
       state.prepareTimer = null;
       if (!ok){
@@ -500,7 +506,8 @@
   const priceTooltip = tooltipNodes.find(node => /Winnings amount you receive/i.test(node.textContent || ''));
 
   if (!balanceDiv || !percentProfitDiv || !betTimeDiv || !symbolDiv || !priceTooltip){
-    console.error('[Verter] required platform elements were not found');
+    console.error('[BOOT-FAIL] required platform elements were not found');
+    window.__VERTER_ACTIVE__ = false;
     return;
   }
 
@@ -526,7 +533,9 @@
     topSignals: [],
     virtualStats: Object.create(null),
     symbol: (symbolDiv.textContent || '').replace('/', ' ').trim(),
-    startBalance: parseFloat((balanceDiv.textContent || '0').replace(/,/g, '')) || 0,
+    startTime: '',
+    startBalance: 0,
+    currentBalance: 0,
     priceHistory: [],
     candles: [],
     currentCandle: null,
@@ -559,7 +568,7 @@
     pendingTrade: null,
     lastTopHit: null,
     lastOrderDecision: { decision: 'skip', reason: 'init', at: 0 },
-    lastResult: { result: null, pnl: 0, at: 0 },
+    lastResult: { result: null, pnl: 0, at: 0, label: '—' },
     prepareTimer: null,
     prepareLock: false,
     lastPrepareReason: 'startup',
@@ -588,6 +597,10 @@
     cycleProfitBox: null,
     maxStepBox: null,
     lossStreakBox: null,
+    startedBox: null,
+    startBalanceBox: null,
+    currentBalanceBox: null,
+    lastResultBox: null,
     topList: null,
     accuracyList: null,
     chartCanvas: null,
@@ -823,6 +836,10 @@
     }
 
     ui.tradingSymbol = tradingTitle;
+    ui.startedBox = addTradingRow('verter-started', 'Started', '—');
+    ui.startBalanceBox = addTradingRow('verter-start-bal', 'Start Balance', fmtMoney(0));
+    ui.currentBalanceBox = addTradingRow('verter-current-bal', 'Current Balance', fmtMoney(0));
+    ui.lastResultBox = addTradingRow('verter-last-result', 'Last Result', '—');
     ui.wagerBox = addTradingRow('verter-wager', 'Current Wager', fmtMoney(0));
     ui.cycleProfitBox = addTradingRow('verter-cycle', 'Cycle Profit', fmtMoney(0));
     ui.totalProfitBox = addTradingRow('verter-total', 'Total Profit', fmtMoney(0));
@@ -910,9 +927,14 @@
     ui.directionBox = root.querySelector('#verter-direction');
     ui.winRateBox = root.querySelector('#verter-winrate');
     ui.wagerBox = root.querySelector('#verter-wager');
+    ui.cycleProfitBox = root.querySelector('#verter-cycle');
     ui.totalProfitBox = root.querySelector('#verter-total');
     ui.maxStepBox = root.querySelector('#verter-step');
     ui.lossStreakBox = root.querySelector('#verter-losses');
+    ui.startedBox = root.querySelector('#verter-started');
+    ui.startBalanceBox = root.querySelector('#verter-start-bal');
+    ui.currentBalanceBox = root.querySelector('#verter-current-bal');
+    ui.lastResultBox = root.querySelector('#verter-last-result');
     ui.pauseButton = root.querySelector('#verter-pause-reset');
     ui.topList = root.querySelector('#verter-top');
     ui.accuracyList = root.querySelector('#verter-accuracy');
@@ -926,7 +948,7 @@
       ui.pauseButton.addEventListener('click', () => {
         clearPause();
         state.lastOrderDecision = { decision: 'skip', reason: 'pause_reset', at: Date.now() };
-        logInfo('ORDER', 'decision=skip reason=pause_reset');
+        logInfo('ORDER fail', 'reason=pause_reset');
       });
     }
 
@@ -961,15 +983,21 @@
     const winCount = state.betHistory.filter(t => t.result === 'won').length;
     const tradeCount = state.betHistory.length;
     const rate = tradeCount ? (winCount / tradeCount) * 100 : 0;
+    syncProfit();
+    const lastRes = state.lastResult || {};
+    const lastPnl = Number.isFinite(lastRes.pnl) ? lastRes.pnl : 0;
+    const labelWord = lastRes.label
+      || (lastRes.result === 'won'
+        ? 'WIN'
+        : (lastRes.result === 'lost' ? 'LOSS' : (lastRes.result === 'returned' ? 'RET' : '—')));
+    const lastLabel = labelWord && labelWord !== '—'
+      ? `${labelWord} ${fmtMoney(lastPnl)}`
+      : '—';
 
     if (ui.tradingSymbol) ui.tradingSymbol.textContent = 'Trading · ' + symbolText;
     if (ui.wagerBox){
       ui.wagerBox.textContent = fmtMoney(state.currentWager);
       applySignClass(ui.wagerBox, state.currentWager);
-    }
-    if (ui.cycleProfitBox){
-      ui.cycleProfitBox.textContent = fmtMoney(state.cycleProfit);
-      applySignClass(ui.cycleProfitBox, state.cycleProfit);
     }
     if (ui.totalProfitBox){
       ui.totalProfitBox.textContent = fmtMoney(state.totalProfit);
@@ -978,6 +1006,16 @@
     if (ui.winRateBox) ui.winRateBox.textContent = rate.toFixed(1) + '%';
     if (ui.lossStreakBox) ui.lossStreakBox.textContent = String(state.lossStreak);
     if (ui.maxStepBox) ui.maxStepBox.textContent = String(state.maxStep || 0);
+    if (ui.startedBox) ui.startedBox.textContent = state.startTime || '—';
+    if (ui.startBalanceBox) ui.startBalanceBox.textContent = fmtMoney(state.startBalance);
+    if (ui.currentBalanceBox){
+      ui.currentBalanceBox.textContent = fmtMoney(state.currentBalance);
+      applySignClass(ui.currentBalanceBox, state.currentBalance - state.startBalance);
+    }
+    if (ui.lastResultBox){
+      ui.lastResultBox.textContent = lastLabel;
+      applySignClass(ui.lastResultBox, lastPnl);
+    }
   }
 
   function renderSignals(list, data){
@@ -1009,8 +1047,9 @@
       direction: signal.direction,
       at: ts
     };
-    const logMessage = `key=${signal.key} dir=${String(signal.direction).toUpperCase()} rank=${topIndex + 1}`;
-    logInfo('QUEUE', logMessage);
+    const dirText = String(signal.direction).toUpperCase();
+    logInfo('TOP HIT', `key=${signal.key} dir=${dirText} rank=${topIndex + 1} score=${score}`);
+    logInfo('QUEUE', `key=${signal.key} dir=${dirText} rank=${topIndex + 1}`);
   }
 
   function renderAccuracy(){
@@ -1415,7 +1454,7 @@
     const arrName = state.betArraySelector;
     state.nextBet = { step: nextStep, amount, array: arrName };
     state.lastPrepareReason = reason;
-    const message = `reason=${reason} step=${prevStep}→${nextStep} amt=${formatAmount(amount)} arr=${arrName}`;
+    const message = `reason=${reason} step=${prevStep}→${nextStep} amt=${fmtMoney(amount)} arr=${arrName}`;
     logNextBetCalcEvent(message);
   }
 
@@ -1441,30 +1480,51 @@
 
   function placeTrade(direction, timestamp, meta){
     const now = Number.isFinite(timestamp) ? timestamp : Date.now();
-    if (state.isTradeOpen){
-      return { placed: false, reason: 'open' };
-    }
     const expectedAmount = state.nextBet && Number.isFinite(state.nextBet.amount) ? state.nextBet.amount : NaN;
     const actualAmount = readBetInputValue();
-    if (!Number.isFinite(expectedAmount) || !Number.isFinite(actualAmount) || !approxEqual(actualAmount, expectedAmount, 0.01)){
+    const preparedOk = Number.isFinite(expectedAmount) && Number.isFinite(actualAmount) && approxEqual(actualAmount, expectedAmount, 0.01);
+    const keyLabel = meta && meta.key ? meta.key : '—';
+    const dirLabel = String(direction || 'flat').toUpperCase();
+    const targetAmount = Number.isFinite(expectedAmount) ? expectedAmount : actualAmount;
+    const tradeAmount = Number.isFinite(targetAmount) ? targetAmount : (Number.isFinite(actualAmount) ? actualAmount : 0);
+    logInfo('ORDER try', `dir=${dirLabel} amt=${fmtMoney(tradeAmount)} key=${keyLabel} prepared=${preparedOk ? 'ok' : 'fail'}`);
+
+    if (state.isTradeOpen){
+      logInfo('ORDER fail', 'reason=open');
+      return { placed: false, reason: 'open' };
+    }
+    if (!preparedOk){
+      logInfo('ORDER fail', 'reason=prepared_mismatch');
       return { placed: false, reason: 'prepared_mismatch' };
     }
     const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
     if (!Number.isFinite(payout) || payout < MIN_PROFIT){
+      logInfo('ORDER fail', 'reason=minProfit');
       return { placed: false, reason: 'minProfit' };
     }
     if (isPaused()){
+      logInfo('ORDER fail', 'reason=pause');
       return { placed: false, reason: 'pause' };
     }
     const button = findOrderButton(direction);
     if (!button){
+      logInfo('ORDER fail', 'reason=selector');
       return { placed: false, reason: 'selector' };
     }
+    if (button.disabled || button.getAttribute && button.getAttribute('disabled') != null){
+      logInfo('ORDER fail', 'reason=disabled');
+      return { placed: false, reason: 'disabled' };
+    }
+    const startTick = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') ? performance.now() : Date.now();
     try {
       button.click();
     } catch (_err){
+      logInfo('ORDER fail', 'reason=selector');
       return { placed: false, reason: 'selector' };
     }
+    const endTick = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') ? performance.now() : Date.now();
+    const latency = Math.max(0, Math.round(endTick - startTick));
+    logInfo('ORDER ok', `btn=${direction === 'sell' ? 'sell' : 'buy'} latency=${latency}ms`);
 
     const nextStep = state.nextBet ? state.nextBet.step : state.currentBetStep;
     const trade = {
@@ -1472,7 +1532,7 @@
       openedAt: now,
       direction,
       step: nextStep,
-      amount: expectedAmount,
+      amount: tradeAmount,
       symbol: state.symbol,
       pnl: 0,
       result: null,
@@ -1481,7 +1541,8 @@
       trigger: meta && meta.key ? meta.key : null,
       triggerRank: meta && meta.rank ? meta.rank : null,
       triggerScore: meta && Number.isFinite(meta.score) ? meta.score : null,
-      cycle: state.minuteTimer.activeCycleId
+      cycle: state.minuteTimer.activeCycleId,
+      payout
     };
     state.betHistory.push(trade);
     state.lastTradeTime = now;
@@ -1493,7 +1554,8 @@
       step: trade.step,
       direction: trade.direction,
       openedAt: trade.openedAt,
-      index: state.betHistory.length - 1
+      index: state.betHistory.length - 1,
+      payout
     };
     state.open = {
       symbol: trade.symbol,
@@ -1501,12 +1563,13 @@
       amount: trade.amount,
       openedAt: trade.openedAt
     };
-    state.currentWager = trade.amount;
+    state.currentWager = tradeAmount;
     state.minuteTimer.windowConsumed = true;
     state.minuteTimer.tradeCycleId = state.minuteTimer.activeCycleId;
     state.lastDecision = { direction, reason: 'signal', trigger: trade.trigger, at: now };
     setDirection(direction, meta && meta.key ? shortLabelForSignal(meta.key) : 'opened');
     updateTradingInfo();
+    logInfo('TRADE-OPEN', `time=${humanTimeHHMM(now)} sym=${trade.symbol} dir=${dirLabel} amt=${fmtMoney(tradeAmount)} step=${trade.step}`);
     return { placed: true, reason: null };
   }
 
@@ -1517,11 +1580,9 @@
     state.pendingTrade = null;
     const result = placeTrade(candidate.direction, now, candidate);
     if (result.placed){
-      logInfo('ORDER', `decision=place dir=${candidate.direction} key=${candidate.key}`);
       state.lastOrderDecision = { decision: 'place', reason: 'ok', at: now };
     } else {
       const reason = result.reason || 'unknown';
-      logInfo('ORDER', `decision=skip reason=${reason} dir=${candidate.direction} key=${candidate.key}`);
       state.lastOrderDecision = { decision: 'skip', reason, at: now };
       if (reason === 'prepared_mismatch'){
         schedulePrepare(state.lastPrepareReason || 'startup');
@@ -1539,65 +1600,84 @@
     if (state.lastSnapMinute === key) return;
     state.lastSnapMinute = key;
 
+    syncProfit();
     const payoutRaw = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
     const payoutText = Number.isFinite(payoutRaw) ? payoutRaw : '—';
     const topKeys = state.topSignals.slice(0, TOP_K).map(sig => sig.key).join(',');
-    const topText = topKeys || '—';
+    const topText = topKeys ? '[' + topKeys + ']' : '[—]';
     const lastHitDir = state.lastTopHit && state.lastTopHit.direction
       ? String(state.lastTopHit.direction).toUpperCase()
       : null;
     const lastHit = state.lastTopHit
-      ? `${state.lastTopHit.key}@${humanTime(state.lastTopHit.at)}(+${lastHitDir || '—'})`
+      ? `${state.lastTopHit.key}@${humanTimeHHMM(state.lastTopHit.at)}(+${lastHitDir || '—'})`
       : '—';
     const pendingDir = state.pendingTrade && state.pendingTrade.direction
-      ? state.pendingTrade.direction.toUpperCase()
+      ? String(state.pendingTrade.direction).toUpperCase()
       : '—';
-    const pendingAgeSeconds = state.pendingTrade ? Math.max(0, Math.round((now - state.pendingTrade.at) / 1000)) : null;
-    const pendingAgeText = pendingAgeSeconds == null ? '—' : pendingAgeSeconds + 's';
+    const pendingKey = state.pendingTrade && state.pendingTrade.key ? state.pendingTrade.key : '—';
+    const pendingInfo = state.pendingTrade
+      ? `${pendingKey}:${pendingDir}`
+      : '—';
     const next = state.nextBet || { step: 0, amount: 0, array: state.betArraySelector };
     const order = state.lastOrderDecision || { decision: 'skip', reason: 'init' };
     const orderText = order.decision === 'place'
       ? 'place'
-      : `skip(reason=${order.reason || 'none'})`;
+      : `skip(${order.reason || 'none'})`;
     const lastRes = state.lastResult || {};
-    const resultLabel = lastRes.result === 'won'
-      ? 'win'
-      : (lastRes.result === 'lost' ? 'loss' : (lastRes.result === 'returned' ? 'returned' : '—'));
+    const resultLabel = lastRes.label
+      || (lastRes.result === 'won' ? 'WIN' : (lastRes.result === 'lost' ? 'LOSS' : (lastRes.result === 'returned' ? 'RET' : '—')));
     const resultPnl = Number.isFinite(lastRes.pnl) ? formatSignedFixed(lastRes.pnl) : formatSignedFixed(0);
-    const resultAgeMinutes = lastRes.at ? ((now - lastRes.at) / 60000) : NaN;
-    const resultAgeText = Number.isFinite(resultAgeMinutes) ? resultAgeMinutes.toFixed(1) : '—';
     const candle = state.candles.length ? state.candles[state.candles.length - 1] : state.currentCandle;
     const candleOpen = candle ? fmt(candle.open) : '—';
     const candleHigh = candle ? fmt(candle.high) : '—';
     const candleLow = candle ? fmt(candle.low) : '—';
     const candleClose = candle ? fmt(candle.close) : '—';
+    const nextAmount = Number.isFinite(next.amount) ? next.amount : 0;
+    const startLabel = state.startTime || humanTimeHHMM(now);
 
     const snapshot = [
       `sym=${state.symbol || '—'}`,
       `pay=${payoutText}`,
       `thr=${MIN_PROFIT}`,
-      `top=${topText ? '[' + topText + ']' : '—'}`,
+      `top=${topText}`,
       `lastTopHit=${lastHit}`,
-      `pending=${pendingDir}`,
-      `pendingAge=${pendingAgeText}`,
-      `open=${state.isTradeOpen ? 'yes' : 'no'}`,
-      `nextStep=${next.step}`,
-      `nextAmt=${formatAmount(next.amount)}`,
-      `nextArr=${next.array}`,
+      `pending=${pendingInfo}`,
+      `isOpen=${state.isTradeOpen ? 'yes' : 'no'}`,
+      `next(step=${next.step} amt=${fmtMoney(nextAmount)})`,
+      `arr=${next.array || state.betArraySelector}`,
       `order=${orderText}`,
       `lastResult=${resultLabel}`,
-      `lastPnl=${resultPnl}`,
-      `lastAge=${resultAgeText}m`,
-      `m1=${candleOpen}/${candleHigh}/${candleLow}/${candleClose}`
-    ].join(' | ');
+      `pnl=${resultPnl}`,
+      `start=${startLabel}`,
+      `startBal=${fmtMoney(state.startBalance)}`,
+      `curBal=${fmtMoney(state.currentBalance)}`,
+      `m1:${candleOpen}/${candleHigh}/${candleLow}/${candleClose}`
+    ].join(' ');
     logInfo('SNAP ' + key, snapshot);
   }
 
+  function readBalanceValue(){
+    let raw = '';
+    if (balanceDiv){
+      raw = balanceDiv.textContent || balanceDiv.innerText || '';
+      if (!raw && balanceDiv.getAttribute){
+        raw = balanceDiv.getAttribute('data-value') || '';
+      }
+    }
+    const parsed = parseMoneyValue(raw);
+    if (Number.isFinite(parsed)) return parsed;
+    const normalized = String(raw || '').replace(/,/g, '');
+    const fallback = parseFloat(normalized);
+    return Number.isFinite(fallback) ? fallback : 0;
+  }
+
   function syncProfit(){
-    const balance = parseFloat((balanceDiv.textContent || '0').replace(/,/g, '')) || 0;
+    const balance = readBalanceValue();
+    state.currentBalance = balance;
     const profit = balance - state.startBalance;
     state.currentProfit = profit;
     state.totalProfit = profit;
+    return balance;
   }
 
   function normalizeTradeResultPayload(result, fallbackTrade){
@@ -1773,10 +1853,26 @@
     const now = Date.now();
     state.lastDecision = { direction: last.direction || 'flat', reason: 'result:' + last.result, at: now };
     const tradeSymbol = last.symbol || state.symbol;
-    const displayResult = normalized.displayResult || (last.result === 'won' ? 'win' : (last.result === 'lost' ? 'loss' : 'returned'));
-    const message = `result=${displayResult} symbol=${tradeSymbol} dir=${last.direction} step=${last.step} amt=${formatAmount(last.amount)} pnl=${formatSignedFixed(pnl)}`;
+    const payout = Number.isFinite(last.payout) ? last.payout : NaN;
+    const resultLabel = last.result === 'won'
+      ? 'WIN'
+      : (last.result === 'lost' ? 'LOSS' : 'RET');
+    const timeLabel = humanTimeHHMM(last.closedAt || now);
+    const dirLabel = String(last.direction || 'flat').toUpperCase();
+    const payoutText = Number.isFinite(payout) ? payout : '—';
+    const message = [
+      `time=${timeLabel}`,
+      `sym=${tradeSymbol}`,
+      `dir=${dirLabel}`,
+      `step=${last.step}`,
+      `amt=${fmtMoney(Number.isFinite(last.amount) ? last.amount : 0)}`,
+      `payout=${payoutText}`,
+      `result=${resultLabel}`,
+      `pnl=${formatSignedFixed(pnl)}`,
+      `curBal=${fmtMoney(state.currentBalance)}`
+    ].join(' ');
     logTradeResultEvent(message);
-    state.lastResult = { result: last.result, pnl, at: now };
+    state.lastResult = { result: last.result, pnl, at: now, label: resultLabel };
     const prepareReason = last.result === 'won' ? 'after_win' : (last.result === 'lost' ? 'after_loss' : 'returned');
     schedulePrepare(prepareReason);
     renderCycles();
@@ -2218,7 +2314,7 @@
         try { message = String(err); } catch (_){ message = 'n/a'; }
       }
     }
-    try { console.error('[BOOT-FAIL]', message); } catch (_err){}
+    try { console.error('[BOOT-FAIL] ' + message); } catch (_err){}
     try {
       Object.keys(watchers).forEach(key => {
         const timerId = watchers[key];
@@ -2267,7 +2363,7 @@
     state.signalCache = Object.create(null);
     state.pendingTrade = null;
     state.lastOrderDecision = { decision: 'skip', reason: 'reset', at: Date.now() };
-    state.lastResult = { result: null, pnl: 0, at: 0 };
+    state.lastResult = { result: null, pnl: 0, at: 0, label: '—' };
     state.betInput = null;
     updateTradingInfo();
     renderAccuracy();
@@ -2316,13 +2412,22 @@
   });
 
   function boot(){
+    const startTs = Date.now();
+    const startBalance = readBalanceValue();
+    state.startTime = humanTimeHHMM(startTs);
+    state.startBalance = startBalance;
+    state.currentBalance = startBalance;
+    state.currentProfit = 0;
+    state.totalProfit = 0;
     buildUI();
+    syncProfit();
+    updateTradingInfo();
+    logInfo('BOOT', `start=${state.startTime} startBal=${fmtMoney(state.startBalance)}`);
     observeTradeResults();
     observeSymbolChanges();
     setupTimers();
     recordNextBet('startup', state.currentBetStep, state.currentBetStep);
     schedulePrepare('startup');
-    updateTradingInfo();
     renderAccuracy();
     renderTopSignals();
     renderChart();
