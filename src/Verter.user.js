@@ -8,12 +8,12 @@
   }
   window.__VERTER_ACTIVE__ = true;
 
-  const APP_VERSION = 'Verter 6.0 (PCS-8 Integrated, 2025-09-26)';
-  const BUILD_TAG = 'PCS-8';
+  const APP_VERSION = 'Verter ver. 5.12.0';
+  const BUILD_TAG = 'PCS-8|Preflight-8';
 
   const PAPER_HORIZON = 1;
   const TOP_K = 5;
-  const MIN_TRADES = 6;
+  const MIN_TRADES = 3;
   const MIN_PROFIT = 80;
   const signalCheckInterval = 250;
   const MINUTE_WINDOW_MS = 1200;
@@ -951,7 +951,6 @@
       }
     }
 
-    renderBadges();
     updateChartZoomDisplay();
 
     setDirection('flat');
@@ -1573,16 +1572,25 @@
     const candleLow = candle ? fmt(candle.low) : '—';
     const candleClose = candle ? fmt(candle.close) : '—';
 
-    const lines = [
-      `sym=${state.symbol || '—'} pay=${payoutText} thr=${MIN_PROFIT}`,
-      `top=[${topText}] lastTopHit=${lastHit}`,
-      `pending=${pendingDir} age=${pendingAgeText} isOpen=${state.isTradeOpen}`,
-      `next(step=${next.step} amt=${formatAmount(next.amount)} arr=${next.array})`,
+    const snapshot = [
+      `sym=${state.symbol || '—'}`,
+      `pay=${payoutText}`,
+      `thr=${MIN_PROFIT}`,
+      `top=${topText ? '[' + topText + ']' : '—'}`,
+      `lastTopHit=${lastHit}`,
+      `pending=${pendingDir}`,
+      `pendingAge=${pendingAgeText}`,
+      `open=${state.isTradeOpen ? 'yes' : 'no'}`,
+      `nextStep=${next.step}`,
+      `nextAmt=${formatAmount(next.amount)}`,
+      `nextArr=${next.array}`,
       `order=${orderText}`,
-      `lastResult=${resultLabel} pnl=${resultPnl} t=${resultAgeText}m`,
-      `m1:o=${candleOpen} h=${candleHigh} l=${candleLow} c=${candleClose}`
-    ];
-    logInfo('SNAP ' + key, lines.join('\n'));
+      `lastResult=${resultLabel}`,
+      `lastPnl=${resultPnl}`,
+      `lastAge=${resultAgeText}m`,
+      `m1=${candleOpen}/${candleHigh}/${candleLow}/${candleClose}`
+    ].join(' | ');
+    logInfo('SNAP ' + key, snapshot);
   }
 
   function syncProfit(){
@@ -2201,6 +2209,36 @@
     ensureClosedDealsObserver();
   }
 
+  function handleBootFailure(err){
+    let message = 'unknown error';
+    if (err){
+      if (err && err.message){
+        message = err.message;
+      } else {
+        try { message = String(err); } catch (_){ message = 'n/a'; }
+      }
+    }
+    try { console.error('[BOOT-FAIL]', message); } catch (_err){}
+    try {
+      Object.keys(watchers).forEach(key => {
+        const timerId = watchers[key];
+        if (timerId != null){
+          clearInterval(timerId);
+          watchers[key] = null;
+        }
+      });
+      if (closedDealsWatcher.scanTimer){
+        clearInterval(closedDealsWatcher.scanTimer);
+        closedDealsWatcher.scanTimer = null;
+      }
+      if (closedDealsWatcher.observer && typeof closedDealsWatcher.observer.disconnect === 'function'){
+        closedDealsWatcher.observer.disconnect();
+        closedDealsWatcher.observer = null;
+      }
+    } catch (_cleanupErr){}
+    window.__VERTER_ACTIVE__ = false;
+  }
+
   function manualAssetReset(){
     const prevStep = state.currentBetStep;
     state.betHistory = [];
@@ -2291,5 +2329,9 @@
     renderCycles();
   }
 
-  boot();
+  try {
+    boot();
+  } catch (err){
+    handleBootFailure(err);
+  }
 })();
