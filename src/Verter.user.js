@@ -607,7 +607,7 @@ function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel 
 
     const key = _virtKey(asset, signalId);
     if (virtTradesActive.has(key)){
-        console.warn('[VIRT][BLOCK]', 'already active', key);
+        console.warn('[VIRT-BLOCK]', 'already active', key);
         return null;
     }
 
@@ -624,7 +624,7 @@ function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel 
         signalKey: key
     };
 
-    trade.timeoutId = setTimeout(() => closeVirtual(key), 60_000);
+    trade.timeoutId = setTimeout(() => closeVirtual(key), VIRT_TRADE_DURATION);
     virtTradesActive.set(key, trade);
 
     console.log('[VIRT-OPEN]', key, normalizedDirection, openPrice);

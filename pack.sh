@@ -18,11 +18,27 @@ APP=${APPV%% ver*}
 LABEL="OrderGate+VirtFix"
 STAMP=$(date +%Y%m%d-%H%M)
 
+README_SRC="README.md"
+CLEANUP_README=0
+if [[ ! -f "$README_SRC" ]]; then
+  if [[ -f "README_snippet.md" ]]; then
+    cp "README_snippet.md" "$README_SRC"
+    CLEANUP_README=1
+  else
+    echo "ERR: README.md not found" >&2
+    exit 3
+  fi
+fi
+
 OUTDIR="build"
 NAME="${APP}_ver_${VER}_(${LABEL})_${STAMP}.zip"
 
 mkdir -p "$OUTDIR"
-zip -r "${OUTDIR}/${NAME}" "$SRC" README.md >/dev/null
+zip -r "${OUTDIR}/${NAME}" "$SRC" "$README_SRC" >/dev/null
+
+if [[ $CLEANUP_README -eq 1 ]]; then
+  rm "$README_SRC"
+fi
 
 # совместимый алиас
 cp "${OUTDIR}/${NAME}" "${OUTDIR}/Verter_SAFE.zip"
