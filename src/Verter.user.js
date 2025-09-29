@@ -1,3 +1,4 @@
+(() => {
 const appversion = "Verter ver. 1";
 const reverse = false; // Change to true for reverse mode
 
@@ -42,40 +43,94 @@ let humanTime = (time) => {
     return humanTime;
 }
 
+const initialTimestamp = Date.now();
+const initialHumanTime = humanTime(initialTimestamp);
+
+const state = {
+    priceBuffer: [],
+    candlePrices: [],
+    candleInterval: 60000,
+    lastCandleTime: initialTimestamp,
+    time: initialTimestamp,
+    hTime: initialHumanTime,
+    startTime: initialHumanTime,
+    startTimestamp: initialTimestamp,
+    maxStepInCycle: 0,
+    cyclesToPlay: 30,
+    cyclesStats: [],
+    tradingAllowed: true,
+    limitWin: config.limits.limitWin1,
+    limitLoss: config.limits.limitLoss1,
+    isTradeOpen: false,
+    currentBetStep: 0,
+    betArray: null,
+    betHistory: [],
+    priceHistory: [],
+    currentBalance: undefined,
+    currentProfit: 0,
+    profitDiv: null,
+    signalDiv: null,
+    profitPercentDivAdvisor: null,
+    timeDiv: null,
+    wonDiv: null,
+    wagerDiv: null,
+    tradingSymbolDiv: null,
+    totalWager: 0,
+    historyDiv: null,
+    cyclesDiv: null,
+    cyclesHistoryDiv: null,
+    totalProfitDiv: null,
+    historyBetDiv: null,
+    sqzDiv: null,
+    trendDiv: null,
+    globalTrendDiv: null,
+    tradeDirectionDiv: null,
+    globalPrice: undefined,
+    updateStartPrice: false,
+    firstTradeBlock: false,
+    targetElement2: null,
+    graphContainer: null,
+    mamaBar: null,
+    famaBar: null,
+    balanceDiv: null,
+    lastPrice: undefined,
+    symbolName: '',
+    betTime: '',
+    priceString: '',
+    startBalance: 0,
+    prevBalance: 0,
+    text: '',
+    startPrice: 0,
+    lastMin: 0,
+    lastMax: 0,
+    multiplyFactorMesa: 0,
+    multiplyFactorSqzMom: 0,
+    betInput: null,
+    betDivContent: '',
+    betValue: 0,
+    maxStepDiv: null,
+    lastTradeTime: 0,
+    minTimeBetweenTrades: config.timing.minTimeBetweenTrades,
+    lastSignalCheck: 0,
+    signalCheckInterval: config.timing.signalCheckInterval,
+    priceHistory5m: [],
+    priceHistory15m: [],
+    lastUpdate5m: 0,
+    lastUpdate15m: 0,
+    signalSensitivity: 3,
+    autoTradingEnabled: true
+};
+
 // Fix the candle formation and indicator calculation
-
-// Initialize the lastCandleTime when the script starts
-let priceBuffer = [];
-let candlePrices = [];
-let candleInterval = 60000; // 1 minute in milliseconds
-let lastCandleTime = Date.now();
-
-let time = Date.now();
-let hTime = humanTime(time);
-let startTime = hTime;
-
-let maxStepInCycle = 0;
 
 // const mode = 'REAL';
 const mode = 'DEMO';
 
-let cyclesToPlay = 30;
-let cyclesStats = [];
-
-let tradingAllowed = true;
-
 const debugEnabled = config.debug.enabled;
-
-let limitWin = config.limits.limitWin1;
-let limitLoss = config.limits.limitLoss1;
-
-// Add these variables near the top of your file with other global variables
-let isTradeOpen = false; // Track if a trade is currently open
-let currentBetStep = 0; // Track the current step in the bet array
 
 
 // create an observer instance
-let targetDiv = document.getElementsByClassName("scrollbar-container deals-list ps")[0];
+const targetDiv = document.getElementsByClassName("scrollbar-container deals-list ps")[0];
 let observer = new MutationObserver(function(mutations) {
     mutations.forEach(function(mutation) {
 
@@ -113,41 +168,41 @@ let observer = new MutationObserver(function(mutations) {
         } else if (!centerUp && !lastUp) {
             tradeStatus = 'lost';
         }
-        if (betHistory.length > 0) {
-            betHistory[betHistory.length - 1].won = tradeStatus;
-            betHistory[betHistory.length - 1].profit = betProfit;
+        if (state.betHistory.length > 0) {
+            state.betHistory[state.betHistory.length - 1].won = tradeStatus;
+            state.betHistory[state.betHistory.length - 1].profit = betProfit;
         }
 
         // Mark that the trade is now closed
-        isTradeOpen = false;
+        state.isTradeOpen = false;
 
         // Update bet step based on trade outcome
         if (tradeStatus === 'won') {
             // Reset to first step on win
-            currentBetStep = 0;
+            state.currentBetStep = 0;
         } else if (tradeStatus === 'lost') {
             // Increase bet step on loss, but don't exceed array length
-            currentBetStep = Math.min(currentBetStep + 1, betArray.length - 1);
+            state.currentBetStep = Math.min(state.currentBetStep + 1, state.betArray.length - 1);
         }
         // For 'returned' status, keep the same bet step
 
-        symbolName = symbolDiv.textContent.replace("/", " ");
-        tradingSymbolDiv.innerHTML = symbolName;
-        betTime = betTimeDiv.textContent;
-        let timeParts = betTime.split(':');
+        state.symbolName = symbolDiv.textContent.replace("/", " ");
+        state.tradingSymbolDiv.innerHTML = state.symbolName;
+        state.betTime = betTimeDiv.textContent;
+        let timeParts = state.betTime.split(':');
         let seconds = parseInt(timeParts[0]) * 3600 + parseInt(timeParts[1]) * 60 + parseInt(timeParts[2]);
 
-        let totalBalance = prevBalance + betProfit;
+        let totalBalance = state.prevBalance + betProfit;
 
         // logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit);
         logTradeToGoogleSheets(
             appversion,
-            symbolName,
-            betHistory[betHistory.length - 1].time,
+            state.symbolName,
+            state.betHistory[state.betHistory.length - 1].time,
             seconds,
-            betHistory[betHistory.length - 1].openPrice,
-            globalPrice,
-            betHistory[betHistory.length - 1].betValue,
+            state.betHistory[state.betHistory.length - 1].openPrice,
+            state.globalPrice,
+            state.betHistory[state.betHistory.length - 1].betValue,
             tradeStatus,
             betProfit,
             totalBalance
@@ -200,58 +255,58 @@ const betArray3 = [
     {step: 8, value: 900, pressCount: 33 }
 ];
 
-let betArray = betArray1;
-let betHistory = [];
-let priceHistory = [];
-let currentBalance;
-let currentProfit = 0;
-let profitDiv;
-let signalDiv;
-let profitPercentDivAdvisor;
-let timeDiv;
-let wonDiv;
-let wagerDiv;
-let tradingSymbolDiv;
-let totalWager = 0;
-let historyDiv;
-let cyclesDiv;
-let cyclesHistoryDiv;
-let totalProfitDiv;
-let historyBetDiv;
-let sqzDiv;
-let trendDiv;
-let globalTrendDiv;
-let tradeDirectionDiv;
-let globalPrice;
-let updateStartPrice = false;
-let firstTradeBlock = false;
-let targetElement2;
-let graphContainer;
-let mamaBar;
-let famaBar;
-let balanceDiv;
-let lastPrice;
+state.betArray = betArray1;
+state.betHistory = [];
+state.priceHistory = [];
+state.currentBalance = undefined;
+state.currentProfit = 0;
+state.profitDiv = undefined;
+state.signalDiv = undefined;
+state.profitPercentDivAdvisor = undefined;
+state.timeDiv = undefined;
+state.wonDiv = undefined;
+state.wagerDiv = undefined;
+state.tradingSymbolDiv = undefined;
+state.totalWager = 0;
+state.historyDiv = undefined;
+state.cyclesDiv = undefined;
+state.cyclesHistoryDiv = undefined;
+state.totalProfitDiv = undefined;
+state.historyBetDiv = undefined;
+state.sqzDiv = undefined;
+state.trendDiv = undefined;
+state.globalTrendDiv = undefined;
+state.tradeDirectionDiv = undefined;
+state.globalPrice = undefined;
+state.updateStartPrice = false;
+state.firstTradeBlock = false;
+state.targetElement2 = undefined;
+state.graphContainer = undefined;
+state.mamaBar = undefined;
+state.famaBar = undefined;
+state.balanceDiv = undefined;
+state.lastPrice = undefined;
 
 const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
 if (mode == 'REAL'){
-    balanceDiv = document.getElementsByClassName("js-hd js-balance-real-USD")[0];
+    state.balanceDiv = document.getElementsByClassName("js-hd js-balance-real-USD")[0];
 } else {
-    balanceDiv = document.getElementsByClassName("js-hd js-balance-demo")[0];
+    state.balanceDiv = document.getElementsByClassName("js-hd js-balance-demo")[0];
 }
 
 const symbolDiv = document.getElementsByClassName("current-symbol")[0];
-let symbolName = symbolDiv.textContent.replace("/", " ");
+state.symbolName = symbolDiv.textContent.replace("/", " ");
 
 const betTimeDiv = document.getElementsByClassName("value__val")[0];
-let betTime = betTimeDiv.textContent;
+state.betTime = betTimeDiv.textContent;
 
-let priceString = balanceDiv.innerHTML;
-priceString = priceString.split(',').join('');
+state.priceString = state.balanceDiv.innerHTML;
+state.priceString = state.priceString.split(',').join('');
 
-let startBalance = parseFloat(priceString);
-let prevBalance = startBalance;
+state.startBalance = parseFloat(state.priceString);
+state.prevBalance = state.startBalance;
 if (debugEnabled) {
-    console.log('Start Balance: ', startBalance);
+    console.log('Start Balance: ', state.startBalance);
 }
 
 const redColor = config.colors.red;
@@ -276,27 +331,25 @@ const textToSearch = "Winnings amount you receive";
 for (i = 0; i< targetElem.length;i++){
     let textContent = targetElem[i].textContent || targetElem[i].innerText;
     if (textContent.includes(textToSearch)){
-        targetElement2 = document.getElementsByClassName("tooltip-text")[i];
+        state.targetElement2 = document.getElementsByClassName("tooltip-text")[i];
     }
 }
 const buyButton = document.getElementsByClassName("btn btn-call")[0];
-let text = targetElement2.innerHTML;
-let startPrice = parseFloat(text.match(/\d+.\d+(?=\ a)/g)[0]);
-priceHistory.push(startPrice);
+state.text = state.targetElement2.innerHTML;
+state.startPrice = parseFloat(state.text.match(/\d+.\d+(?=\ a)/g)[0]);
+state.priceHistory.push(state.startPrice);
 if (debugEnabled) {
-    console.log('Start Price: ', startPrice);
+    console.log('Start Price: ', state.startPrice);
 }
 
-let lastMin = startPrice;
-let lastMax = startPrice;
-let multiplyFactorMesa = 100 / startPrice;
-let multiplyFactorSqzMom = 50 / startPrice;
+state.lastMin = state.startPrice;
+state.lastMax = state.startPrice;
+state.multiplyFactorMesa = 100 / state.startPrice;
+state.multiplyFactorSqzMom = 50 / state.startPrice;
 
-let betInput = document.getElementsByClassName("call-put-block__in")[0].querySelector("input");
-let betDivContent = document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value;
-let betValue = parseFloat(betDivContent);
-
-let maxStepDiv;
+state.betInput = document.getElementsByClassName("call-put-block__in")[0].querySelector("input");
+state.betDivContent = document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value;
+state.betValue = parseFloat(state.betDivContent);
 
 let buy = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 87, shiftKey: true}));
 let sell = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 83, shiftKey: true}));
@@ -305,75 +358,70 @@ let increaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCo
 let setValue = v => document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value = v; // todo: after that press ENTER event?
 
 let updateMinMax = () => {
-    if (globalPrice > lastMax) {
-        lastMax = globalPrice;
+    if (state.globalPrice > state.lastMax) {
+        state.lastMax = state.globalPrice;
     }
-    if (globalPrice < lastMin) {
-        lastMin = globalPrice;
+    if (state.globalPrice < state.lastMin) {
+        state.lastMin = state.globalPrice;
     }
 }
 
-let lastTradeTime = 0;
-let minTimeBetweenTrades = config.timing.minTimeBetweenTrades; // 5 seconds minimum between trades
-let lastSignalCheck = 0;
-let signalCheckInterval = config.timing.signalCheckInterval; // Check for trading signals every 1 second
-
 let queryPrice = () => {
-    time = Date.now();
-    hTime = humanTime(time);
-    timeDiv.innerHTML = hTime;
-    
+    state.time = Date.now();
+    state.hTime = humanTime(state.time);
+    state.timeDiv.innerHTML = state.hTime;
+
     // Get the current price
-    text = targetElement2.innerHTML;
-    let priceMatch = text.match(/\d+.\d+(?=\ a)/g);
-    
+    state.text = state.targetElement2.innerHTML;
+    let priceMatch = state.text.match(/\d+.\d+(?=\ a)/g);
+
     if (priceMatch && priceMatch[0]) {
-        globalPrice = parseFloat(priceMatch[0]);
-        
+        state.globalPrice = parseFloat(priceMatch[0]);
+
         // Only add to price history if it's a new price
-        if (globalPrice !== priceHistory[priceHistory.length - 1]) {
-            priceHistory.push(globalPrice);
-            
+        if (state.globalPrice !== state.priceHistory[state.priceHistory.length - 1]) {
+            state.priceHistory.push(state.globalPrice);
+
             // Keep priceHistory at a reasonable size (last 500 data points)
-            if (priceHistory.length > 500) {
-                priceHistory.shift();
+            if (state.priceHistory.length > 500) {
+                state.priceHistory.shift();
             }
-            
+
             // Update last price
-            lastPrice = globalPrice;
-            
+            state.lastPrice = state.globalPrice;
+
             // Update min/max
             updateMinMax();
         }
-        
+
         // Calculate indicators with the updated price history
         calculateIndicators();
     }
-    
+
     // Update balance and profit
-    priceString = balanceDiv.innerHTML;
-    priceString = priceString.split(',').join('');
-    currentBalance = parseFloat(priceString);
-    currentProfit = currentBalance - startBalance;
-    currentProfit = Math.round(currentProfit * 100) / 100;
-    
-    profitDiv.innerHTML = currentProfit;
-    
-    if (currentProfit < 0) {
-        profitDiv.style.background = redColor;
-    } else if (currentProfit > 0) {
-        profitDiv.style.background = greenColor;
+    state.priceString = state.balanceDiv.innerHTML;
+    state.priceString = state.priceString.split(',').join('');
+    state.currentBalance = parseFloat(state.priceString);
+    state.currentProfit = state.currentBalance - state.startBalance;
+    state.currentProfit = Math.round(state.currentProfit * 100) / 100;
+
+    state.profitDiv.innerHTML = state.currentProfit;
+
+    if (state.currentProfit < 0) {
+        state.profitDiv.style.background = redColor;
+    } else if (state.currentProfit > 0) {
+        state.profitDiv.style.background = greenColor;
     } else {
-        profitDiv.style.background = 'inherit';
+        state.profitDiv.style.background = 'inherit';
     }
-    
+
     // Only check for trading signals at specified intervals
     // This prevents excessive trading while maintaining up-to-date indicators
-    if (time - lastSignalCheck >= signalCheckInterval) {
-        lastSignalCheck = time;
-        
+    if (state.time - state.lastSignalCheck >= state.signalCheckInterval) {
+        state.lastSignalCheck = state.time;
+
         // Only consider trading if enough time has passed since last trade
-        if (time - lastTradeTime >= minTimeBetweenTrades) {
+        if (state.time - state.lastTradeTime >= state.minTimeBetweenTrades) {
             tradeLogic();
         }
     }
@@ -509,36 +557,31 @@ function calculateParabolicSAR(prices, acceleration = 0.02, maximum = 0.2) {
 }
 
 // Add multiple timeframe support
-let priceHistory5m = [];
-let priceHistory15m = [];
-let lastUpdate5m = 0;
-let lastUpdate15m = 0;
-
 function updateMultiTimeframe(currentPrice, currentTime) {
     // 5-minute timeframe
-    if (currentTime - lastUpdate5m >= 300000) { // 5 minutes
-        priceHistory5m.push(currentPrice);
-        if (priceHistory5m.length > 50) priceHistory5m.shift();
-        lastUpdate5m = currentTime;
+    if (currentTime - state.lastUpdate5m >= 300000) { // 5 minutes
+        state.priceHistory5m.push(currentPrice);
+        if (state.priceHistory5m.length > 50) state.priceHistory5m.shift();
+        state.lastUpdate5m = currentTime;
     }
-    
+
     // 15-minute timeframe
-    if (currentTime - lastUpdate15m >= 900000) { // 15 minutes
-        priceHistory15m.push(currentPrice);
-        if (priceHistory15m.length > 30) priceHistory15m.shift();
-        lastUpdate15m = currentTime;
+    if (currentTime - state.lastUpdate15m >= 900000) { // 15 minutes
+        state.priceHistory15m.push(currentPrice);
+        if (state.priceHistory15m.length > 30) state.priceHistory15m.shift();
+        state.lastUpdate15m = currentTime;
     }
 }
 
 function getMultiTimeframeSignal() {
-    if (priceHistory5m.length < 10 || priceHistory15m.length < 5) {
+    if (state.priceHistory5m.length < 10 || state.priceHistory15m.length < 5) {
         return 'insufficient_data';
     }
-    
+
     // Get signals from different timeframes
-    const trend1m = detectTrend(priceHistory, 10);
-    const trend5m = detectTrend(priceHistory5m, 8);
-    const trend15m = detectTrend(priceHistory15m, 5);
+    const trend1m = detectTrend(state.priceHistory, 10);
+    const trend5m = detectTrend(state.priceHistory5m, 8);
+    const trend15m = detectTrend(state.priceHistory15m, 5);
     
     // Align signals
     const bullishTimeframes = [trend1m, trend5m, trend15m].filter(t => 
@@ -556,62 +599,62 @@ function calculateIndicators() {
     const currentTime = Date.now();
     
     // Add price to buffer with timestamp
-    if (globalPrice && globalPrice !== priceHistory[priceHistory.length - 1]) {
-        priceBuffer.push({
+    if (state.globalPrice && state.globalPrice !== state.priceHistory[state.priceHistory.length - 1]) {
+        state.priceBuffer.push({
             time: currentTime,
-            price: globalPrice
+            price: state.globalPrice
         });
-        
+
         // Keep buffer at a reasonable size
-        if (priceBuffer.length > 500) {
-            priceBuffer.shift();
+        if (state.priceBuffer.length > 500) {
+            state.priceBuffer.shift();
         }
     }
-    
+
     // Update multi-timeframe data
-    if (globalPrice) {
-        updateMultiTimeframe(globalPrice, currentTime);
+    if (state.globalPrice) {
+        updateMultiTimeframe(state.globalPrice, currentTime);
     }
-    
+
     // Check if we need to create a new candle
-    if (currentTime - lastCandleTime >= candleInterval) {
+    if (currentTime - state.lastCandleTime >= state.candleInterval) {
         // If we have price data since the last candle
-        if (priceBuffer.length > 0) {
+        if (state.priceBuffer.length > 0) {
             // Extract prices that belong to the completed candle
-            const candlePricePoints = priceBuffer.filter(
-                point => point.time >= lastCandleTime && point.time < currentTime
+            const candlePricePoints = state.priceBuffer.filter(
+                point => point.time >= state.lastCandleTime && point.time < currentTime
             );
-            
+
             if (candlePricePoints.length > 0) {
                 // Create a new candle using OHLC
                 const open = candlePricePoints[0].price;
                 const high = Math.max(...candlePricePoints.map(p => p.price));
                 const low = Math.min(...candlePricePoints.map(p => p.price));
                 const close = candlePricePoints[candlePricePoints.length - 1].price;
-                
+
                 // Add the close price to our candle prices array
-                candlePrices.push(close);
-                
+                state.candlePrices.push(close);
+
                 if (debugEnabled) {
                     console.log(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
                 }
-                
+
                 // Keep candlePrices at a reasonable size
-                if (candlePrices.length > 50) {
-                    candlePrices.shift();
+                if (state.candlePrices.length > 50) {
+                    state.candlePrices.shift();
                 }
             }
         }
-        
-        lastCandleTime = currentTime;
+
+        state.lastCandleTime = currentTime;
     }
-    
+
     // Use priceHistory for indicators if we don't have enough candles yet
-    const dataForIndicators = priceHistory.length >= 20 ? priceHistory : [];
-    
+    const dataForIndicators = state.priceHistory.length >= 20 ? state.priceHistory : [];
+
     if (dataForIndicators.length < 20) {
         window.currentSignal = 'flat';
-        signalDiv.innerHTML = 'Insufficient Data';
+        state.signalDiv.innerHTML = 'Insufficient Data';
         updateIndicatorDisplay(true); // Pass true to indicate insufficient data
         return;
     }
@@ -717,8 +760,8 @@ function calculateIndicators() {
     }
     
     // Update UI with indicator values
-    signalDiv.innerHTML = `${signal.toUpperCase()} (B:${bullishScore} vs S:${bearishScore})`;
-    signalDiv.style.backgroundColor = signal === 'buy' ? greenColor : (signal === 'sell' ? redColor : '#333');
+    state.signalDiv.innerHTML = `${signal.toUpperCase()} (B:${bullishScore} vs S:${bearishScore})`;
+    state.signalDiv.style.backgroundColor = signal === 'buy' ? greenColor : (signal === 'sell' ? redColor : '#333');
     
     // Store the current signal and indicators in global variables for tradeLogic to use
     window.currentSignal = signal;
@@ -749,7 +792,7 @@ function calculateIndicators() {
         trend,
         priceAction,
         mtfSignal,
-        candlePrices,
+        candlePrices: state.candlePrices,
         currentTime
     });
     
@@ -951,23 +994,23 @@ function debugTradeStatus() {
     }
 
     const time = Date.now();
-    const timeSinceLastTrade = time - lastTradeTime;
-    const timeSinceLastSignalCheck = time - lastSignalCheck;
-    
+    const timeSinceLastTrade = time - state.lastTradeTime;
+    const timeSinceLastSignalCheck = time - state.lastSignalCheck;
+
     console.log(`Debug Trade Status:
     - Current Signal: ${window.currentSignal || 'undefined'}
     - EMA Signal: ${window.emaSignal || 'undefined'}
     - RSI Signal: ${window.rsiSignal || 'undefined'}
     - Stochastic Signal: ${window.stochSignal || 'undefined'}
-    - Time since last trade: ${timeSinceLastTrade}ms (min required: ${minTimeBetweenTrades}ms)
-    - Time since last signal check: ${timeSinceLastSignalCheck}ms (check interval: ${signalCheckInterval}ms)
+    - Time since last trade: ${timeSinceLastTrade}ms (min required: ${state.minTimeBetweenTrades}ms)
+    - Time since last signal check: ${timeSinceLastSignalCheck}ms (check interval: ${state.signalCheckInterval}ms)
     - EMA Difference: ${window.emaDifference ? window.emaDifference.toFixed(5) : 'undefined'}
     - RSI Value: ${window.currentRSI ? window.currentRSI.toFixed(2) : 'undefined'}
     - Stochastic Values: %K=${window.stochK ? window.stochK.toFixed(2) : 'undefined'}, %D=${window.stochD ? window.stochD.toFixed(2) : 'undefined'}
     - Candle Progress: ${window.candleProgress || 0}% (${Math.round(window.timeUntilNextCandle/1000) || 0}s until next candle)
-    - Candle Count: ${candlePrices.length}
-    - Cycles to Play: ${cyclesToPlay}
-    - Current Profit: ${currentProfit}
+    - Candle Count: ${state.candlePrices.length}
+    - Cycles to Play: ${state.cyclesToPlay}
+    - Current Profit: ${state.currentProfit}
     - Current Profit %: ${currentProfitPercent || 'undefined'}
     `);
 }
@@ -992,20 +1035,20 @@ function tradeLogic() {
     let priceTrend = 'flat';
     
     // Only try to access betHistory if it has elements
-    if (betHistory.length > 0) {
-        prevBetStep = betHistory.slice(-1)[0].step;
-        
+    if (state.betHistory.length > 0) {
+        prevBetStep = state.betHistory.slice(-1)[0].step;
+
         // Check if we have trade status information
-        if (betHistory.slice(-1)[0].won) {
-            tradeStatus = betHistory.slice(-1)[0].won;
+        if (state.betHistory.slice(-1)[0].won) {
+            tradeStatus = state.betHistory.slice(-1)[0].won;
         }
     }
 
     if (tradeStatus === 'won') {
         currentBetStep = 0;
     } else if (tradeStatus === 'lost') {
-        if (prevBetStep < betArray.length-1) {
-            currentBetStep = prevBetStep + 1; 
+        if (prevBetStep < state.betArray.length-1) {
+            currentBetStep = prevBetStep + 1;
         } else {
             currentBetStep = 0;
         }
@@ -1013,7 +1056,7 @@ function tradeLogic() {
         currentBetStep = prevBetStep;
     }
 
-    if (betHistory.length < 3){
+    if (state.betHistory.length < 3){
         currentBetStep = 0;
     }
 
@@ -1026,66 +1069,66 @@ function tradeLogic() {
     const scoreDifference = Math.abs(bullishScore - bearishScore);
     
     // Apply sensitivity adjustment - higher sensitivity means we need less score difference to trade
-    const adjustedThreshold = 11 - signalSensitivity; // Inverted scale: 1 is most sensitive (threshold=10), 10 is least (threshold=1)
+    const adjustedThreshold = 11 - state.signalSensitivity; // Inverted scale: 1 is most sensitive (threshold=10), 10 is least (threshold=1)
     
     // Determine trade direction based on scores and sensitivity
     if (bullishScore > bearishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'buy' : 'sell';
-        tradeDirectionDiv.style.background = greenColor; // Green
+        state.tradeDirectionDiv.style.background = greenColor; // Green
     } else if (bearishScore > bullishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'sell' : 'buy';
-        tradeDirectionDiv.style.background = redColor; // Red
+        state.tradeDirectionDiv.style.background = redColor; // Red
     } else {
         tradeDirection = 'flat';
-        tradeDirectionDiv.style.background = '#555555'; // Gray
+        state.tradeDirectionDiv.style.background = '#555555'; // Gray
     }
 
-    tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`;
+    state.tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`;
 
     // Check profit limits
-    if (currentProfit > limitWin){
-        limitWin = config.limits.limitWin1;
-        limitLoss = config.limits.limitLoss1;
-        betArray = betArray1;
+    if (state.currentProfit > state.limitWin){
+        state.limitWin = config.limits.limitWin1;
+        state.limitLoss = config.limits.limitLoss1;
+        state.betArray = betArray1;
         let newDiv = winCycle.cloneNode();
         newDiv.style.height = '30px';
-        newDiv.innerHTML = currentProfit;
-        newDiv.innerHTML += '<div class="max-cycle">'+maxStepInCycle+'</div>';
-        cyclesHistoryDiv.appendChild(newDiv);
+        newDiv.innerHTML = state.currentProfit;
+        newDiv.innerHTML += '<div class="max-cycle">'+state.maxStepInCycle+'</div>';
+        state.cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('win');
-    } else if (currentProfit - betValue < limitLoss) {
-        if (limitWin === config.limits.limitWin1){
-            limitWin = config.limits.limitWin2;
-            limitLoss = config.limits.limitLoss2;
-            betArray = betArray2;
-        } else if (limitWin === config.limits.limitWin2){
-            limitWin = config.limits.limitWin3;
-            limitLoss = config.limits.limitLoss3;
-            betArray = betArray3;
+    } else if (state.currentProfit - state.betValue < state.limitLoss) {
+        if (state.limitWin === config.limits.limitWin1){
+            state.limitWin = config.limits.limitWin2;
+            state.limitLoss = config.limits.limitLoss2;
+            state.betArray = betArray2;
+        } else if (state.limitWin === config.limits.limitWin2){
+            state.limitWin = config.limits.limitWin3;
+            state.limitLoss = config.limits.limitLoss3;
+            state.betArray = betArray3;
         } else {
-            limitWin = config.limits.limitWin1;
-            limitLoss = config.limits.limitLoss1;
-            betArray = betArray1;
+            state.limitWin = config.limits.limitWin1;
+            state.limitLoss = config.limits.limitLoss1;
+            state.betArray = betArray1;
         }
         let newDiv = loseCycle.cloneNode();
         newDiv.style.height = '30px';
-        newDiv.innerHTML = currentProfit;
-        newDiv.innerHTML += '<div class="max-cycle">'+maxStepInCycle+'</div>';
-        cyclesHistoryDiv.appendChild(newDiv);
+        newDiv.innerHTML = state.currentProfit;
+        newDiv.innerHTML += '<div class="max-cycle">'+state.maxStepInCycle+'</div>';
+        state.cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('lose');
-    } else if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
+    } else if (state.cyclesToPlay > 0 && tradeDirection !== 'flat' && state.autoTradingEnabled){
         // Execute trade and update last trade time
 
-        if (!isTradeOpen) {
+        if (!state.isTradeOpen) {
             smartBet(currentBetStep, tradeDirection);
-            isTradeOpen = true;
+            state.isTradeOpen = true;
         }
 
-        lastTradeTime = time;
-        
+        state.lastTradeTime = time;
+
         currentTrade.time = hTime;
-        currentTrade.betTime = betTime;
-        currentTrade.openPrice = globalPrice;
+        currentTrade.betTime = state.betTime;
+        currentTrade.openPrice = state.globalPrice;
         currentTrade.step = currentBetStep;
         let betValue = getBetValue(currentTrade.step);
         currentTrade.betValue = betValue;
@@ -1100,14 +1143,14 @@ function tradeLogic() {
         currentTrade.bearishScore = bearishScore;
         currentTrade.scoreDiff = scoreDifference;
         currentTrade.threshold = adjustedThreshold;
-        betHistory.push(currentTrade);
-        totalWager += betValue;
-        wagerDiv.innerHTML = totalWager;
+        state.betHistory.push(currentTrade);
+        state.totalWager += betValue;
+        state.wagerDiv.innerHTML = state.totalWager;
 
         // Update maximum step
-        maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
-        maxStepDiv.innerHTML = maxStepInCycle;
-        
+        state.maxStepInCycle = Math.max(state.maxStepInCycle, currentTrade.step);
+        state.maxStepDiv.innerHTML = state.maxStepInCycle;
+
         if (debugEnabled) {
             console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
         }
@@ -1115,28 +1158,28 @@ function tradeLogic() {
 
     // Calculate win percentage
     let winCounter = 0;
-    for (var i = 0; i < betHistory.length; i++) {
-        if (betHistory[i].won === 'won'){
+    for (var i = 0; i < state.betHistory.length; i++) {
+        if (state.betHistory[i].won === 'won'){
             winCounter++
         }
     }
 
-    let winPercent = Math.round(winCounter / betHistory.length * 100 * 100 ) / 100;
-    wonDiv.innerHTML = winPercent;
+    let winPercent = Math.round(winCounter / state.betHistory.length * 100 * 100 ) / 100;
+    state.wonDiv.innerHTML = winPercent;
 }
 
 let smartBet = (step, tradeDirection) => {
 
-    currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
-    profitPercentDivAdvisor.innerHTML = currentProfitPercent;
+    const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
+    state.profitPercentDivAdvisor.innerHTML = currentProfitPercent;
 
     if (currentProfitPercent < 90){
         if (debugEnabled) {
             console.log(`%c BET IS NOT RECOMMENDED. Aborting mission! `, `background: ${redColor}; color: #ffffff`);
         }
-        profitPercentDivAdvisor.style.background = redColor;
-        profitPercentDivAdvisor.style.color = "#ffffff";
-        profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
+        state.profitPercentDivAdvisor.style.background = redColor;
+        state.profitPercentDivAdvisor.style.color = "#ffffff";
+        state.profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
         return;
     }
 
@@ -1148,9 +1191,9 @@ let smartBet = (step, tradeDirection) => {
         }
     }
 
-    for (let i = 0; i <betArray.length;i++){
-        if (step == betArray[i].step){
-            steps = betArray[i].pressCount;
+    for (let i = 0; i <state.betArray.length;i++){
+        if (step == state.betArray[i].step){
+            steps = state.betArray[i].pressCount;
         }
     }
 
@@ -1180,9 +1223,9 @@ let smartBet = (step, tradeDirection) => {
 }
 let getBetValue = (betStep) => {
     let value;
-    for (let i=0;i<betArray.length;i++) {
-        if (betStep == betArray[i].step) {
-            value = betArray[i].value;
+    for (let i=0;i<state.betArray.length;i++) {
+        if (betStep == state.betArray[i].step) {
+            value = state.betArray[i].value;
         }
     }
     return value;
@@ -1198,39 +1241,39 @@ let resetCycle = (winStatus) => {
 
     let time = Date.now();
     let hTime = humanTime(time);
-      
+
     // Пример: логирование сделки
-    // logTradeToGoogleSheets(appversion, winStatus, currentProfit, maxStepInCycle, symbolName);
+    // logTradeToGoogleSheets(appversion, winStatus, state.currentProfit, state.maxStepInCycle, state.symbolName);
 
     if (debugEnabled) {
         console.log('%c RESET CYCLE! ' + hTime, 'background: #9326FF; color: #ffffff');
     }
 
-    profitDiv.style.background = 'inherit';
+    state.profitDiv.style.background = 'inherit';
 
-    maxStepInCycle = 0;
-    
+    state.maxStepInCycle = 0;
+
     // Reset the current bet step when starting a new cycle
-    currentBetStep = 0;
+    state.currentBetStep = 0;
 
-    if (cyclesToPlay > 0) {
-        cyclesStats.push(currentProfit);
-        startBalance = currentBalance;
-        cyclesToPlay--;
-        // cyclesDiv.innerHTML = cyclesToPlay;
+    if (state.cyclesToPlay > 0) {
+        state.cyclesStats.push(state.currentProfit);
+        state.startBalance = state.currentBalance;
+        state.cyclesToPlay--;
+        // state.cyclesDiv.innerHTML = state.cyclesToPlay;
         let totalProfit = 0;
-        for (let i = 0; i < cyclesStats.length; i++) {
-            totalProfit += cyclesStats[i];
+        for (let i = 0; i < state.cyclesStats.length; i++) {
+            totalProfit += state.cyclesStats[i];
         }
 
         totalProfit = Math.round(totalProfit * 100) / 100;
-        totalProfitDiv.innerHTML = totalProfit;
+        state.totalProfitDiv.innerHTML = totalProfit;
         if (totalProfit < 0) {
-            totalProfitDiv.style.background = redColor;
+            state.totalProfitDiv.style.background = redColor;
         } else if (totalProfit > 0) {
-            totalProfitDiv.style.background = greenColor;
+            state.totalProfitDiv.style.background = greenColor;
         }
-        firstTradeBlock = false;
+        state.firstTradeBlock = false;
     } else {
         if (debugEnabled) {
             console.log('%c ----- ALL CYCLES ENDED! ----- ' + hTime + ' ------', 'background: #9326FF; color: #ffffff');
@@ -1256,7 +1299,7 @@ function updateHeaderPanel() {
             window.globalPrice.toFixed(5) : 
             window.globalPrice.toFixed(2);
         
-        symbolElement.innerHTML = `${symbolName} <span style="color: ${priceChangeColor}; font-weight: bold;">${formattedPrice}</span>`;
+        symbolElement.innerHTML = `${state.symbolName} <span style="color: ${priceChangeColor}; font-weight: bold;">${formattedPrice}</span>`;
     }
     
     // Update balance with current account value
@@ -1268,8 +1311,8 @@ function updateHeaderPanel() {
         });
         
         // Add color based on profit/loss compared to starting balance
-        const balanceColor = window.currentBalance > startBalance ? '#00c800' : 
-                            window.currentBalance < startBalance ? '#ff3a3a' : '#ffffff';
+        const balanceColor = window.currentBalance > state.startBalance ? '#00c800' :
+                            window.currentBalance < state.startBalance ? '#ff3a3a' : '#ffffff';
         
         balanceElement.innerHTML = `${formattedBalance}`;
         balanceElement.style.color = balanceColor;
@@ -1277,7 +1320,7 @@ function updateHeaderPanel() {
     
     // Update mode with additional information
     if (modeElement) {
-        const sessionDuration = Math.floor((Date.now() - startTime) / 60000); // in minutes
+        const sessionDuration = Math.floor((Date.now() - state.startTimestamp) / 60000); // in minutes
         modeElement.innerHTML = `${mode} <span style="font-size: 11px; opacity: 0.8;">(${sessionDuration} min)</span>`;
     }
     
@@ -1295,9 +1338,9 @@ function updateHeaderPanel() {
     if (sensitivityValue) {
         // Color code based on sensitivity level
         let sensitivityColor = '#ffffff';
-        if (signalSensitivity <= 3) {
+        if (state.signalSensitivity <= 3) {
             sensitivityColor = '#ff3a3a'; // Red for aggressive
-        } else if (signalSensitivity <= 6) {
+        } else if (state.signalSensitivity <= 6) {
             sensitivityColor = '#ffa500'; // Orange for moderate
         } else {
             sensitivityColor = '#00c800'; // Green for conservative
@@ -1310,7 +1353,7 @@ function updateHeaderPanel() {
     if (autoTradingToggle) {
         const autoTradingLabel = autoTradingToggle.parentElement.querySelector('label');
         if (autoTradingLabel) {
-            autoTradingLabel.style.color = autoTradingEnabled ? '#00c800' : '#ff3a3a';
+            autoTradingLabel.style.color = state.autoTradingEnabled ? '#00c800' : '#ff3a3a';
         }
     }
     
@@ -1377,12 +1420,12 @@ function addUI() {
     newDiv.style.scrollbarWidth = "thin";
     newDiv.style.scrollbarColor = "#444 #222";
 
-    historyBetDiv = document.createElement("div");
-    historyBetDiv.style.width = "10px";
-    historyBetDiv.style.height = "10px";
-    historyBetDiv.style.padding = "2px";
-    historyBetDiv.style.display = "inline-block";
-    historyBetDiv.classList.add("history-bet");
+    state.historyBetDiv = document.createElement("div");
+    state.historyBetDiv.style.width = "10px";
+    state.historyBetDiv.style.height = "10px";
+    state.historyBetDiv.style.padding = "2px";
+    state.historyBetDiv.style.display = "inline-block";
+    state.historyBetDiv.classList.add("history-bet");
   
     // Add CSS for the UI
     const styleElement = document.createElement('style');
@@ -1485,15 +1528,15 @@ function addUI() {
         <div class="info-grid">
             <div class="info-item full-width">
                 <span class="info-label">Trading Symbol:</span>
-                <span class="info-value" id="trading-symbol">${symbolName}</span>
+            <span class="info-value" id="trading-symbol">${state.symbolName}</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Start Balance:</span>
-                <span class="info-value">${startBalance}</span>
+                <span class="info-value">${state.startBalance}</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Start Time:</span>
-                <span class="info-value">${startTime}</span>
+                <span class="info-value">${state.startTime}</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Mode:</span>
@@ -1580,21 +1623,21 @@ function addUI() {
     document.body.appendChild(newDiv);
 
     // Get references to all the elements we need to update
-    profitDiv = document.getElementById("profit");
-    profitPercentDivAdvisor = document.getElementById("profit-percent");
-    historyDiv = document.getElementById("history-box");
-    signalDiv = document.getElementById("signal");
-    tradingSymbolDiv = document.getElementById("trading-symbol");
-    trendDiv = document.getElementById("price-trend");
-    globalTrendDiv = document.getElementById("global-trend");
-    tradeDirectionDiv = document.getElementById("trade-dir");
-    timeDiv = document.getElementById("time");
-    wonDiv = document.getElementById("won-percent");
-    wagerDiv = document.getElementById("wager");
-    maxStepDiv = document.getElementById("max-step");
-    totalProfitDiv = document.getElementById("total-profit");
-    cyclesHistoryDiv = document.getElementById("cycles-history");
-    graphContainer = document.getElementById("graphs");
+    state.profitDiv = document.getElementById("profit");
+    state.profitPercentDivAdvisor = document.getElementById("profit-percent");
+    state.historyDiv = document.getElementById("history-box");
+    state.signalDiv = document.getElementById("signal");
+    state.tradingSymbolDiv = document.getElementById("trading-symbol");
+    state.trendDiv = document.getElementById("price-trend");
+    state.globalTrendDiv = document.getElementById("global-trend");
+    state.tradeDirectionDiv = document.getElementById("trade-dir");
+    state.timeDiv = document.getElementById("time");
+    state.wonDiv = document.getElementById("won-percent");
+    state.wagerDiv = document.getElementById("wager");
+    state.maxStepDiv = document.getElementById("max-step");
+    state.totalProfitDiv = document.getElementById("total-profit");
+    state.cyclesHistoryDiv = document.getElementById("cycles-history");
+    state.graphContainer = document.getElementById("graphs");
 
     // After creating all UI elements, add the sensitivity control
     setTimeout(() => {
@@ -1680,7 +1723,7 @@ function updateHeaderPanel() {
             window.globalPrice.toFixed(5) : 
             window.globalPrice.toFixed(2);
         
-        symbolElement.innerHTML = `${symbolName} <span style="color: ${priceChangeColor}; font-weight: bold;">${formattedPrice}</span>`;
+        symbolElement.innerHTML = `${state.symbolName} <span style="color: ${priceChangeColor}; font-weight: bold;">${formattedPrice}</span>`;
     }
     
     // Update balance with current account value
@@ -1721,10 +1764,6 @@ function updateHeaderPanel() {
 addUI();
 setInterval(queryPrice, 100);
 
-// Add these variables near the top of your file with other global variables
-let signalSensitivity = 3; // Default sensitivity threshold (can be 1-10)
-let autoTradingEnabled = true; // Toggle for auto-trading
-
 // Add a UI control for sensitivity
 function addSensitivityControl() {
     const controlDiv = document.createElement('div');
@@ -1732,12 +1771,12 @@ function addSensitivityControl() {
     controlDiv.style.marginBottom = '15px';
     controlDiv.innerHTML = `
         <div style="margin-bottom: 10px;">
-            <label for="sensitivity-slider">Signal Sensitivity: <span id="sensitivity-value">${signalSensitivity}</span></label>
-            <input type="range" id="sensitivity-slider" min="1" max="10" value="${signalSensitivity}" style="width: 200px;">
+            <label for="sensitivity-slider">Signal Sensitivity: <span id="sensitivity-value">${state.signalSensitivity}</span></label>
+            <input type="range" id="sensitivity-slider" min="1" max="10" value="${state.signalSensitivity}" style="width: 200px;">
         </div>
         <div>
             <label for="auto-trading-toggle">Auto Trading: </label>
-            <input type="checkbox" id="auto-trading-toggle" ${autoTradingEnabled ? 'checked' : ''}>
+            <input type="checkbox" id="auto-trading-toggle" ${state.autoTradingEnabled ? 'checked' : ''}>
         </div>
     `;
     
@@ -1747,17 +1786,17 @@ function addSensitivityControl() {
     
     // Add event listeners
     document.getElementById('sensitivity-slider').addEventListener('input', function(e) {
-        signalSensitivity = parseInt(e.target.value);
-        document.getElementById('sensitivity-value').textContent = signalSensitivity;
+        state.signalSensitivity = parseInt(e.target.value);
+        document.getElementById('sensitivity-value').textContent = state.signalSensitivity;
         if (debugEnabled) {
-            console.log(`Signal sensitivity set to: ${signalSensitivity}`);
+            console.log(`Signal sensitivity set to: ${state.signalSensitivity}`);
         }
     });
-    
+
     document.getElementById('auto-trading-toggle').addEventListener('change', function(e) {
-        autoTradingEnabled = e.target.checked;
+        state.autoTradingEnabled = e.target.checked;
         if (debugEnabled) {
-            console.log(`Auto trading ${autoTradingEnabled ? 'enabled' : 'disabled'}`);
+            console.log(`Auto trading ${state.autoTradingEnabled ? 'enabled' : 'disabled'}`);
         }
     });
 }
@@ -1862,11 +1901,11 @@ function updateIndicatorDisplay(insufficientData, indicators) {
     if (candleCountElement) {
         candleCountElement.innerHTML = `${candlePrices.length} (1m)`;
     }
-    
+
     // Update next candle timer
     const nextCandleElement = document.getElementById('next-candle');
     if (nextCandleElement) {
-        const timeUntilNextCandle = candleInterval - (currentTime - lastCandleTime);
+        const timeUntilNextCandle = state.candleInterval - (currentTime - state.lastCandleTime);
         nextCandleElement.innerHTML = `${Math.round(timeUntilNextCandle/1000)}s`;
     }
 }
@@ -2226,4 +2265,6 @@ function calculateStochastic(prices, period = 14, smoothK = 3, smoothD = 3) {
         k_prev: k_prev
     };
 }
+
+})();
 
