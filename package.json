@@ -8,7 +8,8 @@
     "syntax": "node scripts/syntax-check.js src/Verter.user.js",
     "lint": "eslint src/Verter.user.js --quiet",
     "test": "node --test",
-    "build": "node scripts/make-zip.js",
+    "build": "node scripts/pack.js",
+    "pack": "node scripts/pack.js",
     "pcs": "npm run syntax && npm run lint && npm run test && npm run build"
   },
   "devDependencies": {
