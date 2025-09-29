@@ -1,4 +1,4 @@
-const appversion = "Verter ver. 2.3";
+const appversion = "Verter ver. 1";
 const reverse = false; // Change to true for reverse mode
 // const webhookUrl = 'https://script.google.com/macros/s/AKfycbyz--BcEvGJq05MN5m9a6uGiUUhYe8WrpxOKMWE6qstfj15j9L8ahnK7DaVWaSbPAPG/exec'; //A1
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
@@ -37,15 +37,6 @@ let maxStepInCycle = 0;
 
 // const mode = 'REAL';
 const mode = 'DEMO';
-
-/* ORDER-GATE */
-const ORDER_COOLDOWN_MS = 5000;
-let orderLock = false;
-let orderLockTs = 0;
-
-let lastSignalKey = '';
-let lastSignalTs = 0;
-const SIGNAL_DEBOUNCE_MS = 1000;
 
 let cyclesToPlay = 30;
 let cyclesStats = [];
@@ -227,25 +218,6 @@ let famaBar;
 let balanceDiv;
 let lastPrice;
 
-const VIRT_TRADE_DURATION = 60000;
-const VIRT_HISTORY_WINDOW = 60 * 60000;
-let virtualTradingEnabled = true;
-const virtTradesActive = new Map();
-let virtTradesHistory = [];
-let virtStats = new Map();
-const virtSignalLabels = new Map();
-let virtCleanupTimer = null;
-let virtAutoUpdateTimer = null;
-const virtFilters = { asset: '', signal: '' };
-let virtActiveTableBody;
-let virtHistoryTableBody;
-let virtStatsTableBody;
-let virtToggleInput;
-let virtToggleStatus;
-let virtAssetFilterInput;
-let virtSignalFilterInput;
-let onVirtualClosed;
-
 const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
 if (mode == 'REAL'){
     balanceDiv = document.getElementsByClassName("js-hd js-balance-real-USD")[0];
@@ -327,43 +299,6 @@ let lastTradeTime = 0;
 let minTimeBetweenTrades = 5000; // 5 seconds minimum between trades
 let lastSignalCheck = 0;
 let signalCheckInterval = 1000; // Check for trading signals every 1 second
-
-function canOpenRealOrder(){
-    if (orderLock) return false;
-    return (Date.now() - orderLockTs) >= ORDER_COOLDOWN_MS;
-}
-
-function tryEnterOrderGate(tag){
-    if (!canOpenRealOrder()) {
-        console.warn('[ORDER-GATE][BLOCK]', tag || 'real');
-        return null;
-    }
-    orderLock = true; orderLockTs = Date.now();
-    console.log('[ORDER-GATE][ENTER]', tag, new Date(orderLockTs).toISOString());
-    let released = false;
-    return function release(ok){
-        if (released) return; released = true; orderLock = false;
-        if (ok === false) orderLockTs = Date.now() - ORDER_COOLDOWN_MS;
-        console.log('[ORDER-GATE][EXIT]', tag, ok ? 'ok' : 'abort');
-    };
-}
-
-function isDuplicateSignal(asset, signalId, direction){
-    const key = asset+'|'+signalId+'|'+direction;
-    const now = performance.now();
-    const dup = (key === lastSignalKey) && (now - lastSignalTs < SIGNAL_DEBOUNCE_MS);
-    lastSignalKey = key; lastSignalTs = now; return dup;
-}
-
-async function openRealOrderSafe(params = {}){
-    const tag = params && params.tag ? params.tag : 'real';
-    const release = tryEnterOrderGate(tag);
-    if (!release){ return { ok:false, reason:'duplicate' }; }
-    try{
-        const ok = await openRealOrderImpl(params);
-        release(ok === true); return { ok: !!ok };
-    }catch(e){ release(false); throw e; }
-}
 
 let queryPrice = () => {
     time = Date.now();
@@ -598,354 +533,6 @@ function getMultiTimeframeSignal() {
     return 'flat';
 }
 
-function _virtKey(asset, signalId){
-    return asset+'|'+signalId;
-}
-
-function getVirtSignalLabel(trade) {
-    if (!trade) return '';
-    const key = _virtKey(trade.asset, trade.signalId);
-    return virtSignalLabels.get(key) || trade.signalLabel || trade.signalId || '';
-}
-
-function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel }){
-    if (!virtualTradingEnabled) return null;
-    if (!asset || !signalId || !direction) return null;
-
-    const normalizedDirection = direction.toUpperCase();
-    if (normalizedDirection !== 'BUY' && normalizedDirection !== 'SELL') return null;
-
-    const key = _virtKey(asset, signalId);
-    if (virtTradesActive.has(key)){
-        console.warn('[VIRT][BLOCK]', 'already active', key);
-        return null;
-    }
-
-    const openPrice = Number.isFinite(priceOpen) ? priceOpen : currentPrice();
-    const tOpen = Date.now();
-    const label = signalLabel || signalId || direction;
-    virtSignalLabels.set(key, label);
-    const trade = {
-        id: key+'@'+tOpen,
-        asset,
-        signalId,
-        direction: normalizedDirection,
-        tOpen,
-        priceOpen: openPrice
-    };
-
-    trade.timeoutId = setTimeout(() => closeVirtual(key), VIRT_TRADE_DURATION);
-    virtTradesActive.set(key, trade);
-
-    console.log('[VIRT-OPEN]', key, normalizedDirection, openPrice);
-    updateVirtualTradingUI();
-    return trade;
-}
-
-function closeVirtual(key){
-    const trade = virtTradesActive.get(key); if (!trade) return;
-
-    if (trade.timeoutId){
-        clearTimeout(trade.timeoutId);
-        trade.timeoutId = null;
-    }
-
-    const priceClose = currentPrice();
-    let result;
-    if (!Number.isFinite(trade.priceOpen) || !Number.isFinite(priceClose)) {
-        result = 'return';
-    } else if (trade.direction === 'BUY') {
-        result = priceClose>trade.priceOpen ? 'win' : priceClose<trade.priceOpen ? 'loss' : 'return';
-    } else {
-        result = priceClose<trade.priceOpen ? 'win' : priceClose>trade.priceOpen ? 'loss' : 'return';
-    }
-
-    trade.tClose = Date.now();
-    trade.priceClose = priceClose;
-    trade.result = result;
-    trade.signalLabel = getVirtSignalLabel(trade) || trade.signalId;
-
-    virtTradesActive.delete(key);
-    delete trade.timeoutId;
-    virtTradesHistory.push(trade);
-
-    if (typeof onVirtualClosed === 'function') {
-        onVirtualClosed(trade);
-    }
-
-    console.log('[VIRT-CLOSE]', key, result, trade.priceOpen, '→', priceClose);
-
-    cleanupVirtualHistory(false);
-    updateVirtualTradingUI();
-}
-
-function currentPrice(){
-    return Number.isFinite(globalPrice) ? globalPrice : null;
-}
-
-function rebuildVirtStats() {
-    const stats = new Map();
-
-    virtTradesHistory.forEach(trade => {
-        if (!trade) return;
-        const key = _virtKey(trade.asset, trade.signalId);
-        const label = trade.signalLabel || virtSignalLabels.get(key) || trade.signalId;
-
-        const existing = stats.get(key) || {
-            signalId: trade.signalId,
-            signalLabel: label,
-            asset: trade.asset,
-            wins: 0,
-            total: 0,
-            winRate: 0
-        };
-
-        existing.signalLabel = label;
-        existing.asset = trade.asset;
-        existing.total += 1;
-        if (trade.result === 'win') {
-            existing.wins += 1;
-        }
-
-        existing.winRate = existing.total > 0 ? existing.wins / existing.total : 0;
-        stats.set(key, existing);
-    });
-
-    virtStats = stats;
-}
-
-function cleanupVirtualHistory(log = true) {
-    const cutoff = Date.now() - VIRT_HISTORY_WINDOW;
-    const before = virtTradesHistory.length;
-
-    virtTradesHistory = virtTradesHistory.filter(trade => trade.tClose && trade.tClose >= cutoff);
-    const removed = before - virtTradesHistory.length;
-
-    const keysToKeep = new Set();
-    virtTradesActive.forEach((_trade, activeKey) => keysToKeep.add(activeKey));
-    virtTradesHistory.forEach(trade => {
-        const key = _virtKey(trade.asset, trade.signalId);
-        if (key) {
-            keysToKeep.add(key);
-            if (trade.signalLabel && !virtSignalLabels.has(key)) {
-                virtSignalLabels.set(key, trade.signalLabel);
-            }
-        }
-    });
-
-    Array.from(virtSignalLabels.keys()).forEach(key => {
-        if (!keysToKeep.has(key)) {
-            virtSignalLabels.delete(key);
-        }
-    });
-
-    if (log) {
-        console.log(`[VIRT-CLEAN] removed=${removed} kept=${virtTradesHistory.length}`);
-    }
-
-    rebuildVirtStats();
-    if (removed > 0) {
-        updateVirtualTradingUI();
-    }
-
-    return removed;
-}
-
-function matchesTradeFilters(trade) {
-    if (!trade) return false;
-
-    const assetFilter = virtFilters.asset;
-    const signalFilter = virtFilters.signal;
-
-    const label = getVirtSignalLabel(trade).toLowerCase();
-    const assetMatches = !assetFilter || (trade.asset && trade.asset.toLowerCase().includes(assetFilter));
-    const signalMatches = !signalFilter ||
-        (trade.signalId && trade.signalId.toLowerCase().includes(signalFilter)) ||
-        (label && label.includes(signalFilter)) ||
-        (trade.direction && trade.direction.toLowerCase().includes(signalFilter));
-
-    return assetMatches && signalMatches;
-}
-
-function matchesStatFilters(stat) {
-    if (!stat) return false;
-
-    const assetFilter = virtFilters.asset;
-    const signalFilter = virtFilters.signal;
-
-    const label = (stat.signalLabel || '').toLowerCase();
-    const assetMatches = !assetFilter || (stat.asset && stat.asset.toLowerCase().includes(assetFilter));
-    const signalMatches = !signalFilter ||
-        (stat.signalId && stat.signalId.toLowerCase().includes(signalFilter)) ||
-        (label && label.includes(signalFilter));
-
-    return assetMatches && signalMatches;
-}
-
-function formatVirtualTime(timestamp) {
-    if (!timestamp) return '—';
-    return humanTime(timestamp);
-}
-
-function formatVirtualPrice(price) {
-    if (!Number.isFinite(price)) return '—';
-    return price < 1 ? price.toFixed(5) : price.toFixed(3);
-}
-
-function formatVirtualLogPrice(price) {
-    if (!Number.isFinite(price)) return 'n/a';
-    return price < 1 ? price.toFixed(5) : price.toFixed(3);
-}
-
-function renderVirtActiveTable(trades, now) {
-    if (!virtActiveTableBody) return;
-
-    if (!trades.length) {
-        virtActiveTableBody.innerHTML = '<tr><td class="virt-empty" colspan="6">Нет активных сделок</td></tr>';
-        return;
-    }
-
-    const rows = trades
-        .slice()
-        .sort((a, b) => (a.tOpen || 0) - (b.tOpen || 0))
-        .map(trade => {
-            const remainingMs = Math.max(0, VIRT_TRADE_DURATION - (now - trade.tOpen));
-            const remainingSec = Math.ceil(remainingMs / 1000);
-            const countdownClass = remainingSec <= 10 ? 'virt-countdown-low' : '';
-
-            const label = getVirtSignalLabel(trade) || '—';
-            const asset = trade.asset || '—';
-            return `
-                <tr>
-                    <td>${label}</td>
-                    <td>${asset}</td>
-                    <td>${trade.direction}</td>
-                    <td>${formatVirtualTime(trade.tOpen)}</td>
-                    <td>${formatVirtualPrice(trade.priceOpen)}</td>
-                    <td class="${countdownClass}">${remainingSec}s</td>
-                </tr>
-            `;
-        })
-        .join('');
-
-    virtActiveTableBody.innerHTML = rows;
-}
-
-function renderVirtHistoryTable(trades) {
-    if (!virtHistoryTableBody) return;
-
-    if (!trades.length) {
-        virtHistoryTableBody.innerHTML = '<tr><td class="virt-empty" colspan="6">Нет завершённых сделок</td></tr>';
-        return;
-    }
-
-    const rows = trades
-        .slice()
-        .sort((a, b) => (b.tClose || 0) - (a.tClose || 0))
-        .map(trade => {
-            const resultClass = trade.result === 'win' ? 'virt-result-win' :
-                (trade.result === 'loss' ? 'virt-result-loss' : 'virt-result-return');
-
-            const label = trade.signalLabel || getVirtSignalLabel(trade) || '—';
-            const asset = trade.asset || '—';
-            return `
-                <tr>
-                    <td>${label}</td>
-                    <td>${asset}</td>
-                    <td>${trade.direction}</td>
-                    <td>${formatVirtualTime(trade.tOpen)} → ${formatVirtualTime(trade.tClose)}</td>
-                    <td>${formatVirtualPrice(trade.priceOpen)} → ${formatVirtualPrice(trade.priceClose)}</td>
-                    <td class="${resultClass}">${trade.result || '—'}</td>
-                </tr>
-            `;
-        })
-        .join('');
-
-    virtHistoryTableBody.innerHTML = rows;
-}
-
-function renderVirtStatsTable(stats) {
-    if (!virtStatsTableBody) return;
-
-    if (!stats.length) {
-        virtStatsTableBody.innerHTML = '<tr><td class="virt-empty" colspan="4">Недостаточно данных</td></tr>';
-        return;
-    }
-
-    const rows = stats
-        .slice()
-        .sort((a, b) => {
-            if (b.winRate === a.winRate) {
-                if (b.total === a.total) {
-                    return a.signalLabel.localeCompare(b.signalLabel);
-                }
-                return b.total - a.total;
-            }
-            return b.winRate - a.winRate;
-        })
-        .map(stat => {
-            const label = stat.signalLabel || stat.signalId || '—';
-            const asset = stat.asset || '—';
-            const winRatio = `${stat.wins}/${stat.total}`;
-            const rateDisplay = stat.total > 0 ? `${(stat.winRate * 100).toFixed(1)}%` : '—';
-
-            return `
-                <tr>
-                    <td>${label}</td>
-                    <td>${asset}</td>
-                    <td>${winRatio}</td>
-                    <td>${rateDisplay}</td>
-                </tr>
-            `;
-        })
-        .join('');
-
-    virtStatsTableBody.innerHTML = rows;
-}
-
-function updateVirtualTradingUI() {
-    if (!virtActiveTableBody || !virtHistoryTableBody || !virtStatsTableBody) return;
-
-    const panel = document.getElementById('virtual-trading-panel');
-    if (panel) {
-        panel.classList.toggle('virt-panel-disabled', !virtualTradingEnabled);
-    }
-
-    if (virtToggleInput) {
-        virtToggleInput.checked = virtualTradingEnabled;
-    }
-
-    if (virtToggleStatus) {
-        virtToggleStatus.textContent = virtualTradingEnabled ? 'вкл' : 'выкл';
-    }
-
-    const now = Date.now();
-
-    const activeTrades = Array.from(virtTradesActive.values()).filter(matchesTradeFilters);
-    renderVirtActiveTable(activeTrades, now);
-
-    const historyTrades = virtTradesHistory.filter(matchesTradeFilters);
-    renderVirtHistoryTable(historyTrades);
-
-    const stats = Array.from(virtStats.values()).filter(matchesStatFilters);
-    renderVirtStatsTable(stats);
-}
-
-function initVirtualTrading() {
-    cleanupVirtualHistory(false);
-    updateVirtualTradingUI();
-
-    if (virtAutoUpdateTimer) {
-        clearInterval(virtAutoUpdateTimer);
-    }
-    virtAutoUpdateTimer = setInterval(updateVirtualTradingUI, 1000);
-
-    if (virtCleanupTimer) {
-        clearInterval(virtCleanupTimer);
-    }
-    virtCleanupTimer = setInterval(() => cleanupVirtualHistory(true), 60000);
-}
-
 // Modify calculateIndicators to include these new indicators
 function calculateIndicators() {
     const currentTime = Date.now();
@@ -1126,15 +713,6 @@ function calculateIndicators() {
     window.currentStoch = stochastic;
     window.currentTrend = trend;
     window.currentPriceAction = priceAction;
-
-    const virtSignalId = signal !== 'flat' ? `core-main-${signal}` : 'core-main';
-    const virtSignalLabel = signal !== 'flat' ? `Core ${signal.toUpperCase()}` : 'Core';
-    window.currentSignalMeta = {
-        id: virtSignalId,
-        label: virtSignalLabel,
-        asset: symbolName || 'Unknown',
-        direction: signal
-    };
     
     // Update the indicator display
     updateIndicatorDisplay(false, {
@@ -1382,7 +960,7 @@ function debugTradeStatus() {
 }
 
 /// Modify the tradeLogic function to use the sensitivity parameter
-async function tradeLogic() {
+function tradeLogic() {
     let tradeDirection;
     let currentTrade = {};
 
@@ -1481,49 +1059,15 @@ async function tradeLogic() {
         cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('lose');
     } else if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
-        if (isTradeOpen) {
-            return;
+        // Execute trade and update last trade time
+
+        if (!isTradeOpen) {
+            smartBet(currentBetStep, tradeDirection);
+            isTradeOpen = true;
         }
 
-        const signalMeta = window.currentSignalMeta || {};
-        const asset = signalMeta.asset || symbolName || 'Unknown';
-        const signalId = signalMeta.id || `core-main-${tradeDirection}`;
-        const signalLabel = signalMeta.label || `Core ${tradeDirection.toUpperCase()}`;
-        const normalizedDirection = tradeDirection === 'buy' ? 'BUY' : 'SELL';
-
-        if (isDuplicateSignal(asset, signalId, normalizedDirection)) {
-            console.warn('[SIGNAL][SKIP] debounce');
-            return;
-        }
-
-        openVirtualIfFree({
-            asset,
-            signalId,
-            direction: normalizedDirection,
-            signalLabel,
-            priceOpen: currentPrice()
-        });
-
-        const orderTag = `${asset}:${signalId}`;
-        let orderResult;
-        try {
-            orderResult = await openRealOrderSafe({
-                step: currentBetStep,
-                tradeDirection,
-                tag: orderTag
-            });
-        } catch (error) {
-            console.warn('[ORDER-GATE][ERROR]', error);
-            return;
-        }
-
-        if (!orderResult.ok) {
-            return;
-        }
-
-        isTradeOpen = true;
         lastTradeTime = time;
-
+        
         currentTrade.time = hTime;
         currentTrade.betTime = betTime;
         currentTrade.openPrice = globalPrice;
@@ -1548,6 +1092,8 @@ async function tradeLogic() {
         // Update maximum step
         maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
         maxStepDiv.innerHTML = maxStepInCycle;
+        
+        console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
     }
 
     // Calculate win percentage
@@ -1562,7 +1108,7 @@ async function tradeLogic() {
     wonDiv.innerHTML = winPercent;
 }
 
-function smartBet(step, tradeDirection) {
+let smartBet = (step, tradeDirection) => {
 
     currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
     profitPercentDivAdvisor.innerHTML = currentProfitPercent;
@@ -1572,7 +1118,7 @@ function smartBet(step, tradeDirection) {
         profitPercentDivAdvisor.style.background = '#B90000';
         profitPercentDivAdvisor.style.color = "#ffffff";
         profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
-        return false;
+        return;
     }
 
     let steps;
@@ -1601,7 +1147,7 @@ function smartBet(step, tradeDirection) {
         }
     }, 50);
 
-    setTimeout(function() {
+    setTimeout(function() {  
         if (tradeDirection == 'buy'){
             buy();
         } else {
@@ -1610,23 +1156,6 @@ function smartBet(step, tradeDirection) {
         let betValue = getBetValue(step);
         // console.log('Betting: ' + betValue + ' / Step: ' + step + ' / Direction: ' + tradeDirection);
     }, 100);
-    return true;
-}
-
-// НЕ вызывать напрямую. Использовать openRealOrderSafe().
-function openRealOrderImpl(params = {}) {
-    const { step = 0, tradeDirection } = params;
-    if (!tradeDirection) {
-        return false;
-    }
-
-    const normalizedDirection = tradeDirection.toLowerCase();
-    if (normalizedDirection !== 'buy' && normalizedDirection !== 'sell') {
-        return false;
-    }
-
-    const result = smartBet(step, normalizedDirection);
-    return result !== false;
 }
 let getBetValue = (betStep) => {
     let value;
@@ -1917,125 +1446,6 @@ function addUI() {
             overflow-y: auto;
             font-size: 12px;
         }
-
-        .virt-controls {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 10px;
-            align-items: center;
-        }
-
-        .virt-controls label {
-            font-size: 11px;
-            color: #aaa;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        .virt-controls input {
-            background: rgba(20, 20, 20, 0.6);
-            border: 1px solid #333;
-            border-radius: 3px;
-            color: #eee;
-            padding: 3px 6px;
-            font-size: 11px;
-        }
-
-        .virt-controls button {
-            background: #444;
-            border: 0;
-            border-radius: 3px;
-            color: #ddd;
-            padding: 4px 8px;
-            cursor: pointer;
-            font-size: 11px;
-            transition: background 0.2s ease;
-        }
-
-        .virt-controls button:hover {
-            background: #555;
-        }
-
-        .virt-section {
-            margin-top: 10px;
-        }
-
-        .virt-section h4 {
-            font-size: 12px;
-            margin-bottom: 6px;
-            color: #cfcfcf;
-        }
-
-        .virt-table-wrapper {
-            max-height: 140px;
-            overflow-y: auto;
-            border: 1px solid rgba(70, 70, 70, 0.6);
-            border-radius: 4px;
-        }
-
-        .virt-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 11px;
-        }
-
-        .virt-table thead {
-            position: sticky;
-            top: 0;
-            background: rgba(30, 30, 30, 0.95);
-            z-index: 1;
-        }
-
-        .virt-table th,
-        .virt-table td {
-            padding: 4px 6px;
-            border-bottom: 1px solid rgba(60, 60, 60, 0.6);
-            text-align: left;
-        }
-
-        .virt-empty {
-            text-align: center;
-            padding: 8px;
-            color: #777;
-        }
-
-        .virt-result-win {
-            color: #00b300;
-            font-weight: 600;
-        }
-
-        .virt-result-loss {
-            color: #ff4d4d;
-            font-weight: 600;
-        }
-
-        .virt-result-return {
-            color: #d4b106;
-            font-weight: 600;
-        }
-
-        .virt-toggle {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 12px;
-            color: #ddd;
-        }
-
-        .virt-toggle input {
-            accent-color: #00b300;
-        }
-
-        .virt-panel-disabled {
-            opacity: 0.6;
-        }
-
-        .virt-countdown-low {
-            color: #ffb84d;
-            font-weight: 600;
-        }
     `;
     document.head.appendChild(styleElement);
     
@@ -2134,92 +1544,11 @@ function addUI() {
         </div>
         <div id="graphs"></div>
     `;
-
-    const virtualPanel = document.createElement('div');
-    virtualPanel.className = 'bot-trading-panel';
-    virtualPanel.id = 'virtual-trading-panel';
-    virtualPanel.innerHTML = `
-        <div class="panel-header">
-            <span>Статистика виртуальной торговли</span>
-            <label class="virt-toggle">
-                <input type="checkbox" id="virt-trading-toggle" checked>
-                <span id="virt-trading-status">вкл</span>
-            </label>
-        </div>
-        <div class="virt-controls">
-            <label for="virt-filter-asset">Актив:
-                <input type="text" id="virt-filter-asset" placeholder="например EUR USD">
-            </label>
-            <label for="virt-filter-signal">Сигнал:
-                <input type="text" id="virt-filter-signal" placeholder="например Core BUY">
-            </label>
-            <button type="button" id="virt-filter-reset">Сброс</button>
-        </div>
-        <div class="virt-section">
-            <h4>Активные виртуальные сделки</h4>
-            <div class="virt-table-wrapper">
-                <table class="virt-table">
-                    <thead>
-                        <tr>
-                            <th>Сигнал</th>
-                            <th>Актив</th>
-                            <th>Направление</th>
-                            <th>Открытие</th>
-                            <th>Цена</th>
-                            <th>Осталось</th>
-                        </tr>
-                    </thead>
-                    <tbody id="virt-active-body">
-                        <tr><td class="virt-empty" colspan="6">Нет активных сделок</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <div class="virt-section">
-            <h4>История закрытых (60 мин)</h4>
-            <div class="virt-table-wrapper">
-                <table class="virt-table">
-                    <thead>
-                        <tr>
-                            <th>Сигнал</th>
-                            <th>Актив</th>
-                            <th>Направление</th>
-                            <th>Время</th>
-                            <th>Цены</th>
-                            <th>Итог</th>
-                        </tr>
-                    </thead>
-                    <tbody id="virt-history-body">
-                        <tr><td class="virt-empty" colspan="6">Нет завершённых сделок</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-        <div class="virt-section">
-            <h4>Статистика по сигналам (60 мин)</h4>
-            <div class="virt-table-wrapper">
-                <table class="virt-table">
-                    <thead>
-                        <tr>
-                            <th>Сигнал</th>
-                            <th>Актив</th>
-                            <th>W/Total</th>
-                            <th>WinRate%</th>
-                        </tr>
-                    </thead>
-                    <tbody id="virt-stats-body">
-                        <tr><td class="virt-empty" colspan="4">Недостаточно данных</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    `;
-
+    
     // Append all panels to the main div
     newDiv.appendChild(headerPanel);
     newDiv.appendChild(statusPanel);
     newDiv.appendChild(cyclesPanel);
-    newDiv.appendChild(virtualPanel);
     newDiv.appendChild(graphsPanel);
     
     // Add the newly created element to the DOM
@@ -2241,48 +1570,6 @@ function addUI() {
     totalProfitDiv = document.getElementById("total-profit");
     cyclesHistoryDiv = document.getElementById("cycles-history");
     graphContainer = document.getElementById("graphs");
-
-    virtActiveTableBody = virtualPanel.querySelector('#virt-active-body');
-    virtHistoryTableBody = virtualPanel.querySelector('#virt-history-body');
-    virtStatsTableBody = virtualPanel.querySelector('#virt-stats-body');
-    virtToggleInput = virtualPanel.querySelector('#virt-trading-toggle');
-    virtToggleStatus = virtualPanel.querySelector('#virt-trading-status');
-    virtAssetFilterInput = virtualPanel.querySelector('#virt-filter-asset');
-    virtSignalFilterInput = virtualPanel.querySelector('#virt-filter-signal');
-
-    const virtResetButton = virtualPanel.querySelector('#virt-filter-reset');
-
-    const applyVirtFilters = () => {
-        virtFilters.asset = virtAssetFilterInput ? virtAssetFilterInput.value.trim().toLowerCase() : '';
-        virtFilters.signal = virtSignalFilterInput ? virtSignalFilterInput.value.trim().toLowerCase() : '';
-        updateVirtualTradingUI();
-    };
-
-    if (virtToggleInput) {
-        virtToggleInput.addEventListener('change', () => {
-            virtualTradingEnabled = virtToggleInput.checked;
-            console.log(`[VIRT-STATE] enabled=${virtualTradingEnabled}`);
-            updateVirtualTradingUI();
-        });
-    }
-
-    if (virtAssetFilterInput) {
-        virtAssetFilterInput.addEventListener('input', applyVirtFilters);
-    }
-
-    if (virtSignalFilterInput) {
-        virtSignalFilterInput.addEventListener('input', applyVirtFilters);
-    }
-
-    if (virtResetButton) {
-        virtResetButton.addEventListener('click', () => {
-            if (virtAssetFilterInput) virtAssetFilterInput.value = '';
-            if (virtSignalFilterInput) virtSignalFilterInput.value = '';
-            virtFilters.asset = '';
-            virtFilters.signal = '';
-            updateVirtualTradingUI();
-        });
-    }
 
     // After creating all UI elements, add the sensitivity control
     setTimeout(() => {
@@ -2407,7 +1694,6 @@ function updateHeaderPanel() {
     }
 }
 addUI();
-initVirtualTrading();
 setInterval(queryPrice, 100);
 
 // Add these variables near the top of your file with other global variables
