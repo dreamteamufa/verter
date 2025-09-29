@@ -226,7 +226,6 @@ const state = {
     maxStepInCycle: 0,
     cyclesToPlay: 30,
     cyclesStats: [],
-    tradingAllowed: true,
     limitWin: config.limits.limitWin1,
     limitLoss: config.limits.limitLoss1,
     isTradeOpen: false,
@@ -245,21 +244,16 @@ const state = {
     tradingSymbolDiv: null,
     totalWager: 0,
     historyDiv: null,
-    cyclesDiv: null,
     cyclesHistoryDiv: null,
     totalProfitDiv: null,
     historyBetDiv: null,
-    sqzDiv: null,
     trendDiv: null,
     globalTrendDiv: null,
     tradeDirectionDiv: null,
     globalPrice: undefined,
-    updateStartPrice: false,
     firstTradeBlock: false,
     targetElement2: null,
     graphContainer: null,
-    mamaBar: null,
-    famaBar: null,
     balanceDiv: null,
     lastPrice: undefined,
     symbolName: '',
@@ -271,8 +265,6 @@ const state = {
     startPrice: 0,
     lastMin: 0,
     lastMax: 0,
-    multiplyFactorMesa: 0,
-    multiplyFactorSqzMom: 0,
     betInput: null,
     betDivContent: '',
     betValue: 0,
@@ -345,14 +337,11 @@ function updatePanel(field, value, options = {}) {
     }
 }
 
-// Fix the candle formation and indicator calculation
-
 const mode = 'DEMO';
 
 const debugEnabled = config.debug.enabled;
 
 
-// create an observer instance
 const targetDiv = getFirstElementByClass("scrollbar-container deals-list ps");
 let observer = new MutationObserver(function(mutations) {
     mutations.forEach(function(mutation) {
@@ -432,11 +421,8 @@ let observer = new MutationObserver(function(mutations) {
 
     });
 });
-// configuration of the observer:
 const observerConfig = { attributes: false, childList: true, characterData: false };
-// pass in the target node, as well as the observer options
 observer.observe(targetDiv, observerConfig);
-// later, you can stop observing
  
 const betArray1 = [
     {step: 0, value: 1, pressCount: 0},
@@ -488,21 +474,16 @@ state.wagerDiv = undefined;
 state.tradingSymbolDiv = undefined;
 state.totalWager = 0;
 state.historyDiv = undefined;
-state.cyclesDiv = undefined;
 state.cyclesHistoryDiv = undefined;
 state.totalProfitDiv = undefined;
 state.historyBetDiv = undefined;
-state.sqzDiv = undefined;
 state.trendDiv = undefined;
 state.globalTrendDiv = undefined;
 state.tradeDirectionDiv = undefined;
 state.globalPrice = undefined;
-state.updateStartPrice = false;
 state.firstTradeBlock = false;
 state.targetElement2 = undefined;
 state.graphContainer = undefined;
-state.mamaBar = undefined;
-state.famaBar = undefined;
 state.balanceDiv = undefined;
 state.lastPrice = undefined;
 
@@ -554,8 +535,6 @@ logDebug('Start Price:', state.startPrice);
 
 state.lastMin = state.startPrice;
 state.lastMax = state.startPrice;
-state.multiplyFactorMesa = 100 / state.startPrice;
-state.multiplyFactorSqzMom = 50 / state.startPrice;
 
 state.betInput = getBetInputElement();
 state.betDivContent = state.betInput ? state.betInput.value : '';
@@ -570,7 +549,7 @@ let setValue = v => {
     if (input) {
         input.value = v;
     }
-}; // todo: after that press ENTER event?
+};
 
 let updateMinMax = () => {
     if (state.globalPrice > state.lastMax) {
