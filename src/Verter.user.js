@@ -1,2619 +1,2277 @@
-// ==UserScript==
-// @name        Verter
-// @version     5.13.0
-// ==/UserScript==
+const appversion = "Verter ver. 2.0";
+const reverse = false; // Change to true for reverse mode
+// const webhookUrl = 'https://script.google.com/macros/s/AKfycbyz--BcEvGJq05MN5m9a6uGiUUhYe8WrpxOKMWE6qstfj15j9L8ahnK7DaVWaSbPAPG/exec'; //A1
+const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
+// const webhookUrl = 'https://script.google.com/macros/s/AKfycbyg_EJGKWqDAVhQDam8UKOt9wD7T8PXoBevnwcShqMo7cWLysV-tPfPyrchZIm52r-a/exec'; //O3
 
-(function(){
-  'use strict';
-
-  if (window.top !== window) return;
-  if (window.__VERTER_ACTIVE__) {
-    console.warn('[Verter] duplicate instance prevented');
-    return;
-  }
-  window.__VERTER_ACTIVE__ = true;
-
-  const APP_VERSION = 'Verter ver. 5.13.0';
-  const BUILD_TAG = 'PCS-8|Preflight-8';
-
-  const PAPER_HORIZON = 1;
-  const TOP_K = 5;
-  const MIN_TRADES = 3;
-  const MIN_PROFIT = 80;
-  const signalCheckInterval = 250;
-  const MINUTE_WINDOW_MS = 1200;
-  const MINUTE_BOUNDARY_MODE = 'off';
-  const DEFAULT_DEALS_LIST_SELECTOR = '.scrollbar-container.deals-list.ps';
-
-  const candleInterval = 60000;
-  const MAX_CANDLES = 240;
-
-  const betArray1 = [
-    { step: 0, value: 10, pressCount: 9 },
-    { step: 1, value: 30, pressCount: 13 },
-    { step: 2, value: 80, pressCount: 20 },
-    { step: 3, value: 200, pressCount: 24 },
-    { step: 4, value: 400, pressCount: 27 }
-  ];
-  const betArray2 = [
-    { step: 0, value: 30, pressCount: 13 },
-    { step: 1, value: 80, pressCount: 20 },
-    { step: 2, value: 200, pressCount: 24 },
-    { step: 3, value: 400, pressCount: 27 },
-    { step: 4, value: 900, pressCount: 33 }
-  ];
-
-  const colors = {
-    green: '#07b372',
-    red: '#f45f5f',
-    gray: '#3c3c3f'
-  };
-
-  const KEY_CODES = { BUY: 87, SELL: 83, DOWN: 65, UP: 68 };
-  const KEY_PRESS_DELAY = 24;
-  const RESET_PRESS_COUNT = 30;
-  const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
-  const LOG_THROTTLE_MS = 2000;
-
-  function resolveLogLevel(raw){
-    const key = String(raw || '').toLowerCase();
-    return LOG_LEVELS.hasOwnProperty(key) ? LOG_LEVELS[key] : LOG_LEVELS.info;
-  }
-
-  function detectLogLevel(){
-    let raw = 'info';
-    try {
-      if (typeof window !== 'undefined' && window.VERTER_LOG_LEVEL){
-        raw = window.VERTER_LOG_LEVEL;
-      } else if (typeof localStorage !== 'undefined'){
-        const stored = localStorage.getItem('VERTER_LOG_LEVEL');
-        if (stored) raw = stored;
-      }
-    } catch (err){}
-    return resolveLogLevel(raw);
-  }
-
-  const logState = {
-    level: detectLogLevel(),
-    lastMessages: Object.create(null)
-  };
-
-  function logMessage(level, label, payload, throttleKey){
-    const levelValue = LOG_LEVELS[level];
-    if (levelValue == null || levelValue < logState.level) return;
-    const now = Date.now();
-    let key = throttleKey || label;
-    if (!throttleKey && payload){
-      key += ':' + String(payload);
+let humanTime = (time) => {
+    let h = (new Date(time).getHours()).toString();
+    if (h < 10){
+        h = '0'+h;
     }
-    const last = logState.lastMessages[key];
-    if (last && now - last < LOG_THROTTLE_MS) return;
-    logState.lastMessages[key] = now;
-    const prefix = label ? '[' + label + ']' : '[Verter]';
-    const line = payload !== undefined && typeof payload === 'string' ? prefix + ' ' + payload : prefix;
-    if (payload !== undefined && typeof payload !== 'string'){
-      if (level === 'debug'){ console.debug(prefix, payload); }
-      else if (level === 'info'){ console.log(prefix, payload); }
-      else if (level === 'warn'){ console.warn(prefix, payload); }
-      else { console.error(prefix, payload); }
-      return;
+    let m = (new Date(time).getMinutes()).toString();
+    if (m < 10){
+        m = '0'+m;
     }
-    if (level === 'debug'){ console.debug(line); }
-    else if (level === 'info'){ console.log(line); }
-    else if (level === 'warn'){ console.warn(line); }
-    else { console.error(line); }
-  }
-
-  function logInfo(label, payload, throttleKey){
-    logMessage('info', label, payload, throttleKey);
-  }
-
-  function logM1CloseEvent(message){
-    logInfo(message.label, message.text, 'M1');
-  }
-
-  function logTradeResultEvent(text){
-    logInfo('TRADE', text);
-  }
-
-  function logNextBetCalcEvent(text){
-    logInfo('NEXT', text);
-  }
-
-  const fmt = (n, p = 5) => (Number.isFinite(n) ? n.toFixed(p) : '—');
-  const fmt2 = (n, p = 2) => (Number.isFinite(n) ? n.toFixed(p) : '—');
-  const fmtPct = n => (Number.isFinite(n) ? n.toFixed(1) + '%' : '—');
-  const fmtMoney = n => (Number.isFinite(n) ? (n < 0 ? '-' : '') + '$' + Math.abs(n).toFixed(2) : '$0.00');
-  const humanTime = ts => {
-    const d = new Date(ts);
-    return [d.getHours(), d.getMinutes(), d.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
-  };
-
-  const humanTimeHHMM = ts => {
-    const d = new Date(ts);
-    return [d.getHours(), d.getMinutes()].map(v => String(v).padStart(2, '0')).join(':');
-  };
-
-  function formatSigned(value, suffix){
-    if (!Number.isFinite(value)) return '—';
-    const sign = value > 0 ? '+' : (value < 0 ? '-' : '');
-    const abs = Math.abs(Math.round(value));
-    return sign + abs + (suffix || '');
-  }
-
-  function formatSignedFixed(value){
-    if (!Number.isFinite(value)) return '0';
-    const sign = value > 0 ? '+' : (value < 0 ? '-' : '');
-    return sign + Math.abs(value).toFixed(2);
-  }
-
-  function formatPercent(value){
-    if (!Number.isFinite(value)) return '0%';
-    return Math.round(value) + '%';
-  }
-
-  function formatAmount(value){
-    if (!Number.isFinite(value)) return '0';
-    return value % 1 === 0 ? String(value) : value.toFixed(2);
-  }
-
-  function normalizeSymbolLabel(raw){
-    if (!raw) return '';
-    const text = String(raw).replace(/\u00a0/g, ' ').trim();
-    if (!text) return '';
-    const compact = text.replace(/\s*\/\s*/g, '/');
-    if (compact.includes('/')){
-      return compact.split('/').map(part => part.trim().toUpperCase()).join(' ');
+    let s = (new Date(time).getSeconds()).toString();
+    if (s < 10){
+        s = '0'+s;
     }
-    return compact.replace(/\s+/g, ' ').toUpperCase();
-  }
+    let humanTime = h +':'+ m+':'+ s;
+    return humanTime;
+}
 
-  function makeSymbolKey(raw){
-    const label = normalizeSymbolLabel(raw);
-    return label ? label.replace(/[^A-Z0-9]/g, '') : '';
-  }
+// Fix the candle formation and indicator calculation
 
-  function textContainsSymbol(text, symbol){
-    if (!text || !symbol) return false;
-    const normalizedText = String(text).toUpperCase();
-    const normalizedSymbol = normalizeSymbolLabel(symbol);
-    if (!normalizedSymbol) return false;
-    const withSpace = normalizedSymbol;
-    const withSlash = normalizedSymbol.replace(/\s+/g, '/');
-    const compact = normalizedSymbol.replace(/\s+/g, '');
-    return normalizedText.includes(withSpace)
-      || normalizedText.includes(withSlash)
-      || normalizedText.includes(compact);
-  }
+// Initialize the lastCandleTime when the script starts
+let priceBuffer = [];
+let candlePrices = [];
+let candleInterval = 60000; // 1 minute in milliseconds
+let lastCandleTime = Date.now();
 
-  function parseMoneyValue(raw){
-    if (raw == null) return NaN;
-    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN;
-    const normalized = String(raw).replace(/[^0-9+\-,.]/g, '').replace(/,/g, '');
-    if (!normalized) return NaN;
-    const value = parseFloat(normalized);
-    return Number.isFinite(value) ? value : NaN;
-  }
+let time = Date.now();
+let hTime = humanTime(time);
+let startTime = hTime;
 
-  function extractMoneyCandidates(text){
-    if (!text) return [];
-    const source = String(text).replace(/\u00a0/g, ' ');
-    const regex = /[-+]?[$€£]?\s*\d+(?:[\s,]\d{3})*(?:\.\d+)?/g;
-    const matches = [];
-    let match;
-    while ((match = regex.exec(source))){
-      matches.push(match[0]);
-    }
-    return matches;
-  }
+let maxStepInCycle = 0;
 
-  function findAmountInText(text, target){
-    const matches = extractMoneyCandidates(text);
-    if (!matches.length) return NaN;
-    if (Number.isFinite(target)){
-      const tolerance = 0.01;
-      for (const token of matches){
-        const value = parseMoneyValue(token);
-        if (Number.isFinite(value) && Math.abs(value - target) <= tolerance){
-          return value;
+// const mode = 'REAL';
+const mode = 'DEMO';
+
+let cyclesToPlay = 30;
+let cyclesStats = [];
+
+let tradingAllowed = true;
+
+const limitWin1 = 50;
+const limitLoss1 = -50;
+ 
+const limitWin2 = 100;
+const limitLoss2 = -100;
+ 
+const limitWin3 = 150;
+const limitLoss3 = -150;
+ 
+let limitWin = limitWin1;
+let limitLoss = limitLoss1;
+
+// Add these variables near the top of your file with other global variables
+let isTradeOpen = false; // Track if a trade is currently open
+let currentBetStep = 0; // Track the current step in the bet array
+
+
+// create an observer instance
+let targetDiv = document.getElementsByClassName("scrollbar-container deals-list ps")[0];
+let observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(mutation) {
+
+        let newDeal = mutation.addedNodes[0];
+
+        // console.log('mutation: ',mutation,' NewDeal: ',newDeal);
+
+        function hasClass(element, className) {
+            return (' ' + element.className + ' ').indexOf(' ' + className+ ' ') > -1;
         }
-      }
-    }
-    for (const token of matches){
-      const value = parseMoneyValue(token);
-      if (Number.isFinite(value)) return value;
-    }
-    return NaN;
-  }
 
-  function findPnLInText(text){
-    const matches = extractMoneyCandidates(text);
-    if (!matches.length) return NaN;
-    for (let i = matches.length - 1; i >= 0; i -= 1){
-      const token = matches[i];
-      if (/[+$€£-]/.test(token)){
-        const value = parseMoneyValue(token);
-        if (Number.isFinite(value)) return value;
-      }
-    }
-    const fallback = parseMoneyValue(matches[matches.length - 1]);
-    return Number.isFinite(fallback) ? fallback : NaN;
-  }
-
-  function textContainsAmount(text, amount){
-    if (!text || !Number.isFinite(amount)) return false;
-    const normalizedText = String(text).replace(/\u00a0/g, ' ').replace(/\s+/g, '');
-    const fixed2 = amount.toFixed(2);
-    const fixed0 = amount % 1 === 0 ? amount.toFixed(0) : fixed2;
-    const candidates = [
-      '$' + fixed2,
-      '$' + fixed2.replace('.', ','),
-      '$ ' + fixed2,
-      '$' + fixed0,
-      '$' + fixed0.replace('.', ','),
-      '$ ' + fixed0,
-      fixed2,
-      fixed2.replace('.', ','),
-      fixed0,
-      fixed0.replace('.', ',')
-    ].map(token => token.replace(/\s+/g, ''));
-    return candidates.some(token => token && normalizedText.indexOf(token) !== -1);
-  }
-
-  function approxEqual(a, b, tolerance){
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-    const limit = Number.isFinite(tolerance) ? tolerance : 0.01;
-    return Math.abs(a - b) <= limit;
-  }
-
-  function normalizeResultKind(raw){
-    if (raw == null) return null;
-    const value = String(raw).toLowerCase();
-    if (!value) return null;
-    if (/(return|refund|tie|draw|equal|push|back)/.test(value)) return 'returned';
-    if (/(price-up|arrow-up|trend-up|win|won|success|profit|positive|gain)/.test(value)) return 'win';
-    if (/(price-down|arrow-down|trend-down|lose|loss|lost|fail|negative)/.test(value)) return 'loss';
-    return null;
-  }
-
-  function classifyResultFromPnL(pnl){
-    if (!Number.isFinite(pnl)) return null;
-    if (pnl > 0.009) return 'win';
-    if (pnl < -0.009) return 'loss';
-    return 'returned';
-  }
-
-  function formatDecisionReason(raw){
-    if (!raw) return 'IDLE';
-    if (raw === 'minute-strict') return 'STRICT';
-    if (raw.indexOf('minute-') === 0) return 'WINDOW';
-    const map = {
-      auto: 'AUTO',
-      init: 'INIT',
-      waiting: 'WAIT',
-      blocked: 'BLOCKED',
-      'manual-off': 'MANUAL',
-      'signals-pending': 'PENDING',
-      'trade-open': 'OPEN',
-      'not-placed': 'BLOCKED',
-      'result:won': 'RESULT_WIN',
-      'result:lost': 'RESULT_LOSS'
-    };
-    return map[raw] || raw.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
-  }
-
-  function applySignClass(node, value){
-    if (!node) return;
-    node.classList.remove('positive', 'negative');
-    if (!Number.isFinite(value) || value === 0) return;
-    node.classList.add(value > 0 ? 'positive' : 'negative');
-  }
-
-  function parseBetTimeMs(){
-    const raw = (betTimeDiv.textContent || betTimeDiv.innerText || '').trim();
-    if (!raw) return NaN;
-    const parts = raw.split(':');
-    let hours = 0;
-    let minutes = 0;
-    let seconds = 0;
-    if (parts.length === 3){
-      hours = parseInt(parts[0], 10);
-      minutes = parseInt(parts[1], 10);
-      seconds = parseInt(parts[2], 10);
-    } else if (parts.length === 2){
-      minutes = parseInt(parts[0], 10);
-      seconds = parseInt(parts[1], 10);
-    } else {
-      const digits = raw.match(/\d+/g);
-      if (!digits || !digits.length) return NaN;
-      if (digits.length === 1){
-        seconds = parseInt(digits[0], 10);
-      } else {
-        minutes = parseInt(digits[0], 10);
-        seconds = parseInt(digits[1], 10);
-      }
-    }
-    hours = Number.isFinite(hours) ? hours : 0;
-    minutes = Number.isFinite(minutes) ? minutes : 0;
-    seconds = Number.isFinite(seconds) ? seconds : 0;
-    return ((hours * 60 + minutes) * 60 + seconds) * 1000;
-  }
-
-  function setDirection(direction, note){
-    if (!ui.directionBox) return;
-    let bg = colors.gray;
-    if (direction === 'buy') bg = colors.green;
-    if (direction === 'sell') bg = colors.red;
-    ui.directionBox.style.background = bg;
-    ui.directionBox.style.padding = '2px 6px';
-    ui.directionBox.style.borderRadius = '4px';
-    const text = note ? `${direction} (${note})` : direction;
-    ui.directionBox.textContent = text;
-  }
-
-  function emitShiftKey(code){
-    const opts = { keyCode: code, which: code, shiftKey: true, bubbles: true };
-    try {
-      document.dispatchEvent(new KeyboardEvent('keydown', opts));
-      document.dispatchEvent(new KeyboardEvent('keyup', opts));
-    } catch (err) {
-      console.warn('[Verter] key emit failed', err);
-    }
-  }
-
-  function queueShiftKey(code, count, offset){
-    const total = Math.max(0, count|0);
-    let t = offset;
-    for (let i = 0; i < total; i++){
-      setTimeout(() => emitShiftKey(code), t);
-      t += KEY_PRESS_DELAY;
-    }
-    return t;
-  }
-
-  function prepareBetAmount(pressCount){
-    const resetEnd = queueShiftKey(KEY_CODES.DOWN, RESET_PRESS_COUNT, 0);
-    const adjustEnd = queueShiftKey(KEY_CODES.UP, Math.max(0, pressCount|0), resetEnd + KEY_PRESS_DELAY);
-    return adjustEnd + KEY_PRESS_DELAY;
-  }
-
-  function findBetInput(){
-    if (state.betInput && document.contains(state.betInput)) return state.betInput;
-    const selectors = [
-      '.call-put-block__in input',
-      '.deal__sum input',
-      '.deal__amount input',
-      'input[name="deal-sum"]',
-      'input[data-name="amount"]',
-      '.trade__input input',
-      '.deal-input input'
-    ];
-    for (let i = 0; i < selectors.length; i += 1){
-      try {
-        const node = document.querySelector(selectors[i]);
-        if (node){
-          state.betInput = node;
-          return node;
-        }
-      } catch (_err){}
-    }
-    state.betInput = null;
-    return null;
-  }
-
-  function readBetInputValue(){
-    const input = findBetInput();
-    if (!input) return NaN;
-    let raw = '';
-    if (typeof input.value === 'string'){ raw = input.value; }
-    if (!raw && typeof input.getAttribute === 'function'){ raw = input.getAttribute('value') || ''; }
-    if (!raw && input.dataset && input.dataset.value){ raw = input.dataset.value; }
-    return parseMoneyValue(raw);
-  }
-
-  function findOrderButton(direction){
-    const selectorSets = {
-      buy: [
-        '.btn.btn-call',
-        '.deal-buttons__btn--up',
-        'button[data-action="buy"]',
-        'button[data-type="call"]',
-        '.deal__button--call',
-        '.trade__button--up'
-      ],
-      sell: [
-        '.btn.btn-put',
-        '.deal-buttons__btn--down',
-        'button[data-action="sell"]',
-        'button[data-type="put"]',
-        '.deal__button--put',
-        '.trade__button--down'
-      ]
-    };
-    const list = direction === 'sell' ? selectorSets.sell : selectorSets.buy;
-    for (let i = 0; i < list.length; i += 1){
-      try {
-        const node = document.querySelector(list[i]);
-        if (node) return node;
-      } catch (_err){}
-    }
-    return null;
-  }
-
-  function schedulePrepare(reason){
-    state.lastPrepareReason = reason || state.lastPrepareReason || 'startup';
-    if (state.prepareTimer){
-      clearTimeout(state.prepareTimer);
-      state.prepareTimer = null;
-    }
-    state.prepareTimer = setTimeout(() => runPrepare(state.lastPrepareReason), 0);
-  }
-
-  function runPrepare(reason){
-    if (state.prepareLock){
-      return;
-    }
-    const next = state.nextBet || { step: 0, amount: 0, array: state.betArraySelector };
-    const expected = Number.isFinite(next.amount) ? next.amount : 0;
-    const input = findBetInput();
-    state.prepareLock = true;
-    if (!input){
-      logInfo('PREPARE', `amount=${fmtMoney(Number.isFinite(expected) ? expected : 0)} status=fail`);
-      state.prepareLock = false;
-      state.prepareTimer = setTimeout(() => runPrepare(reason), 1500);
-      return;
-    }
-    const entry = state.betArray.find(item => item.step === next.step) || state.betArray[0] || { pressCount: 0 };
-    const finishAt = prepareBetAmount(entry.pressCount || 0);
-    const verifyDelay = Math.max(0, finishAt + 120);
-    setTimeout(() => {
-      const actual = readBetInputValue();
-      const ok = Number.isFinite(actual) && Number.isFinite(next.amount) && approxEqual(actual, next.amount, 0.01);
-      const targetAmount = Number.isFinite(next.amount) ? next.amount : 0;
-      logInfo('PREPARE', `amount=${fmtMoney(targetAmount)} status=${ok ? 'ok' : 'fail'}`);
-      state.prepareLock = false;
-      state.prepareTimer = null;
-      if (!ok){
-        state.prepareTimer = setTimeout(() => runPrepare(reason), 1300);
-      }
-    }, verifyDelay);
-  }
-
-  function clamp(value, min, max){
-    if (value < min) return min;
-    if (value > max) return max;
-    return value;
-  }
-
-  function updateChartZoomDisplay(){
-    if (ui.chartZoomSlider){ ui.chartZoomSlider.value = String(state.chartOptions.zoom); }
-    if (ui.chartZoomValue){ ui.chartZoomValue.textContent = String(state.chartOptions.zoom); }
-  }
-
-  function setChartZoom(value){
-    const zoom = clamp(Math.round(value), 10, 300);
-    if (state.chartOptions.zoom === zoom){
-      updateChartZoomDisplay();
-      return;
-    }
-    state.chartOptions.zoom = zoom;
-    updateChartZoomDisplay();
-    renderChart();
-  }
-
-  const mode = (document.querySelector('.balance .js-hd.js-balance-real-USD') ? 'REAL' : 'DEMO');
-  const balanceDiv = mode === 'REAL'
-    ? document.querySelector('.js-hd.js-balance-real-USD')
-    : document.querySelector('.js-hd.js-balance-demo');
-  const percentProfitDiv = document.querySelector('.value__val-start');
-  const betTimeDiv = document.querySelector('.value__val');
-  const symbolDiv = document.querySelector('.current-symbol');
-  const tooltipNodes = Array.from(document.getElementsByClassName('tooltip-text'));
-  const priceTooltip = tooltipNodes.find(node => /Winnings amount you receive/i.test(node.textContent || ''));
-
-  if (!balanceDiv || !percentProfitDiv || !betTimeDiv || !symbolDiv || !priceTooltip){
-    console.error('[BOOT-FAIL] required platform elements were not found');
-    window.__VERTER_ACTIVE__ = false;
-    return;
-  }
-
-  const state = {
-    betArray: betArray1,
-    currentBetStep: 0,
-    betHistory: [],
-    betInput: null,
-    lastTradeTime: 0,
-    lastSignalCheck: 0,
-    isTradeOpen: false,
-    openTrade: null,
-    open: null,
-    currentWager: 0,
-    currentProfit: 0,
-    totalProfit: 0,
-    lossStreak: 0,
-    maxStep: 0,
-    minuteGate: false,
-    minuteSignalsPending: true,
-    minuteSignals: [],
-    latestSignals: [],
-    topSignals: [],
-    virtualStats: Object.create(null),
-    symbol: (symbolDiv.textContent || '').replace('/', ' ').trim(),
-    startTime: '',
-    startBalance: 0,
-    currentBalance: 0,
-    priceHistory: [],
-    candles: [],
-    currentCandle: null,
-    lastSeconds: -1,
-    chart: null,
-    chartOptions: { zoom: 80, scroll: 0, live: true },
-    pauseUntil: 0,
-    pauseLossThreshold: 3,
-    pauseMinutes: 5,
-    betArraySelector: 'A',
-    cycleProfit: 0,
-    nextBet: { step: 0, amount: betArray1[0].value, array: 'A' },
-    minuteBoundaryMode: MINUTE_BOUNDARY_MODE,
-    minuteTimer: {
-      lastMsLeft: null,
-      lastTick: 0,
-      cycleMs: 60000,
-      activeCycleId: 0,
-      tradeCycleId: -1,
-      lastBoundary: 0,
-      lastDrift: 0,
-      windowActivatedAt: 0,
-      windowConsumed: false,
-      windowSource: 'post',
-      targetCycleId: 0
-    },
-    lastDecision: { direction: 'flat', reason: 'init', trigger: null, at: 0 },
-    cycles: [],
-    signalCache: Object.create(null),
-    pendingTrade: null,
-    lastTopHit: null,
-    lastOrderDecision: { decision: 'skip', reason: 'init', at: 0 },
-    lastResult: { result: null, pnl: 0, at: 0, label: '—' },
-    prepareTimer: null,
-    prepareLock: false,
-    lastPrepareReason: 'startup',
-    lastSnapMinute: null
-  };
-
-  const watchers = {
-    tradeTimer: null,
-    signalTimer: null,
-    chartTimer: null
-  };
-
-  const dealIndicatorWatcher = {
-    observer: null,
-    container: null,
-    scanTimer: null,
-    selector: DEFAULT_DEALS_LIST_SELECTOR
-  };
-
-  const closedDealsWatcher = {
-    observer: null,
-    containers: new Set(),
-    scanTimer: null
-  };
-
-  const DEAL_INDICATOR_CENTER_PATH = [0, 0, 1, 1];
-  const DEAL_INDICATOR_LAST_PATH = [0, 0, 1, 2];
-  const DEAL_INDICATOR_PROCESSED_FLAG = '__verterDealIndicatorProcessed';
-
-  function detectDealListSelector(){
-    let selector = DEFAULT_DEALS_LIST_SELECTOR;
-    try {
-      if (typeof window !== 'undefined'){
-        const configured = window.VERTER_DEALS_LIST_SELECTOR;
-        if (typeof configured === 'string' && configured.trim()){
-          selector = configured.trim();
-        } else if (typeof localStorage !== 'undefined'){
-          const stored = localStorage.getItem('VERTER_DEALS_LIST_SELECTOR');
-          if (stored && stored.trim()) selector = stored.trim();
-        }
-      }
-    } catch (_err){}
-    return selector;
-  }
-
-  function findDealListContainer(selector){
-    if (!selector) return null;
-    try {
-      return document.querySelector(selector);
-    } catch (_err){
-      return null;
-    }
-  }
-
-  function ensureDealIndicatorObserver(){
-    const selector = detectDealListSelector();
-    if (dealIndicatorWatcher.selector !== selector){
-      dealIndicatorWatcher.selector = selector;
-      if (dealIndicatorWatcher.observer){
-        try { dealIndicatorWatcher.observer.disconnect(); } catch (_err){}
-      }
-      dealIndicatorWatcher.container = null;
-    }
-    if (!dealIndicatorWatcher.observer){
-      dealIndicatorWatcher.observer = new MutationObserver(handleDealIndicatorMutations);
-    }
-    const container = findDealListContainer(dealIndicatorWatcher.selector);
-    if (!container){
-      dealIndicatorWatcher.container = null;
-      return;
-    }
-    if (dealIndicatorWatcher.container === container) return;
-    try {
-      dealIndicatorWatcher.observer.disconnect();
-    } catch (_err){}
-    try {
-      dealIndicatorWatcher.observer.observe(container, { childList: true, subtree: false });
-      dealIndicatorWatcher.container = container;
-    } catch (err){
-      console.warn('[Verter] deal indicator observer attach failed', err);
-      dealIndicatorWatcher.container = null;
-    }
-  }
-
-  function observeDealIndicatorResults(){
-    ensureDealIndicatorObserver();
-    if (dealIndicatorWatcher.scanTimer){
-      clearInterval(dealIndicatorWatcher.scanTimer);
-    }
-    dealIndicatorWatcher.scanTimer = setInterval(ensureDealIndicatorObserver, 2000);
-  }
-
-  function handleDealIndicatorMutations(mutations){
-    if (!mutations) return;
-    mutations.forEach(mutation => {
-      if (!mutation || mutation.type !== 'childList') return;
-      const nodes = mutation.addedNodes;
-      if (!nodes || !nodes.length) return;
-      Array.from(nodes).forEach(node => processDealIndicatorCandidate(node));
-    });
-  }
-
-  function processDealIndicatorCandidate(node){
-    if (!node) return;
-    if (node.nodeType === 1){
-      if (evaluateDealIndicatorNode(node)) return;
-      const children = node.children ? Array.from(node.children) : [];
-      children.forEach(child => processDealIndicatorCandidate(child));
-      return;
-    }
-    if (node.nodeType === 11){
-      Array.from(node.childNodes || []).forEach(child => processDealIndicatorCandidate(child));
-    }
-  }
-
-  function evaluateDealIndicatorNode(node){
-    if (!node || node.nodeType !== 1) return false;
-    if (node[DEAL_INDICATOR_PROCESSED_FLAG]) return false;
-    const centerDiv = findDealIndicatorElementByPath(node, DEAL_INDICATOR_CENTER_PATH);
-    const lastDiv = findDealIndicatorElementByPath(node, DEAL_INDICATOR_LAST_PATH);
-    if (!centerDiv || !lastDiv) return false;
-    const centerUp = hasPriceUpClass(centerDiv);
-    const lastUp = hasPriceUpClass(lastDiv);
-    const result = classifyDealIndicatorResult(centerUp, lastUp);
-    if (!result) return false;
-    node[DEAL_INDICATOR_PROCESSED_FLAG] = true;
-    reportDealIndicatorResult(result);
-    return true;
-  }
-
-  function findDealIndicatorElementByPath(root, path){
-    if (!root || !path || !path.length) return null;
-    let current = root;
-    for (let i = 0; i < path.length; i += 1){
-      current = getDealIndicatorChild(current, path[i]);
-      if (!current) return null;
-    }
-    return current;
-  }
-
-  function getDealIndicatorChild(node, index){
-    if (!node || typeof index !== 'number') return null;
-    if (node.children && node.children.length > index) return node.children[index];
-    if (!node.childNodes) return null;
-    let seen = -1;
-    for (let i = 0; i < node.childNodes.length; i += 1){
-      const child = node.childNodes[i];
-      if (child && child.nodeType === 1){
-        seen += 1;
-        if (seen === index) return child;
-      }
-    }
-    return null;
-  }
-
-  function hasPriceUpClass(node){
-    if (!node || node.nodeType !== 1) return false;
-    if (node.classList && node.classList.contains('price-up')) return true;
-    const className = typeof node.className === 'string' ? node.className : (node.className && node.className.baseVal);
-    if (typeof className === 'string'){
-      return className.split(/\s+/).some(token => token === 'price-up');
-    }
-    return false;
-  }
-
-  function classifyDealIndicatorResult(centerUp, lastUp){
-    if (centerUp && lastUp) return 'won';
-    if (centerUp && !lastUp) return 'returned';
-    if (!centerUp && !lastUp) return 'lost';
-    return null;
-  }
-
-  function reportDealIndicatorResult(result){
-    if (!result) return;
-    const message = 'Indicator trade result detected: ' + result;
-    logTradeResultEvent(message);
-    try { console.log('[Verter]', message); } catch (_err){}
-  }
-
-  const ui = {
-    root: null,
-    signalBox: null,
-    directionBox: null,
-    winRateBox: null,
-    wagerBox: null,
-    totalProfitBox: null,
-    cycleProfitBox: null,
-    maxStepBox: null,
-    lossStreakBox: null,
-    startedBox: null,
-    startBalanceBox: null,
-    currentBalanceBox: null,
-    lastResultBox: null,
-    topList: null,
-    accuracyList: null,
-    chartCanvas: null,
-    chartCtx: null,
-    chartZoomSlider: null,
-    chartZoomValue: null,
-    cyclesBox: null,
-    tradingSymbol: null,
-    pauseButton: null
-  };
-
-  const SIGNAL_LABELS = {
-    ema_bullish: 'EMA Bullish',
-    ema_bearish: 'EMA Bearish',
-    rsi_oversold: 'RSI Oversold',
-    rsi_overbought: 'RSI Overbought',
-    macd_bull: 'MACD Bull',
-    macd_bear: 'MACD Bear',
-    stoch_buy: 'Stochastic Buy',
-    stoch_sell: 'Stochastic Sell',
-    trend_up: 'Trend Up',
-    trend_down: 'Trend Down',
-    sr_support: 'Near Support',
-    sr_resistance: 'Near Resistance',
-    pa_bull: 'Price Action Bull',
-    pa_bear: 'Price Action Bear',
-    mtf_buy: 'MTF Buy',
-    mtf_sell: 'MTF Sell'
-  };
-
-  function labelForSignal(key){
-    return SIGNAL_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-  }
-
-  function shortLabelForSignal(key){
-    const label = labelForSignal(key);
-    if (!label) return String(key || '').toUpperCase();
-    const parts = label.split(/\s+/).filter(Boolean);
-    if (!parts.length) return String(key || '').toUpperCase();
-    if (parts.length === 1) return parts[0].toUpperCase();
-    const first = parts[0];
-    if (first.length <= 6) return first.toUpperCase();
-    return first.slice(0, 5).toUpperCase();
-  }
-
-  function setText(node, text){ if (node) node.textContent = text; }
-  function setHtml(node, html){ if (node) node.innerHTML = html; }
-
-  function ensureStat(symbol, key){
-    if (!state.virtualStats[symbol]) state.virtualStats[symbol] = Object.create(null);
-    if (!state.virtualStats[symbol][key]) state.virtualStats[symbol][key] = { wins: 0, losses: 0, n: 0, wr: 0 };
-    return state.virtualStats[symbol][key];
-  }
-
-  function resetVirtualStats(symbol){
-    if (symbol && state.virtualStats[symbol]){
-      Object.keys(state.virtualStats[symbol]).forEach(k => {
-        state.virtualStats[symbol][k] = { wins: 0, losses: 0, n: 0, wr: 0 };
-      });
-    }
-  }
-
-  function isPaused(){
-    return Date.now() < state.pauseUntil;
-  }
-
-  function schedulePause(){
-    state.pauseUntil = Date.now() + state.pauseMinutes * 60000;
-    if (ui.directionBox){
-      ui.directionBox.style.background = colors.gray;
-      ui.directionBox.textContent = `PAUSED (${state.pauseMinutes}m)`;
-    }
-  }
-
-  function clearPause(){
-    state.pauseUntil = 0;
-  }
-
-  function updateMinuteBoundary(now){
-    const msLeft = parseBetTimeMs();
-    if (!Number.isFinite(msLeft)) return;
-    const timer = state.minuteTimer;
-    const prevLeft = timer.lastMsLeft;
-    const resetTolerance = 1000;
-
-    if (prevLeft != null && msLeft > prevLeft + resetTolerance){
-      const consumed = timer.windowConsumed;
-      timer.activeCycleId += 1;
-      timer.lastBoundary = now;
-      timer.lastDrift = Number.isFinite(prevLeft) ? prevLeft : 0;
-      timer.windowSource = 'post';
-      timer.windowConsumed = false;
-      timer.targetCycleId = timer.activeCycleId;
-      state.minuteSignalsPending = true;
-      state.signalCache = Object.create(null);
-      state.pendingTrade = null;
-
-      if (state.minuteBoundaryMode === 'off'){
-        state.minuteGate = true;
-      } else if (state.minuteBoundaryMode === 'strict'){
-        timer.windowSource = 'strict';
-        if (timer.tradeCycleId !== timer.targetCycleId){
-          state.minuteGate = true;
-          timer.windowActivatedAt = now;
+        let centerUp;
+        let centerDiv = newDeal.childNodes[0].children[0].children[1].children[1];
+        if (hasClass(centerDiv, 'price-up')){
+            centerUp = true;
         } else {
-          state.minuteGate = false;
+            centerUp = false;
         }
-      } else if (state.minuteBoundaryMode === 'window'){
-        if (!consumed && timer.tradeCycleId !== timer.targetCycleId){
-          state.minuteGate = true;
-          timer.windowActivatedAt = now;
+
+        let lastUp;
+        let lastDiv = newDeal.childNodes[0].children[0].children[1].children[2];
+        if (hasClass(lastDiv, 'price-up')){
+            lastUp = true;
         } else {
-          state.minuteGate = false;
+            lastUp = false;
         }
-      }
-    }
 
-    timer.lastMsLeft = msLeft;
-    timer.lastTick = now;
-    if (msLeft > timer.cycleMs) timer.cycleMs = msLeft;
+        let betProfit = parseFloat(lastDiv.textContent.replace(/[^\d.-]/g, ''));
 
-    if (state.minuteBoundaryMode === 'off'){
-      state.minuteGate = true;
-      timer.targetCycleId = timer.activeCycleId + 1;
-      return;
-    }
-
-    if (state.minuteBoundaryMode === 'window'){
-      const targetCycleId = timer.activeCycleId + 1;
-      if (msLeft <= MINUTE_WINDOW_MS){
-        if (!timer.windowConsumed && timer.tradeCycleId !== targetCycleId){
-          state.minuteGate = true;
-          timer.windowActivatedAt = now;
-          timer.windowSource = 'pre';
-          timer.targetCycleId = targetCycleId;
+        let tradeStatus;
+        if (centerUp && lastUp){
+            tradeStatus = 'won';            
+        } else if (centerUp && !lastUp) {
+            tradeStatus = 'returned';
+        } else if (!centerUp && !lastUp) {
+            tradeStatus = 'lost';
         }
-      }
+        if (betHistory.length > 0) {
+            betHistory[betHistory.length - 1].won = tradeStatus;
+            betHistory[betHistory.length - 1].profit = betProfit;
+        }
 
-      if (state.minuteGate && now - timer.windowActivatedAt > MINUTE_WINDOW_MS){
-        state.minuteGate = false;
-      }
-    } else if (state.minuteBoundaryMode === 'strict'){
-      timer.windowSource = 'strict';
-      if (state.minuteGate && now - timer.windowActivatedAt > 200){
-        state.minuteGate = false;
-      }
-    }
-  }
+        // Mark that the trade is now closed
+        isTradeOpen = false;
 
-  function buildUI(){
-    const existing = document.getElementById('verter-root');
-    if (existing){ existing.remove(); }
+        // Update bet step based on trade outcome
+        if (tradeStatus === 'won') {
+            // Reset to first step on win
+            currentBetStep = 0;
+        } else if (tradeStatus === 'lost') {
+            // Increase bet step on loss, but don't exceed array length
+            currentBetStep = Math.min(currentBetStep + 1, betArray.length - 1);
+        }
+        // For 'returned' status, keep the same bet step
 
-    const style = document.createElement('style');
-    style.id = 'verter-style';
-    style.textContent = `
-      #verter-root{position:fixed;left:50%;bottom:8px;transform:translateX(-50%);max-width:calc(100% - 24px);color:#fff;font-family:'Inter',sans-serif;z-index:2147483647;}
-      #verter-root *{box-sizing:border-box;}
-      .verter-container{display:flex;flex-direction:column;gap:8px;}
-      .verter-section{background:#161618;border:1px solid #2a2a2d;border-radius:6px;padding:10px;}
-      .verter-section h3{margin:0 0 6px;font-size:13px;text-transform:uppercase;letter-spacing:0.08em;color:#9ea0a8;}
-      .verter-top-row{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;}
-      .verter-bottom-row{display:flex;flex-wrap:wrap;gap:8px;}
-      .verter-trading{flex:0 0 360px;min-width:360px;max-width:360px;}
-      .verter-accuracy{flex:0 0 220px;min-width:220px;}
-      .verter-chart{flex:1 0 420px;min-width:420px;height:300px;}
-      .verter-top-signals{flex:1 1 220px;min-width:220px;}
-      .verter-chart canvas{width:100%;height:100%;background:#101014;border-radius:6px;}
-      .verter-chart-controls{display:flex;align-items:center;gap:8px;font-size:11px;margin-bottom:8px;color:#9ea0a8;}
-      .verter-chart-controls label{font-weight:600;text-transform:uppercase;letter-spacing:0.08em;}
-      .verter-chart-controls input[type="range"]{flex:1;}
-      .verter-info-table{display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:12px;}
-      .verter-info-label{opacity:0.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-      .verter-info-value{text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums;}
-      .verter-info-value.positive{color:${colors.green};}
-      .verter-info-value.negative{color:${colors.red};}
-      .verter-info-table.verter-mini{margin-top:6px;}
-      .verter-signal-list{max-height:260px;overflow:hidden;font-size:11px;display:flex;flex-direction:column;gap:4px;}
-      .verter-signal-row{display:flex;justify-content:space-between;align-items:center;padding:3px 6px;background:#1d1d21;border-radius:4px;}
-      .verter-signal-row strong{font-weight:600;}
-      .verter-cycles-section{flex:1 1 560px;min-width:360px;}
-      .verter-cycles{display:flex;flex-wrap:wrap;gap:4px;max-height:80px;overflow:hidden;}
-      .verter-cycle{padding:3px 6px;border-radius:4px;font-size:11px;background:#1f1f23;}
-      .verter-pause-section{flex:0 0 320px;min-width:260px;}
-      .verter-pause{display:flex;justify-content:space-between;align-items:center;font-size:12px;}
-      .verter-btn{background:#1f1f23;color:#fff;border:1px solid #303035;border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;}
-      .verter-btn:hover{background:#2a2a30;}
-    `;
-    document.head.appendChild(style);
+        symbolName = symbolDiv.textContent.replace("/", " ");
+        tradingSymbolDiv.innerHTML = symbolName;
+        betTime = betTimeDiv.textContent;
+        let timeParts = betTime.split(':');
+        let seconds = parseInt(timeParts[0]) * 3600 + parseInt(timeParts[1]) * 60 + parseInt(timeParts[2]);
 
-    const root = document.createElement('div');
-    root.id = 'verter-root';
-    Object.assign(root.style,{position:'fixed',left:'50%',top:'',bottom:'8px',transform:'translateX(-50%)',maxWidth:'calc(100% - 24px)',zIndex:2147483647});
-    root.style.cursor = 'move';
-    root.addEventListener('pointerdown', e => {
-      if (e.button!==0) return;
-      const r = root.getBoundingClientRect(), dx = e.clientX - r.left, dy = e.clientY - r.top;
-      root.setPointerCapture(e.pointerId);
-      root.style.transform='';
-      root.style.bottom='';
-      const move = ev => {
-        root.style.left = (ev.clientX - dx) + 'px';
-        root.style.top = (ev.clientY - dy) + 'px';
-      };
-      const up = () => { root.releasePointerCapture(e.pointerId); root.removeEventListener('pointermove',move); root.removeEventListener('pointerup',up); };
-      root.addEventListener('pointermove',move); root.addEventListener('pointerup',up);
+        let totalBalance = prevBalance + betProfit;
+
+        // logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit);
+        logTradeToGoogleSheets(
+            appversion,
+            symbolName,
+            betHistory[betHistory.length - 1].time,
+            seconds,
+            betHistory[betHistory.length - 1].openPrice,
+            globalPrice,
+            betHistory[betHistory.length - 1].betValue,
+            tradeStatus,
+            betProfit,
+            totalBalance
+        );
+
+        // console.log('Bet status: ',tradeStatus);
+
     });
+});
+// configuration of the observer:
+let config = { attributes: false, childList: true, characterData: false };
+// pass in the target node, as well as the observer options
+observer.observe(targetDiv, config);
+// later, you can stop observing
+// observer.disconnect();
+ 
+const betArray1 = [
+    {step: 0, value: 1, pressCount: 0},
+    {step: 1, value: 3, pressCount: 2},
+    {step: 2, value: 8, pressCount: 7},
+    {step: 3, value: 20, pressCount: 11},
+    {step: 4, value: 40, pressCount: 15},
+    {step: 5, value: 90, pressCount: 21},
+    {step: 6, value: 200, pressCount: 24},
+    {step: 7, value: 400, pressCount: 27 },
+    {step: 8, value: 900, pressCount: 33 }
+];
 
-    const container = document.createElement('div');
-    container.className = 'verter-container';
+const betArray2 = [
+    {step: 0, value: 1, pressCount: 0},
+    {step: 1, value: 3, pressCount: 2},
+    {step: 2, value: 8, pressCount: 7},
+    {step: 3, value: 20, pressCount: 11},
+    {step: 4, value: 40, pressCount: 15},
+    {step: 5, value: 90, pressCount: 21},
+    {step: 6, value: 200, pressCount: 24},
+    {step: 7, value: 400, pressCount: 27 },
+    {step: 8, value: 900, pressCount: 33 }
+];
 
-    const topRow = document.createElement('div');
-    topRow.className = 'verter-top-row';
+const betArray3 = [
+    {step: 0, value: 1, pressCount: 0},
+    {step: 1, value: 3, pressCount: 2},
+    {step: 2, value: 8, pressCount: 7},
+    {step: 3, value: 20, pressCount: 11},
+    {step: 4, value: 40, pressCount: 15},
+    {step: 5, value: 90, pressCount: 21},
+    {step: 6, value: 200, pressCount: 24},
+    {step: 7, value: 400, pressCount: 27 },
+    {step: 8, value: 900, pressCount: 33 }
+];
 
-    const tradingSection = document.createElement('div');
-    tradingSection.className = 'verter-section verter-trading';
-    const tradingTitle = document.createElement('h3');
-    tradingTitle.textContent = 'Trading · ' + state.symbol;
-    const tradingTable = document.createElement('div');
-    tradingTable.className = 'verter-info-table';
+let betArray = betArray1;
+let betHistory = [];
+let priceHistory = [];
+let currentBalance;
+let currentProfit = 0;
+let profitDiv;
+let signalDiv;
+let profitPercentDivAdvisor;
+let timeDiv;
+let wonDiv;
+let wagerDiv;
+let tradingSymbolDiv;
+let totalWager = 0;
+let historyDiv;
+let cyclesDiv;
+let cyclesHistoryDiv;
+let totalProfitDiv;
+let historyBetDiv;
+let sqzDiv;
+let trendDiv;
+let globalTrendDiv;
+let tradeDirectionDiv;
+let globalPrice;
+let updateStartPrice = false;
+let firstTradeBlock = false;
+let targetElement2;
+let graphContainer;
+let mamaBar;
+let famaBar;
+let balanceDiv;
+let lastPrice;
 
-    function addTradingRow(id, label, value){
-      const labelNode = document.createElement('span');
-      labelNode.className = 'verter-info-label';
-      labelNode.textContent = label;
-      const valueNode = document.createElement('span');
-      valueNode.className = 'verter-info-value';
-      valueNode.id = id;
-      valueNode.textContent = value;
-      tradingTable.appendChild(labelNode);
-      tradingTable.appendChild(valueNode);
-      return valueNode;
+const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
+if (mode == 'REAL'){
+    balanceDiv = document.getElementsByClassName("js-hd js-balance-real-USD")[0];
+} else {
+    balanceDiv = document.getElementsByClassName("js-hd js-balance-demo")[0];
+}
+
+const symbolDiv = document.getElementsByClassName("current-symbol")[0];
+let symbolName = symbolDiv.textContent.replace("/", " ");
+
+const betTimeDiv = document.getElementsByClassName("value__val")[0];
+let betTime = betTimeDiv.textContent;
+
+let priceString = balanceDiv.innerHTML;
+priceString = priceString.split(',').join('');
+
+let startBalance = parseFloat(priceString);
+let prevBalance = startBalance;
+console.log('Start Balance: ',startBalance);
+
+const redColor = '#B90000';
+const greenColor = '#009500';
+
+const winCycle = document.createElement("div");
+winCycle.style.backgroundColor = greenColor;
+winCycle.style.padding = "5px";
+winCycle.style.margin = "15px 10px 0 0";
+winCycle.style.display = "inline-block";
+winCycle.style.borderRadius = "3px";
+
+const loseCycle = document.createElement("div");
+loseCycle.style.backgroundColor = redColor;
+loseCycle.style.padding = "5px";
+loseCycle.style.margin = "15px 10px 0 0";
+loseCycle.style.display = "inline-block";
+loseCycle.style.borderRadius = "3px";
+
+const targetElem = document.getElementsByClassName("tooltip-text");
+const textToSearch = "Winnings amount you receive";
+for (i = 0; i< targetElem.length;i++){
+    let textContent = targetElem[i].textContent || targetElem[i].innerText;
+    if (textContent.includes(textToSearch)){
+        targetElement2 = document.getElementsByClassName("tooltip-text")[i];
     }
+}
+const buyButton = document.getElementsByClassName("btn btn-call")[0];
+let text = targetElement2.innerHTML;
+let startPrice = parseFloat(text.match(/\d+.\d+(?=\ a)/g)[0]);
+priceHistory.push(startPrice);
+console.log('Start Price: ',startPrice);
 
-    ui.tradingSymbol = tradingTitle;
-    ui.startedBox = addTradingRow('verter-started', 'Started', '—');
-    ui.startBalanceBox = addTradingRow('verter-start-bal', 'Start Balance', fmtMoney(0));
-    ui.currentBalanceBox = addTradingRow('verter-current-bal', 'Current Balance', fmtMoney(0));
-    ui.lastResultBox = addTradingRow('verter-last-result', 'Last Result', '—');
-    ui.wagerBox = addTradingRow('verter-wager', 'Current Wager', fmtMoney(0));
-    ui.cycleProfitBox = addTradingRow('verter-cycle', 'Cycle Profit', fmtMoney(0));
-    ui.totalProfitBox = addTradingRow('verter-total', 'Total Profit', fmtMoney(0));
-    ui.winRateBox = addTradingRow('verter-winrate', 'Win Rate %', '0%');
-    ui.lossStreakBox = addTradingRow('verter-losses', 'Loss Streak', '0');
-    ui.maxStepBox = addTradingRow('verter-step', 'Max Step', '0');
+let lastMin = startPrice;
+let lastMax = startPrice;
+let multiplyFactorMesa = 100 / startPrice;
+let multiplyFactorSqzMom = 50 / startPrice;
 
-    const signalTable = document.createElement('div');
-    signalTable.className = 'verter-info-table verter-mini';
-    const signalLabel = document.createElement('span');
-    signalLabel.className = 'verter-info-label';
-    signalLabel.textContent = 'Signal';
-    const signalValue = document.createElement('span');
-    signalValue.className = 'verter-info-value';
-    signalValue.id = 'verter-signal';
-    signalValue.textContent = '—';
-    const directionLabel = document.createElement('span');
-    directionLabel.className = 'verter-info-label';
-    directionLabel.textContent = 'Direction';
-    const directionValue = document.createElement('span');
-    directionValue.className = 'verter-info-value';
-    directionValue.id = 'verter-direction';
-    directionValue.textContent = 'flat';
-    signalTable.appendChild(signalLabel);
-    signalTable.appendChild(signalValue);
-    signalTable.appendChild(directionLabel);
-    signalTable.appendChild(directionValue);
+let betInput = document.getElementsByClassName("call-put-block__in")[0].querySelector("input");
+let betDivContent = document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value;
+let betValue = parseFloat(betDivContent);
 
-    tradingSection.append(tradingTitle, tradingTable, signalTable);
+let maxStepDiv;
 
-    const accuracySection = document.createElement('div');
-    accuracySection.className = 'verter-section verter-accuracy';
-    accuracySection.innerHTML = `
-      <h3>Signals Accuracy</h3>
-      <div id="verter-accuracy" class="verter-signal-list"></div>
-    `;
+let buy = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 87, shiftKey: true}));
+let sell = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 83, shiftKey: true}));
+let decreaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 65, shiftKey: true}));
+let increaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 68, shiftKey: true}));
+let setValue = v => document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value = v; // todo: after that press ENTER event?
 
-    const topSection = document.createElement('div');
-    topSection.className = 'verter-section verter-top-signals';
-    topSection.innerHTML = `
-      <h3>Top Signals</h3>
-      <div id="verter-top" class="verter-signal-list"></div>
-    `;
-
-    const chartSection = document.createElement('div');
-    chartSection.className = 'verter-section verter-chart';
-    chartSection.innerHTML = `
-      <h3>Candle Chart</h3>
-      <div class="verter-chart-controls">
-        <label for="verter-chart-zoom">Zoom</label>
-        <input id="verter-chart-zoom" type="range" min="10" max="300" step="1" value="${state.chartOptions.zoom}">
-        <span id="verter-chart-zoom-value">${state.chartOptions.zoom}</span>
-      </div>
-      <canvas id="verter-chart" width="600" height="280"></canvas>
-    `;
-
-    topRow.append(tradingSection, accuracySection, chartSection, topSection);
-
-    const bottomRow = document.createElement('div');
-    bottomRow.className = 'verter-bottom-row';
-
-    const cyclesSection = document.createElement('div');
-    cyclesSection.className = 'verter-section verter-cycles-section';
-    cyclesSection.innerHTML = `
-      <h3>Cycles History</h3>
-      <div id="verter-cycles" class="verter-cycles"></div>
-    `;
-
-    const pauseSection = document.createElement('div');
-    pauseSection.className = 'verter-section verter-pause-section';
-    pauseSection.innerHTML = `
-      <div class="verter-pause">
-        <span>Auto-pause after loss streak</span>
-        <button id="verter-pause-reset" class="verter-btn">Pause Reset</button>
-      </div>
-    `;
-
-    bottomRow.append(cyclesSection, pauseSection);
-    container.append(topRow, bottomRow);
-    root.appendChild(container);
-    document.body.appendChild(root);
-
-    ui.root = root;
-    ui.signalBox = root.querySelector('#verter-signal');
-    ui.directionBox = root.querySelector('#verter-direction');
-    ui.winRateBox = root.querySelector('#verter-winrate');
-    ui.wagerBox = root.querySelector('#verter-wager');
-    ui.cycleProfitBox = root.querySelector('#verter-cycle');
-    ui.totalProfitBox = root.querySelector('#verter-total');
-    ui.maxStepBox = root.querySelector('#verter-step');
-    ui.lossStreakBox = root.querySelector('#verter-losses');
-    ui.startedBox = root.querySelector('#verter-started');
-    ui.startBalanceBox = root.querySelector('#verter-start-bal');
-    ui.currentBalanceBox = root.querySelector('#verter-current-bal');
-    ui.lastResultBox = root.querySelector('#verter-last-result');
-    ui.pauseButton = root.querySelector('#verter-pause-reset');
-    ui.topList = root.querySelector('#verter-top');
-    ui.accuracyList = root.querySelector('#verter-accuracy');
-    ui.chartCanvas = root.querySelector('#verter-chart');
-    ui.chartCtx = ui.chartCanvas ? ui.chartCanvas.getContext('2d') : null;
-    ui.chartZoomSlider = root.querySelector('#verter-chart-zoom');
-    ui.chartZoomValue = root.querySelector('#verter-chart-zoom-value');
-    ui.cyclesBox = root.querySelector('#verter-cycles');
-
-    if (ui.pauseButton){
-      ui.pauseButton.addEventListener('click', () => {
-        clearPause();
-        state.lastOrderDecision = { decision: 'skip', reason: 'pause_reset', at: Date.now() };
-        logInfo('ORDER fail', 'reason=pause_reset');
-      });
+let updateMinMax = () => {
+    if (globalPrice > lastMax) {
+        lastMax = globalPrice;
     }
-
-    if (ui.chartZoomSlider){
-      ui.chartZoomSlider.addEventListener('input', ev => {
-        const next = parseInt(ev.target.value, 10);
-        if (!Number.isFinite(next)) return;
-        setChartZoom(next);
-      });
+    if (globalPrice < lastMin) {
+        lastMin = globalPrice;
     }
+}
 
-    if (ui.chartCanvas){
-      const wheelHandler = ev => {
-        ev.preventDefault();
-        const delta = ev.deltaY < 0 ? -5 : 5;
-        setChartZoom(state.chartOptions.zoom + delta);
-      };
-      try {
-        ui.chartCanvas.addEventListener('wheel', wheelHandler, { passive: false });
-      } catch (err){
-        ui.chartCanvas.addEventListener('wheel', wheelHandler);
-      }
+let lastTradeTime = 0;
+let minTimeBetweenTrades = 5000; // 5 seconds minimum between trades
+let lastSignalCheck = 0;
+let signalCheckInterval = 1000; // Check for trading signals every 1 second
+
+let queryPrice = () => {
+    time = Date.now();
+    hTime = humanTime(time);
+    timeDiv.innerHTML = hTime;
+    
+    // Get the current price
+    text = targetElement2.innerHTML;
+    let priceMatch = text.match(/\d+.\d+(?=\ a)/g);
+    
+    if (priceMatch && priceMatch[0]) {
+        globalPrice = parseFloat(priceMatch[0]);
+        
+        // Only add to price history if it's a new price
+        if (globalPrice !== priceHistory[priceHistory.length - 1]) {
+            priceHistory.push(globalPrice);
+            
+            // Keep priceHistory at a reasonable size (last 500 data points)
+            if (priceHistory.length > 500) {
+                priceHistory.shift();
+            }
+            
+            // Update last price
+            lastPrice = globalPrice;
+            
+            // Update min/max
+            updateMinMax();
+        }
+        
+        // Calculate indicators with the updated price history
+        calculateIndicators();
     }
-
-    updateChartZoomDisplay();
-
-    setDirection('flat');
-  }
-
-  function updateTradingInfo(){
-    const symbolText = (symbolDiv.textContent || '').replace('/', ' ').trim();
-    const winCount = state.betHistory.filter(t => t.result === 'won').length;
-    const tradeCount = state.betHistory.length;
-    const rate = tradeCount ? (winCount / tradeCount) * 100 : 0;
-    syncProfit();
-    const lastRes = state.lastResult || {};
-    const lastPnl = Number.isFinite(lastRes.pnl) ? lastRes.pnl : 0;
-    const labelWord = lastRes.label
-      || (lastRes.result === 'won'
-        ? 'WIN'
-        : (lastRes.result === 'lost' ? 'LOSS' : (lastRes.result === 'returned' ? 'RET' : '—')));
-    const lastLabel = labelWord && labelWord !== '—'
-      ? `${labelWord} ${fmtMoney(lastPnl)}`
-      : '—';
-
-    if (ui.tradingSymbol) ui.tradingSymbol.textContent = 'Trading · ' + symbolText;
-    if (ui.wagerBox){
-      ui.wagerBox.textContent = fmtMoney(state.currentWager);
-      applySignClass(ui.wagerBox, state.currentWager);
-    }
-    if (ui.totalProfitBox){
-      ui.totalProfitBox.textContent = fmtMoney(state.totalProfit);
-      applySignClass(ui.totalProfitBox, state.totalProfit);
-    }
-    if (ui.winRateBox) ui.winRateBox.textContent = rate.toFixed(1) + '%';
-    if (ui.lossStreakBox) ui.lossStreakBox.textContent = String(state.lossStreak);
-    if (ui.maxStepBox) ui.maxStepBox.textContent = String(state.maxStep || 0);
-    if (ui.startedBox) ui.startedBox.textContent = state.startTime || '—';
-    if (ui.startBalanceBox) ui.startBalanceBox.textContent = fmtMoney(state.startBalance);
-    if (ui.currentBalanceBox){
-      ui.currentBalanceBox.textContent = fmtMoney(state.currentBalance);
-      applySignClass(ui.currentBalanceBox, state.currentBalance - state.startBalance);
-    }
-    if (ui.lastResultBox){
-      ui.lastResultBox.textContent = lastLabel;
-      applySignClass(ui.lastResultBox, lastPnl);
-    }
-  }
-
-  function renderSignals(list, data){
-    if (!list) return;
-    if (!data.length){
-      list.innerHTML = '<div style="opacity:0.6;">No data</div>';
-      return;
-    }
-    list.innerHTML = data.map(item => {
-      return `<div class="verter-signal-row"><strong>${item.label}</strong><span>${item.value}</span></div>`;
-    }).join('');
-  }
-
-  function handleTopSignalHit(signal, timestamp){
-    const ts = Number.isFinite(timestamp) ? timestamp : Date.now();
-    const topIndex = state.topSignals.findIndex(item => item.key === signal.key);
-    if (topIndex === -1) return;
-    const topItem = state.topSignals[topIndex] || {};
-    const score = Number.isFinite(topItem.wr) ? Math.round(topItem.wr * 100 - 50) : 0;
-    state.pendingTrade = {
-      key: signal.key,
-      direction: signal.direction,
-      rank: topIndex + 1,
-      score,
-      at: ts
-    };
-    state.lastTopHit = {
-      key: signal.key,
-      direction: signal.direction,
-      at: ts
-    };
-    const dirText = String(signal.direction).toUpperCase();
-    logInfo('TOP HIT', `key=${signal.key} dir=${dirText} rank=${topIndex + 1} score=${score}`);
-    logInfo('QUEUE', `key=${signal.key} dir=${dirText} rank=${topIndex + 1}`);
-  }
-
-  function renderAccuracy(){
-    const stats = state.virtualStats[state.symbol] || {};
-    const rows = Object.keys(stats)
-      .map(key => ({
-        key,
-        wr: stats[key].wr,
-        wins: stats[key].wins,
-        losses: stats[key].losses,
-        n: stats[key].n
-      }))
-      .sort((a, b) => b.wr - a.wr || b.n - a.n)
-      .map(item => ({
-        label: `${labelForSignal(item.key)} (${item.n})`,
-        value: fmtPct(item.wr * 100)
-      }));
-    renderSignals(ui.accuracyList, rows);
-  }
-
-  function renderTopSignals(){
-    const rows = state.topSignals.map(sig => ({
-      label: `${labelForSignal(sig.key)} (${sig.n})`,
-      value: fmtPct(sig.wr * 100)
-    }));
-    renderSignals(ui.topList, rows);
-  }
-
-  function renderCycles(){
-    if (!ui.cyclesBox) return;
-    if (!state.cycles.length){
-      ui.cyclesBox.innerHTML = '<div style="opacity:0.6;">No trades yet</div>';
-      return;
-    }
-    ui.cyclesBox.innerHTML = state.cycles.slice(-20).map(item => {
-      const color = item.result === 'won'
-        ? colors.green
-        : (item.result === 'lost' ? colors.red : colors.gray);
-      return `<div class="verter-cycle" style="background:${color}1a;border:1px solid ${color};">${item.result.toUpperCase()} · ${fmtMoney(item.profit)} · step ${item.step}</div>`;
-    }).join('');
-  }
-
-  function renderChart(){
-    const canvas = ui.chartCanvas;
-    const ctx = ui.chartCtx;
-    if (!canvas || !ctx) return;
-    const candles = state.candles;
-    const W = canvas.width;
-    const H = canvas.height;
-    ctx.clearRect(0, 0, W, H);
-    if (!candles.length) return;
-    const visible = Math.min(state.chartOptions.zoom, candles.length);
-    const slice = candles.slice(-visible);
-    const min = Math.min(...slice.map(c => c.low));
-    const max = Math.max(...slice.map(c => c.high));
-    const range = max - min || 1;
-    const width = W / slice.length;
-    slice.forEach((candle, idx) => {
-      const x = idx * width;
-      const highY = H - ((candle.high - min) / range) * H;
-      const lowY = H - ((candle.low - min) / range) * H;
-      const openY = H - ((candle.open - min) / range) * H;
-      const closeY = H - ((candle.close - min) / range) * H;
-      ctx.beginPath();
-      ctx.strokeStyle = '#555';
-      ctx.moveTo(x + width / 2, highY);
-      ctx.lineTo(x + width / 2, lowY);
-      ctx.stroke();
-      ctx.fillStyle = candle.close >= candle.open ? colors.green : colors.red;
-      const top = Math.min(openY, closeY);
-      const height = Math.max(1, Math.abs(closeY - openY));
-      ctx.fillRect(x + 2, top, Math.max(3, width - 4), height);
-    });
-  }
-
-  function parsePrice(){
-    const match = priceTooltip.innerHTML.match(/\d+\.\d+/);
-    return match ? parseFloat(match[0]) : NaN;
-  }
-
-  function updatePrice(){
-    const price = parsePrice();
-    if (!Number.isFinite(price)) return;
-
-    const now = Date.now();
-    state.priceHistory.push(price);
-    if (state.priceHistory.length > 600) state.priceHistory.shift();
-    updateCandles(now, price);
-  }
-
-  function updateCandles(now, price){
-    if (!state.currentCandle){
-      state.currentCandle = {
-        tOpen: now,
-        tClose: now,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-        volume: 0
-      };
-      state.candles.push(state.currentCandle);
-    }
-
-    const currentSeconds = new Date(now).getSeconds();
-    const prevSeconds = state.lastSeconds;
-
-    if (currentSeconds === 0 && prevSeconds !== 0){
-      state.currentCandle.tClose = now;
-      state.currentCandle.close = price;
-      handleMinuteClose(state.currentCandle);
-      const newCandle = {
-        tOpen: now,
-        tClose: now,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-        volume: 0
-      };
-      state.currentCandle = newCandle;
-      state.candles.push(newCandle);
-      if (state.candles.length > MAX_CANDLES) state.candles.shift();
+    
+    // Update balance and profit
+    priceString = balanceDiv.innerHTML;
+    priceString = priceString.split(',').join('');
+    currentBalance = parseFloat(priceString);
+    currentProfit = currentBalance - startBalance;
+    currentProfit = Math.round(currentProfit * 100) / 100;
+    
+    profitDiv.innerHTML = currentProfit;
+    
+    if (currentProfit < 0) {
+        profitDiv.style.background = redColor;
+    } else if (currentProfit > 0) {
+        profitDiv.style.background = greenColor;
     } else {
-      state.currentCandle.tClose = now;
-      state.currentCandle.close = price;
+        profitDiv.style.background = 'inherit';
     }
-
-    if (price > state.currentCandle.high) state.currentCandle.high = price;
-    if (price < state.currentCandle.low) state.currentCandle.low = price;
-    state.currentCandle.volume += 1;
-
-    state.lastSeconds = currentSeconds;
-  }
-
-  function handleMinuteClose(candle){
-    const symbol = state.symbol;
-    const list = state.candles;
-    if (!list.length) return;
-    const idx = list.length - 1;
-    const horizon = Math.max(1, PAPER_HORIZON);
-    const fromIdx = Math.max(0, idx - (horizon - 1));
-    const openPrice = list[fromIdx].open;
-    const closePrice = list[idx].close;
-    const delta = closePrice - openPrice;
-    const resultDirection = delta > 0 ? 'buy' : (delta < 0 ? 'sell' : 'flat');
-
-    const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
-    const topNames = state.topSignals.slice(0, 3).map(sig => shortLabelForSignal(sig.key));
-    const decisionPlaced = state.lastDecision && state.lastDecision.direction && state.lastDecision.direction !== 'flat';
-    const triggerTag = state.lastDecision && state.lastDecision.trigger ? shortLabelForSignal(state.lastDecision.trigger) : null;
-    const includeBoundaryFields = state.minuteBoundaryMode === 'window' || state.minuteBoundaryMode === 'strict';
-    const boundaryReason = includeBoundaryFields
-      ? formatDecisionReason(state.minuteBoundaryMode === 'strict' ? 'minute-strict' : 'minute-window')
-      : null;
-    const driftLabel = includeBoundaryFields
-      ? formatSigned(Number.isFinite(state.minuteTimer.lastDrift) ? state.minuteTimer.lastDrift : 0, 'ms')
-      : null;
-    const label = 'M1 ' + humanTime(candle.tClose || Date.now());
-    const messageParts = [
-      `${symbol}`,
-      `o=${fmt2(candle.open, 5)}`,
-      `h=${fmt2(candle.high, 5)}`,
-      `l=${fmt2(candle.low, 5)}`,
-      `c=${fmt2(candle.close, 5)}`,
-      `payout=${Number.isFinite(payout) ? payout : '—'}`,
-      `top=[${topNames.join(',')}]`
-    ];
-    if (triggerTag) messageParts.push(`via=${triggerTag}`);
-    messageParts.push(`decision=${decisionPlaced ? 'place' : 'hold'}`);
-    if (includeBoundaryFields){
-      messageParts.push(`reason=${boundaryReason}`);
-      messageParts.push(`drift_ms=${driftLabel}`);
+    
+    // Only check for trading signals at specified intervals
+    // This prevents excessive trading while maintaining up-to-date indicators
+    if (time - lastSignalCheck >= signalCheckInterval) {
+        lastSignalCheck = time;
+        
+        // Only consider trading if enough time has passed since last trade
+        if (time - lastTradeTime >= minTimeBetweenTrades) {
+            tradeLogic();
+        }
     }
-    logM1CloseEvent({ label, text: messageParts.join(' ') });
+}
 
-    if (resultDirection === 'flat'){ return; }
+// Add Higher Highs/Lower Lows detection
+function detectTrend(prices, period = 10) {
+    if (prices.length < period) return 'flat';
+    
+    const recentPrices = prices.slice(-period);
+    let higherHighs = 0;
+    let lowerLows = 0;
+    
+    for (let i = 1; i < recentPrices.length; i++) {
+        if (recentPrices[i] > recentPrices[i-1]) higherHighs++;
+        if (recentPrices[i] < recentPrices[i-1]) lowerLows++;
+    }
+    
+    const ratio = higherHighs / (higherHighs + lowerLows);
+    if (ratio > 0.7) return 'strong_up';
+    if (ratio > 0.6) return 'up';
+    if (ratio < 0.3) return 'strong_down';
+    if (ratio < 0.4) return 'down';
+    return 'flat';
+}
 
-    state.minuteSignals.forEach(sig => {
-      const stat = ensureStat(symbol, sig.key);
-      if (sig.direction === resultDirection){
-        stat.wins += 1;
-      } else {
-        stat.losses += 1;
-      }
-      stat.n += 1;
-      stat.wr = stat.n ? stat.wins / stat.n : 0;
+// Add Fractal detection (key reversal points)
+function findFractals(prices, period = 5) {
+    if (prices.length < period * 2 + 1) return { bullish: false, bearish: false };
+    
+    const center = prices.length - period - 1;
+    const centerPrice = prices[center];
+    
+    // Bullish fractal (low point)
+    let isBullishFractal = true;
+    for (let i = center - period; i <= center + period; i++) {
+        if (i !== center && prices[i] <= centerPrice) {
+            isBullishFractal = false;
+            break;
+        }
+    }
+    
+    // Bearish fractal (high point)
+    let isBearishFractal = true;
+    for (let i = center - period; i <= center + period; i++) {
+        if (i !== center && prices[i] >= centerPrice) {
+            isBearishFractal = false;
+            break;
+        }
+    }
+    
+    return { 
+        bullish: isBullishFractal, 
+        bearish: isBearishFractal,
+        price: centerPrice 
+    };
+}
+
+// Add Rate of Change (ROC)
+function calculateROC(prices, period = 12) {
+    if (prices.length < period + 1) return 0;
+    
+    const currentPrice = prices[prices.length - 1];
+    const pastPrice = prices[prices.length - 1 - period];
+    
+    return ((currentPrice - pastPrice) / pastPrice) * 100;
+}
+
+// Add Awesome Oscillator (price-based momentum)
+function calculateAwesomeOscillator(prices) {
+    if (prices.length < 34) return 0;
+    
+    // Calculate 5-period and 34-period simple moving averages
+    const sma5 = calculateSMA(prices, 5);
+    const sma34 = calculateSMA(prices, 34);
+    
+    return sma5 - sma34;
+}
+
+// Add Simple Moving Average helper
+function calculateSMA(prices, period) {
+    if (prices.length < period) return prices[prices.length - 1];
+    
+    const recentPrices = prices.slice(-period);
+    return recentPrices.reduce((sum, price) => sum + price, 0) / period;
+}
+
+// Add Parabolic SAR
+function calculateParabolicSAR(prices, acceleration = 0.02, maximum = 0.2) {
+    if (prices.length < 2) return prices[prices.length - 1];
+    
+    // Simplified SAR calculation
+    let sar = prices[0];
+    let ep = prices[1]; // Extreme point
+    let af = acceleration; // Acceleration factor
+    let isUpTrend = prices[1] > prices[0];
+    
+    for (let i = 2; i < prices.length; i++) {
+        const prevSar = sar;
+        
+        if (isUpTrend) {
+            sar = prevSar + af * (ep - prevSar);
+            
+            if (prices[i] > ep) {
+                ep = prices[i];
+                af = Math.min(af + acceleration, maximum);
+            }
+            
+            if (prices[i] < sar) {
+                isUpTrend = false;
+                sar = ep;
+                ep = prices[i];
+                af = acceleration;
+            }
+        } else {
+            sar = prevSar + af * (ep - prevSar);
+            
+            if (prices[i] < ep) {
+                ep = prices[i];
+                af = Math.min(af + acceleration, maximum);
+            }
+            
+            if (prices[i] > sar) {
+                isUpTrend = true;
+                sar = ep;
+                ep = prices[i];
+                af = acceleration;
+            }
+        }
+    }
+    
+    return { sar, isUpTrend };
+}
+
+// Add multiple timeframe support
+let priceHistory5m = [];
+let priceHistory15m = [];
+let lastUpdate5m = 0;
+let lastUpdate15m = 0;
+
+function updateMultiTimeframe(currentPrice, currentTime) {
+    // 5-minute timeframe
+    if (currentTime - lastUpdate5m >= 300000) { // 5 minutes
+        priceHistory5m.push(currentPrice);
+        if (priceHistory5m.length > 50) priceHistory5m.shift();
+        lastUpdate5m = currentTime;
+    }
+    
+    // 15-minute timeframe
+    if (currentTime - lastUpdate15m >= 900000) { // 15 minutes
+        priceHistory15m.push(currentPrice);
+        if (priceHistory15m.length > 30) priceHistory15m.shift();
+        lastUpdate15m = currentTime;
+    }
+}
+
+function getMultiTimeframeSignal() {
+    if (priceHistory5m.length < 10 || priceHistory15m.length < 5) {
+        return 'insufficient_data';
+    }
+    
+    // Get signals from different timeframes
+    const trend1m = detectTrend(priceHistory, 10);
+    const trend5m = detectTrend(priceHistory5m, 8);
+    const trend15m = detectTrend(priceHistory15m, 5);
+    
+    // Align signals
+    const bullishTimeframes = [trend1m, trend5m, trend15m].filter(t => 
+        t === 'up' || t === 'strong_up').length;
+    const bearishTimeframes = [trend1m, trend5m, trend15m].filter(t => 
+        t === 'down' || t === 'strong_down').length;
+    
+    if (bullishTimeframes >= 2) return 'buy';
+    if (bearishTimeframes >= 2) return 'sell';
+    return 'flat';
+}
+
+// Modify calculateIndicators to include these new indicators
+function calculateIndicators() {
+    const currentTime = Date.now();
+    
+    // Add price to buffer with timestamp
+    if (globalPrice && globalPrice !== priceHistory[priceHistory.length - 1]) {
+        priceBuffer.push({
+            time: currentTime,
+            price: globalPrice
+        });
+        
+        // Keep buffer at a reasonable size
+        if (priceBuffer.length > 500) {
+            priceBuffer.shift();
+        }
+    }
+    
+    // Update multi-timeframe data
+    if (globalPrice) {
+        updateMultiTimeframe(globalPrice, currentTime);
+    }
+    
+    // Check if we need to create a new candle
+    if (currentTime - lastCandleTime >= candleInterval) {
+        // If we have price data since the last candle
+        if (priceBuffer.length > 0) {
+            // Extract prices that belong to the completed candle
+            const candlePricePoints = priceBuffer.filter(
+                point => point.time >= lastCandleTime && point.time < currentTime
+            );
+            
+            if (candlePricePoints.length > 0) {
+                // Create a new candle using OHLC
+                const open = candlePricePoints[0].price;
+                const high = Math.max(...candlePricePoints.map(p => p.price));
+                const low = Math.min(...candlePricePoints.map(p => p.price));
+                const close = candlePricePoints[candlePricePoints.length - 1].price;
+                
+                // Add the close price to our candle prices array
+                candlePrices.push(close);
+                
+                console.log(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
+                
+                // Keep candlePrices at a reasonable size
+                if (candlePrices.length > 50) {
+                    candlePrices.shift();
+                }
+            }
+        }
+        
+        lastCandleTime = currentTime;
+    }
+    
+    // Use priceHistory for indicators if we don't have enough candles yet
+    const dataForIndicators = priceHistory.length >= 20 ? priceHistory : [];
+    
+    if (dataForIndicators.length < 20) {
+        window.currentSignal = 'flat';
+        signalDiv.innerHTML = 'Insufficient Data';
+        updateIndicatorDisplay(true); // Pass true to indicate insufficient data
+        return;
+    }
+    
+    // Calculate all indicators
+    const shortEMA = calculateEMA(dataForIndicators, 9);
+    const longEMA = calculateEMA(dataForIndicators, 21);
+    const rsiValue = calculateRSI(dataForIndicators, 14);
+    const macdData = calculateMACD(dataForIndicators);
+    const bollingerBands = calculateBollingerBands(dataForIndicators);
+    const stochastic = calculateStochastic(dataForIndicators);
+    const rocValue = calculateROC(dataForIndicators, 12);
+    const awesomeOsc = calculateAwesomeOscillator(dataForIndicators);
+    const parabolicSAR = calculateParabolicSAR(dataForIndicators);
+    
+    // Price action analysis
+    const priceAction = analyzePriceAction(dataForIndicators);
+    const supportResistance = findSupportResistance(dataForIndicators);
+    const trend = detectTrend(dataForIndicators);
+    const fractals = findFractals(dataForIndicators);
+    
+    // Multi-timeframe signal
+    const mtfSignal = getMultiTimeframeSignal();
+    
+    // Current price
+    const currentPrice = dataForIndicators[dataForIndicators.length - 1];
+    
+    // Signal scoring system
+    let bullishScore = 0;
+    let bearishScore = 0;
+    
+    // EMA signals (weight: 2)
+    const emaDifference = shortEMA - longEMA;
+    const emaThreshold = 0.0001;
+    if (emaDifference > emaThreshold) bullishScore += 2;
+    else if (emaDifference < -emaThreshold) bearishScore += 2;
+    
+    // RSI signals (weight: 2)
+    if (rsiValue < 30) bullishScore += 2;
+    else if (rsiValue > 70) bearishScore += 2;
+    else if (rsiValue < 40) bullishScore += 1;
+    else if (rsiValue > 60) bearishScore += 1;
+    
+    // MACD signals (weight: 2)
+    if (macdData.macd > macdData.signal && macdData.histogram > 0) bullishScore += 2;
+    else if (macdData.macd < macdData.signal && macdData.histogram < 0) bearishScore += 2;
+    
+    // Bollinger Bands signals (weight: 1)
+    if (currentPrice < bollingerBands.lower) bullishScore += 1;
+    else if (currentPrice > bollingerBands.upper) bearishScore += 1;
+    
+    // Stochastic signals (weight: 1)
+    if (stochastic.k < 20 && stochastic.d < 20) bullishScore += 1;
+    else if (stochastic.k > 80 && stochastic.d > 80) bearishScore += 1;
+    
+    // Rate of Change signals (weight: 1)
+    if (rocValue > 1) bullishScore += 1;
+    else if (rocValue < -1) bearishScore += 1;
+    
+    // Awesome Oscillator signals (weight: 1)
+    if (awesomeOsc > 0) bullishScore += 1;
+    else if (awesomeOsc < 0) bearishScore += 1;
+    
+    // Parabolic SAR signals (weight: 1)
+    if (parabolicSAR.isUpTrend) bullishScore += 1;
+    else if (!parabolicSAR.isUpTrend) bearishScore += 1;
+    
+    // Trend signals (weight: 2)
+    if (trend === 'strong_up') bullishScore += 2;
+    else if (trend === 'up') bullishScore += 1;
+    else if (trend === 'strong_down') bearishScore += 2;
+    else if (trend === 'down') bearishScore += 1;
+    
+    // Price action signals (weight: 1)
+    if (priceAction.pattern.includes('bullish')) {
+        bullishScore += 1;
+    } else if (priceAction.pattern.includes('bearish')) {
+        bearishScore += 1;
+    }
+    
+    // Support/Resistance signals (weight: 1)
+    if (supportResistance.nearSupport) bullishScore += 1;
+    else if (supportResistance.nearResistance) bearishScore += 1;
+    
+    // Multi-timeframe signals (weight: 3)
+    if (mtfSignal === 'buy') bullishScore += 3;
+    else if (mtfSignal === 'sell') bearishScore += 3;
+    
+    // Determine final signal
+    let signal = 'flat';
+    const scoreDifference = Math.abs(bullishScore - bearishScore);
+    const minScoreThreshold = 5; // Minimum score needed to generate a signal
+    
+    if (bullishScore > bearishScore && bullishScore >= minScoreThreshold && scoreDifference >= 3) {
+        signal = 'buy';
+    } else if (bearishScore > bullishScore && bearishScore >= minScoreThreshold && scoreDifference >= 3) {
+        signal = 'sell';
+    }
+    
+    // Avoid trading during consolidation
+    if (priceAction.isConsolidating) {
+        signal = 'flat';
+    }
+    
+    // Update UI with indicator values
+    signalDiv.innerHTML = `${signal.toUpperCase()} (B:${bullishScore} vs S:${bearishScore})`;
+    signalDiv.style.backgroundColor = signal === 'buy' ? greenColor : (signal === 'sell' ? redColor : '#333');
+    
+    // Store the current signal and indicators in global variables for tradeLogic to use
+    window.currentSignal = signal;
+    window.currentShortEMA = shortEMA;
+    window.currentLongEMA = longEMA;
+    window.currentRSI = rsiValue;
+    window.emaDifference = emaDifference;
+    window.bullishScore = bullishScore;
+    window.bearishScore = bearishScore;
+    window.currentMACD = macdData;
+    window.currentBB = bollingerBands;
+    window.currentStoch = stochastic;
+    window.currentTrend = trend;
+    window.currentPriceAction = priceAction;
+    
+    // Update the indicator display
+    updateIndicatorDisplay(false, {
+        shortEMA,
+        longEMA,
+        emaDifference,
+        rsiValue,
+        macdData,
+        bollingerBands,
+        stochastic,
+        rocValue,
+        awesomeOsc,
+        parabolicSAR,
+        trend,
+        priceAction,
+        mtfSignal,
+        candlePrices,
+        currentTime
     });
+    
+    console.log(`Signal: ${signal}, Bullish Score: ${bullishScore}, Bearish Score: ${bearishScore}, Trend: ${trend}, Pattern: ${priceAction.pattern}`);
+}
 
-    recomputeTopSignals();
-    renderAccuracy();
-    renderTopSignals();
-    renderChart();
-  }
-
-  function recomputeTopSignals(){
-    const stats = state.virtualStats[state.symbol] || {};
-    const rows = Object.keys(stats)
-      .map(key => ({
-        key,
-        wins: stats[key].wins,
-        losses: stats[key].losses,
-        n: stats[key].n,
-        wr: stats[key].wr
-      }))
-      .filter(item => item.n >= MIN_TRADES)
-      .sort((a, b) => b.wr - a.wr || b.n - a.n)
-      .slice(0, TOP_K);
-    state.topSignals = rows;
-  }
-
-  function ema(values, period){
-    const k = 2 / (period + 1);
-    let emaPrev = values[0];
-    const out = [];
-    values.forEach((price, idx) => {
-      if (idx === 0){
-        emaPrev = price;
-      } else {
-        emaPrev = price * k + emaPrev * (1 - k);
-      }
-      out.push(emaPrev);
-    });
-    return out;
-  }
-
-  function sma(values, period){
-    const out = [];
-    for (let i = 0; i < values.length; i++){
-      const start = Math.max(0, i - period + 1);
-      const slice = values.slice(start, i + 1);
-      const avg = slice.reduce((sum, val) => sum + val, 0) / slice.length;
-      out.push(avg);
+// Add the missing helper functions for price action analysis
+function analyzePriceAction(prices) {
+    if (prices.length < 10) return { pattern: 'insufficient_data', isConsolidating: false };
+    
+    const recent = prices.slice(-10);
+    const current = recent[recent.length - 1];
+    const previous = recent[recent.length - 2];
+    const high = Math.max(...recent);
+    const low = Math.min(...recent);
+    const range = high - low;
+    const avgPrice = recent.reduce((sum, p) => sum + p, 0) / recent.length;
+    
+    // Check for consolidation (low volatility)
+    const isConsolidating = range < (avgPrice * 0.001); // Less than 0.1% range
+    
+    // Pattern detection
+    let pattern = 'neutral';
+    
+    // Bullish patterns
+    if (current > previous && current > avgPrice) {
+        if (current > high * 0.99) pattern = 'bullish_breakout';
+        else pattern = 'bullish_continuation';
+    } else if (current < previous && current > low * 1.01) {
+        pattern = 'bullish_bounce';
     }
-    return out;
-  }
+    
+    // Bearish patterns
+    if (current < previous && current < avgPrice) {
+        if (current < low * 1.01) pattern = 'bearish_breakdown';
+        else pattern = 'bearish_continuation';
+    } else if (current > previous && current < high * 0.99) {
+        pattern = 'bearish_rejection';
+    }
+    
+    // Reversal patterns
+    const momentum = (current - recent[0]) / recent[0] * 100;
+    if (momentum > 0.05 && recent.slice(0, 5).every(p => p < avgPrice)) {
+        pattern = 'bullish_reversal';
+    } else if (momentum < -0.05 && recent.slice(0, 5).every(p => p > avgPrice)) {
+        pattern = 'bearish_reversal';
+    }
+    
+    return { pattern, isConsolidating };
+}
 
-  function rsi(values, period){
-    if (values.length <= period) return 50;
+function findSupportResistance(prices) {
+    if (prices.length < 20) return { nearSupport: false, nearResistance: false };
+    
+    const current = prices[prices.length - 1];
+    const recent = prices.slice(-20);
+    
+    // Find potential support and resistance levels
+    const highs = [];
+    const lows = [];
+    
+    for (let i = 2; i < recent.length - 2; i++) {
+        // Local high
+        if (recent[i] > recent[i-1] && recent[i] > recent[i+1] && 
+            recent[i] > recent[i-2] && recent[i] > recent[i+2]) {
+            highs.push(recent[i]);
+        }
+        // Local low
+        if (recent[i] < recent[i-1] && recent[i] < recent[i+1] && 
+            recent[i] < recent[i-2] && recent[i] < recent[i+2]) {
+            lows.push(recent[i]);
+        }
+    }
+    
+    const threshold = current * 0.0005; // 0.05% threshold
+    
+    const nearSupport = lows.some(low => Math.abs(current - low) < threshold && current > low);
+    const nearResistance = highs.some(high => Math.abs(current - high) < threshold && current < high);
+    
+    return { nearSupport, nearResistance };
+}
+
+// Add the missing EMA calculation function
+function calculateEMA(prices, period) {
+    if (prices.length < period) return prices[prices.length - 1];
+    
+    const multiplier = 2 / (period + 1);
+    let ema = prices.slice(0, period).reduce((sum, price) => sum + price, 0) / period;
+    
+    for (let i = period; i < prices.length; i++) {
+        ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
+    }
+    
+    return ema;
+}
+// Helper function to calculate price momentum
+function calculatePriceMomentum(prices) {
+    if (prices.length < 5) {
+        return { direction: 'flat', strength: 'weak' };
+    }
+    
+    const recent = prices.slice(-5);
+    const currentPrice = recent[recent.length - 1];
+    const startPrice = recent[0];
+    
+    // Calculate momentum
+    const totalChange = currentPrice - startPrice;
+    const percentChange = (totalChange / startPrice) * 100;
+    
+    // Determine direction
+    let direction = 'flat';
+    if (percentChange > 0.01) direction = 'up';
+    else if (percentChange < -0.01) direction = 'down';
+    
+    // Determine strength
+    let strength = 'weak';
+    const absChange = Math.abs(percentChange);
+    if (absChange > 0.05) strength = 'strong';
+    else if (absChange > 0.02) strength = 'moderate';
+    
+    // Calculate acceleration (rate of change of momentum)
+    const midPrice = recent[Math.floor(recent.length / 2)];
+    const firstHalfChange = midPrice - startPrice;
+    const secondHalfChange = currentPrice - midPrice;
+    const acceleration = secondHalfChange - firstHalfChange;
+    
+    return {
+        direction,
+        strength,
+        percentChange,
+        acceleration,
+        isAccelerating: Math.abs(acceleration) > Math.abs(totalChange) * 0.1
+    };
+}
+
+// Helper function to calculate volatility
+function calculateVolatility(prices) {
+    if (prices.length < 10) return 0;
+    
+    const recent = prices.slice(-10);
+    const mean = recent.reduce((sum, price) => sum + price, 0) / recent.length;
+    
+    // Calculate standard deviation
+    const variance = recent.reduce((sum, price) => {
+        return sum + Math.pow(price - mean, 2);
+    }, 0) / recent.length;
+    
+    const stdDev = Math.sqrt(variance);
+    
+    // Return as percentage of mean price
+    return stdDev / mean;
+}
+
+// Enhanced EMA calculation with validation
+function calculateEMA(prices, period) {
+    if (!prices || prices.length === 0) return 0;
+    if (prices.length < period) return prices[prices.length - 1];
+    
+    const multiplier = 2 / (period + 1);
+    let ema = prices[0];
+    
+    for (let i = 1; i < prices.length; i++) {
+        ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
+    }
+    
+    return ema;
+}
+
+// Enhanced RSI calculation
+function calculateRSI(prices, period = 14) {
+    if (!prices || prices.length < period + 1) return 50;
+    
     let gains = 0;
     let losses = 0;
-    for (let i = 1; i <= period; i++){
-      const diff = values[i] - values[i - 1];
-      if (diff >= 0) gains += diff; else losses -= diff;
+    
+    // Calculate initial average gain and loss
+    for (let i = 1; i <= period; i++) {
+        const change = prices[i] - prices[i - 1];
+        if (change > 0) {
+            gains += change;
+        } else {
+            losses += Math.abs(change);
+        }
     }
-    gains /= period;
-    losses /= period;
-    for (let i = period + 1; i < values.length; i++){
-      const diff = values[i] - values[i - 1];
-      if (diff >= 0){
-        gains = (gains * (period - 1) + diff) / period;
-        losses = (losses * (period - 1)) / period;
-      } else {
-        gains = (gains * (period - 1)) / period;
-        losses = (losses * (period - 1) - diff) / period;
-      }
+    
+    let avgGain = gains / period;
+    let avgLoss = losses / period;
+    
+    // Calculate RSI for remaining periods
+    for (let i = period + 1; i < prices.length; i++) {
+        const change = prices[i] - prices[i - 1];
+        const gain = change > 0 ? change : 0;
+        const loss = change < 0 ? Math.abs(change) : 0;
+        
+        avgGain = ((avgGain * (period - 1)) + gain) / period;
+        avgLoss = ((avgLoss * (period - 1)) + loss) / period;
     }
-    if (losses === 0) return 100;
-    const rs = gains / losses;
-    return 100 - (100 / (1 + rs));
-  }
+    
+    if (avgLoss === 0) return 100;
+    
+    const rs = avgGain / avgLoss;
+    const rsi = 100 - (100 / (1 + rs));
+    
+    return rsi;
+}
+// Update the debug function to include candle information
+function debugTradeStatus() {
+    const time = Date.now();
+    const timeSinceLastTrade = time - lastTradeTime;
+    const timeSinceLastSignalCheck = time - lastSignalCheck;
+    
+    console.log(`Debug Trade Status:
+    - Current Signal: ${window.currentSignal || 'undefined'}
+    - EMA Signal: ${window.emaSignal || 'undefined'}
+    - RSI Signal: ${window.rsiSignal || 'undefined'}
+    - Stochastic Signal: ${window.stochSignal || 'undefined'}
+    - Time since last trade: ${timeSinceLastTrade}ms (min required: ${minTimeBetweenTrades}ms)
+    - Time since last signal check: ${timeSinceLastSignalCheck}ms (check interval: ${signalCheckInterval}ms)
+    - EMA Difference: ${window.emaDifference ? window.emaDifference.toFixed(5) : 'undefined'}
+    - RSI Value: ${window.currentRSI ? window.currentRSI.toFixed(2) : 'undefined'}
+    - Stochastic Values: %K=${window.stochK ? window.stochK.toFixed(2) : 'undefined'}, %D=${window.stochD ? window.stochD.toFixed(2) : 'undefined'}
+    - Candle Progress: ${window.candleProgress || 0}% (${Math.round(window.timeUntilNextCandle/1000) || 0}s until next candle)
+    - Candle Count: ${candlePrices.length}
+    - Cycles to Play: ${cyclesToPlay}
+    - Current Profit: ${currentProfit}
+    - Current Profit %: ${currentProfitPercent || 'undefined'}
+    `);
+}
 
-  function macd(values){
-    const ema12 = ema(values, 12);
-    const ema26 = ema(values, 26);
-    return values.map((_, idx) => ema12[idx] - ema26[idx]);
-  }
+/// Modify the tradeLogic function to use the sensitivity parameter
+function tradeLogic() {
+    let tradeDirection;
+    let currentTrade = {};
 
-  function stochastic(candles, period = 14){
-    if (candles.length < period) return { k: 50, d: 50 };
-    const slice = candles.slice(-period);
-    const highs = slice.map(c => c.high);
-    const lows = slice.map(c => c.low);
-    const closes = slice.map(c => c.close);
-    const highest = Math.max(...highs);
-    const lowest = Math.min(...lows);
-    const current = closes[closes.length - 1];
-    const k = highest === lowest ? 50 : ((current - lowest) / (highest - lowest)) * 100;
-    return { k, d: k };
-  }
+    let time = Date.now();
+    let hTime = humanTime(time);
 
-  function priceAction(candles){
-    if (candles.length < 2) return 'neutral';
-    const prev = candles[candles.length - 2];
-    const last = candles[candles.length - 1];
-    const bullish = last.close > last.open && prev.close < prev.open && last.close > prev.open;
-    const bearish = last.close < last.open && prev.close > prev.open && last.close < prev.open;
-    if (bullish) return 'bull';
-    if (bearish) return 'bear';
-    return 'neutral';
-  }
-
-  function trend(candles){
-    if (candles.length < 10) return 'flat';
-    const closes = candles.map(c => c.close);
-    const ma = sma(closes, 10);
-    const last = closes[closes.length - 1];
-    const avg = ma[ma.length - 1];
-    if (last > avg * 1.0005) return 'up';
-    if (last < avg * 0.9995) return 'down';
-    return 'flat';
-  }
-
-  function supportResistance(candles, lookback = 20){
-    if (candles.length < lookback) return { support: false, resistance: false };
-    const slice = candles.slice(-lookback);
-    const last = slice[slice.length - 1].close;
-    const highs = slice.map(c => c.high);
-    const lows = slice.map(c => c.low);
-    const max = Math.max(...highs);
-    const min = Math.min(...lows);
-    const tol = (max - min) * 0.1;
-    return {
-      support: Math.abs(last - min) < tol,
-      resistance: Math.abs(last - max) < tol
-    };
-  }
-
-  function multiTimeframe(candles){
-    if (candles.length < 25) return 'flat';
-    const closes = candles.map(c => c.close);
-    const m1 = closes.slice(-15);
-    const m5 = closes.slice(-25).filter((_, idx) => idx % 5 === 0);
-    const emaShort = ema(m1, Math.min(5, m1.length));
-    const emaLong = ema(m5, Math.min(5, m5.length));
-    const lastShort = emaShort[emaShort.length - 1];
-    const lastLong = emaLong[emaLong.length - 1];
-    if (lastShort > lastLong) return 'buy';
-    if (lastShort < lastLong) return 'sell';
-    return 'flat';
-  }
-
-  function evaluateSignals(){
-    if (!state.candles.length) return;
-    const candles = state.candles.slice(-80);
-    const closes = candles.map(c => c.close);
-    if (closes.length < 20) return;
-
-    const emaFast = ema(closes, 9);
-    const emaSlow = ema(closes, 21);
-    const emaDiff = emaFast[emaFast.length - 1] - emaSlow[emaSlow.length - 1];
-    const rsiValue = rsi(closes, 14);
-    const macdValues = macd(closes);
-    const macdLast = macdValues[macdValues.length - 1];
-    const stochValue = stochastic(candles);
-    const pa = priceAction(candles);
-    const trendDir = trend(candles);
-    const sr = supportResistance(candles);
-    const mtf = multiTimeframe(candles);
-
-    const snapshot = [];
-    if (emaDiff > 0){ snapshot.push({ key: 'ema_bullish', direction: 'buy' }); }
-    if (emaDiff < 0){ snapshot.push({ key: 'ema_bearish', direction: 'sell' }); }
-    if (rsiValue < 30){ snapshot.push({ key: 'rsi_oversold', direction: 'buy' }); }
-    if (rsiValue > 70){ snapshot.push({ key: 'rsi_overbought', direction: 'sell' }); }
-    if (macdLast > 0){ snapshot.push({ key: 'macd_bull', direction: 'buy' }); }
-    if (macdLast < 0){ snapshot.push({ key: 'macd_bear', direction: 'sell' }); }
-    if (stochValue.k < 20){ snapshot.push({ key: 'stoch_buy', direction: 'buy' }); }
-    if (stochValue.k > 80){ snapshot.push({ key: 'stoch_sell', direction: 'sell' }); }
-    if (trendDir === 'up'){ snapshot.push({ key: 'trend_up', direction: 'buy' }); }
-    if (trendDir === 'down'){ snapshot.push({ key: 'trend_down', direction: 'sell' }); }
-    if (sr.support){ snapshot.push({ key: 'sr_support', direction: 'buy' }); }
-    if (sr.resistance){ snapshot.push({ key: 'sr_resistance', direction: 'sell' }); }
-    if (pa === 'bull'){ snapshot.push({ key: 'pa_bull', direction: 'buy' }); }
-    if (pa === 'bear'){ snapshot.push({ key: 'pa_bear', direction: 'sell' }); }
-    if (mtf === 'buy'){ snapshot.push({ key: 'mtf_buy', direction: 'buy' }); }
-    if (mtf === 'sell'){ snapshot.push({ key: 'mtf_sell', direction: 'sell' }); }
-
-    const nowTs = Date.now();
-    const cache = state.signalCache;
-    const activeKeys = Object.create(null);
-    snapshot.forEach(sig => {
-      activeKeys[sig.key] = true;
-      const prev = cache[sig.key];
-      const changed = !prev || prev.direction !== sig.direction;
-      if (changed){
-        handleTopSignalHit(sig, nowTs);
-      }
-      cache[sig.key] = { direction: sig.direction, at: nowTs };
-    });
-    Object.keys(cache).forEach(key => {
-      if (!activeKeys[key]) delete cache[key];
-    });
-
-    state.latestSignals = snapshot;
-    setText(ui.signalBox, snapshot.length ? snapshot.map(s => labelForSignal(s.key)).join(', ') : '—');
-
-    if (state.minuteSignalsPending){
-      state.minuteSignals = snapshot.map(item => ({ key: item.key, direction: item.direction }));
-      state.minuteSignalsPending = false;
+    // Initialize default values
+    let prevBetStep = 0;
+    let currentBetStep = 0;
+    let tradeStatus = 'won'; // Default status for first trade
+    
+    // Define these variables that were previously undefined
+    let globalTrend = 'flat';
+    let priceTrend = 'flat';
+    
+    // Only try to access betHistory if it has elements
+    if (betHistory.length > 0) {
+        prevBetStep = betHistory.slice(-1)[0].step;
+        
+        // Check if we have trade status information
+        if (betHistory.slice(-1)[0].won) {
+            tradeStatus = betHistory.slice(-1)[0].won;
+        }
     }
-  }
 
-  function getBetValue(step){
-    const arr = state.betArray;
-    const found = arr.find(item => item.step === step);
-    return found ? found.value : arr[0].value;
-  }
+    if (tradeStatus === 'won') {
+        currentBetStep = 0;
+    } else if (tradeStatus === 'lost') {
+        if (prevBetStep < betArray.length-1) {
+            currentBetStep = prevBetStep + 1; 
+        } else {
+            currentBetStep = 0;
+        }
+    } else if (tradeStatus === 'returned') {
+        currentBetStep = prevBetStep;
+    }
 
-  function recordNextBet(reason, prevStep, nextStep){
-    const amount = getBetValue(nextStep);
-    const arrName = state.betArraySelector;
-    state.nextBet = { step: nextStep, amount, array: arrName };
-    state.lastPrepareReason = reason;
-    const message = `reason=${reason} step=${prevStep}→${nextStep} amt=${fmtMoney(amount)} arr=${arrName}`;
-    logNextBetCalcEvent(message);
-  }
+    if (betHistory.length < 3){
+        currentBetStep = 0;
+    }
 
-  function applyMartingale(result){
-    const prevStep = state.currentBetStep;
-    if (result === 'won'){
-      state.currentBetStep = 0;
-      state.lossStreak = 0;
-    } else if (result === 'lost'){
-      state.currentBetStep = Math.min(state.currentBetStep + 1, state.betArray.length - 1);
-      state.lossStreak += 1;
-      if (state.lossStreak >= state.pauseLossThreshold){
-        schedulePause();
-      }
-    } else if (result === 'returned'){
-      state.lossStreak = 0;
-    }
-    if (!state.maxStep || state.currentBetStep > state.maxStep){
-      state.maxStep = state.currentBetStep;
-    }
-    recordNextBet(result === 'won' ? 'after_win' : (result === 'lost' ? 'after_loss' : 'returned'), prevStep, state.currentBetStep);
-  }
-
-  function placeTrade(direction, timestamp, meta){
-    const now = Number.isFinite(timestamp) ? timestamp : Date.now();
-    const expectedAmount = state.nextBet && Number.isFinite(state.nextBet.amount) ? state.nextBet.amount : NaN;
-    const actualAmount = readBetInputValue();
-    const preparedOk = Number.isFinite(expectedAmount) && Number.isFinite(actualAmount) && approxEqual(actualAmount, expectedAmount, 0.01);
-    const keyLabel = meta && meta.key ? meta.key : '—';
-    const dirLabel = String(direction || 'flat').toUpperCase();
-    const targetAmount = Number.isFinite(expectedAmount) ? expectedAmount : actualAmount;
-    const tradeAmount = Number.isFinite(targetAmount) ? targetAmount : (Number.isFinite(actualAmount) ? actualAmount : 0);
-    logInfo('ORDER try', `dir=${dirLabel} amt=${fmtMoney(tradeAmount)} key=${keyLabel} prepared=${preparedOk ? 'ok' : 'fail'}`);
-
-    if (state.isTradeOpen){
-      logInfo('ORDER fail', 'reason=open');
-      return { placed: false, reason: 'open' };
-    }
-    if (!preparedOk){
-      logInfo('ORDER fail', 'reason=prepared_mismatch');
-      return { placed: false, reason: 'prepared_mismatch' };
-    }
-    const payout = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
-    if (!Number.isFinite(payout) || payout < MIN_PROFIT){
-      logInfo('ORDER fail', 'reason=minProfit');
-      return { placed: false, reason: 'minProfit' };
-    }
-    if (isPaused()){
-      logInfo('ORDER fail', 'reason=pause');
-      return { placed: false, reason: 'pause' };
-    }
-    const button = findOrderButton(direction);
-    if (!button){
-      logInfo('ORDER fail', 'reason=selector');
-      return { placed: false, reason: 'selector' };
-    }
-    if (button.disabled || button.getAttribute && button.getAttribute('disabled') != null){
-      logInfo('ORDER fail', 'reason=disabled');
-      return { placed: false, reason: 'disabled' };
-    }
-    const startTick = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') ? performance.now() : Date.now();
-    try {
-      button.click();
-    } catch (_err){
-      logInfo('ORDER fail', 'reason=selector');
-      return { placed: false, reason: 'selector' };
-    }
-    const endTick = (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') ? performance.now() : Date.now();
-    const latency = Math.max(0, Math.round(endTick - startTick));
-    logInfo('ORDER ok', `btn=${direction === 'sell' ? 'sell' : 'buy'} latency=${latency}ms`);
-
-    const nextStep = state.nextBet ? state.nextBet.step : state.currentBetStep;
-    const trade = {
-      time: humanTime(now),
-      openedAt: now,
-      direction,
-      step: nextStep,
-      amount: tradeAmount,
-      symbol: state.symbol,
-      pnl: 0,
-      result: null,
-      closedAt: null,
-      signals: state.minuteSignals.map(s => s.key),
-      trigger: meta && meta.key ? meta.key : null,
-      triggerRank: meta && meta.rank ? meta.rank : null,
-      triggerScore: meta && Number.isFinite(meta.score) ? meta.score : null,
-      cycle: state.minuteTimer.activeCycleId,
-      payout
-    };
-    state.betHistory.push(trade);
-    state.lastTradeTime = now;
-    state.isTradeOpen = true;
-    state.openTrade = {
-      symbol: trade.symbol,
-      symbolKey: makeSymbolKey(trade.symbol),
-      amount: trade.amount,
-      step: trade.step,
-      direction: trade.direction,
-      openedAt: trade.openedAt,
-      index: state.betHistory.length - 1,
-      payout
-    };
-    state.open = {
-      symbol: trade.symbol,
-      dir: trade.direction,
-      amount: trade.amount,
-      openedAt: trade.openedAt
-    };
-    state.currentWager = tradeAmount;
-    state.minuteTimer.windowConsumed = true;
-    state.minuteTimer.tradeCycleId = state.minuteTimer.activeCycleId;
-    state.lastDecision = { direction, reason: 'signal', trigger: trade.trigger, at: now };
-    setDirection(direction, meta && meta.key ? shortLabelForSignal(meta.key) : 'opened');
-    updateTradingInfo();
-    logInfo('TRADE-OPEN', `time=${humanTimeHHMM(now)} sym=${trade.symbol} dir=${dirLabel} amt=${fmtMoney(tradeAmount)} step=${trade.step}`);
-    return { placed: true, reason: null };
-  }
-
-  function tradeLogic(now){
-    const candidate = state.pendingTrade;
-    if (!candidate) return;
-
-    state.pendingTrade = null;
-    const result = placeTrade(candidate.direction, now, candidate);
-    if (result.placed){
-      state.lastOrderDecision = { decision: 'place', reason: 'ok', at: now };
+    // Use the pre-calculated signal from calculateIndicators
+    let signal = window.currentSignal || 'flat';
+    
+    // Get the score difference from the indicators
+    const bullishScore = window.bullishScore || 0;
+    const bearishScore = window.bearishScore || 0;
+    const scoreDifference = Math.abs(bullishScore - bearishScore);
+    
+    // Apply sensitivity adjustment - higher sensitivity means we need less score difference to trade
+    const adjustedThreshold = 11 - signalSensitivity; // Inverted scale: 1 is most sensitive (threshold=10), 10 is least (threshold=1)
+    
+    // Determine trade direction based on scores and sensitivity
+    if (bullishScore > bearishScore && scoreDifference >= adjustedThreshold) {
+        tradeDirection = !reverse ? 'buy' : 'sell';
+        tradeDirectionDiv.style.background = '#009500'; // Green
+    } else if (bearishScore > bullishScore && scoreDifference >= adjustedThreshold) {
+        tradeDirection = !reverse ? 'sell' : 'buy';
+        tradeDirectionDiv.style.background = '#B90000'; // Red
     } else {
-      const reason = result.reason || 'unknown';
-      state.lastOrderDecision = { decision: 'skip', reason, at: now };
-      if (reason === 'prepared_mismatch'){
-        schedulePrepare(state.lastPrepareReason || 'startup');
-      }
-      state.lastDecision = { direction: 'flat', reason, trigger: candidate.key, at: now };
-      if (reason !== 'open') setDirection('flat', reason);
+        tradeDirection = 'flat';
+        tradeDirectionDiv.style.background = '#555555'; // Gray
     }
-  }
 
-  function logMinuteSnapshot(now){
-    const date = new Date(now);
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mm = String(date.getMinutes()).padStart(2, '0');
-    const key = hh + ':' + mm;
-    if (state.lastSnapMinute === key) return;
-    state.lastSnapMinute = key;
+    tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`;
 
-    syncProfit();
-    const payoutRaw = parseInt(percentProfitDiv.textContent || percentProfitDiv.innerText || '0', 10);
-    const payoutText = Number.isFinite(payoutRaw) ? payoutRaw : '—';
-    const topKeys = state.topSignals.slice(0, TOP_K).map(sig => sig.key).join(',');
-    const topText = topKeys ? '[' + topKeys + ']' : '[—]';
-    const lastHitDir = state.lastTopHit && state.lastTopHit.direction
-      ? String(state.lastTopHit.direction).toUpperCase()
-      : null;
-    const lastHit = state.lastTopHit
-      ? `${state.lastTopHit.key}@${humanTimeHHMM(state.lastTopHit.at)}(+${lastHitDir || '—'})`
-      : '—';
-    const pendingDir = state.pendingTrade && state.pendingTrade.direction
-      ? String(state.pendingTrade.direction).toUpperCase()
-      : '—';
-    const pendingKey = state.pendingTrade && state.pendingTrade.key ? state.pendingTrade.key : '—';
-    const pendingInfo = state.pendingTrade
-      ? `${pendingKey}:${pendingDir}`
-      : '—';
-    const next = state.nextBet || { step: 0, amount: 0, array: state.betArraySelector };
-    const order = state.lastOrderDecision || { decision: 'skip', reason: 'init' };
-    const orderText = order.decision === 'place'
-      ? 'place'
-      : `skip(${order.reason || 'none'})`;
-    const lastRes = state.lastResult || {};
-    const resultLabel = lastRes.label
-      || (lastRes.result === 'won' ? 'WIN' : (lastRes.result === 'lost' ? 'LOSS' : (lastRes.result === 'returned' ? 'RET' : '—')));
-    const resultPnl = Number.isFinite(lastRes.pnl) ? formatSignedFixed(lastRes.pnl) : formatSignedFixed(0);
-    const candle = state.candles.length ? state.candles[state.candles.length - 1] : state.currentCandle;
-    const candleOpen = candle ? fmt(candle.open) : '—';
-    const candleHigh = candle ? fmt(candle.high) : '—';
-    const candleLow = candle ? fmt(candle.low) : '—';
-    const candleClose = candle ? fmt(candle.close) : '—';
-    const nextAmount = Number.isFinite(next.amount) ? next.amount : 0;
-    const startLabel = state.startTime || humanTimeHHMM(now);
-
-    const snapshot = [
-      `sym=${state.symbol || '—'}`,
-      `pay=${payoutText}`,
-      `thr=${MIN_PROFIT}`,
-      `top=${topText}`,
-      `lastTopHit=${lastHit}`,
-      `pending=${pendingInfo}`,
-      `isOpen=${state.isTradeOpen ? 'yes' : 'no'}`,
-      `next(step=${next.step} amt=${fmtMoney(nextAmount)})`,
-      `arr=${next.array || state.betArraySelector}`,
-      `order=${orderText}`,
-      `lastResult=${resultLabel}`,
-      `pnl=${resultPnl}`,
-      `start=${startLabel}`,
-      `startBal=${fmtMoney(state.startBalance)}`,
-      `curBal=${fmtMoney(state.currentBalance)}`,
-      `m1:${candleOpen}/${candleHigh}/${candleLow}/${candleClose}`
-    ].join(' ');
-    logInfo('SNAP ' + key, snapshot);
-  }
-
-  function readBalanceValue(){
-    let raw = '';
-    if (balanceDiv){
-      raw = balanceDiv.textContent || balanceDiv.innerText || '';
-      if (!raw && balanceDiv.getAttribute){
-        raw = balanceDiv.getAttribute('data-value') || '';
-      }
-    }
-    const parsed = parseMoneyValue(raw);
-    if (Number.isFinite(parsed)) return parsed;
-    const normalized = String(raw || '').replace(/,/g, '');
-    const fallback = parseFloat(normalized);
-    return Number.isFinite(fallback) ? fallback : 0;
-  }
-
-  function syncProfit(){
-    const balance = readBalanceValue();
-    state.currentBalance = balance;
-    const profit = balance - state.startBalance;
-    state.currentProfit = profit;
-    state.totalProfit = profit;
-    return balance;
-  }
-
-  function normalizeTradeResultPayload(result, fallbackTrade){
-    if (result == null) return null;
-    const normalized = {
-      displayResult: null,
-      stateResult: null,
-      pnl: NaN,
-      amount: NaN,
-      symbol: null,
-      closedAt: Date.now(),
-      source: null
-    };
-
-    if (typeof result === 'object'){
-      normalized.source = result.source || null;
-      const amountCandidates = [
-        result.amount,
-        result.sum,
-        result.investment,
-        result.volume,
-        result.value,
-        result.bet
-      ];
-      for (const candidate of amountCandidates){
-        const value = parseMoneyValue(candidate);
-        if (Number.isFinite(value)){
-          normalized.amount = value;
-          break;
+    // Check profit limits
+    if (currentProfit > limitWin){
+        limitWin = limitWin1;
+        limitLoss = limitLoss1;
+        betArray = betArray1;
+        let newDiv = winCycle.cloneNode();
+        newDiv.style.height = '30px';
+        newDiv.innerHTML = currentProfit;
+        newDiv.innerHTML += '<div class="max-cycle">'+maxStepInCycle+'</div>';
+        cyclesHistoryDiv.appendChild(newDiv);
+        resetCycle('win');
+    } else if (currentProfit - betValue < limitLoss) {
+        if (limitWin == limitWin1){
+            limitWin = limitWin2;
+            limitLoss = limitLoss2;
+            betArray = betArray2;
+        } else if (limitWin == limitWin2){
+            limitWin = limitWin3;
+            limitLoss = limitLoss3;
+            betArray = betArray3;
+        } else {
+            limitWin = limitWin1;
+            limitLoss = limitLoss1;
+            betArray = betArray1;
         }
-      }
+        let newDiv = loseCycle.cloneNode();
+        newDiv.style.height = '30px';
+        newDiv.innerHTML = currentProfit;
+        newDiv.innerHTML += '<div class="max-cycle">'+maxStepInCycle+'</div>';
+        cyclesHistoryDiv.appendChild(newDiv);
+        resetCycle('lose');
+    } else if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
+        // Execute trade and update last trade time
 
-      const pnlCandidates = [
-        result.pnl,
-        result.profit,
-        result.payout,
-        result.delta,
-        result.pl
-      ];
-      for (const candidate of pnlCandidates){
-        const value = parseMoneyValue(candidate);
-        if (Number.isFinite(value)){
-          normalized.pnl = value;
-          break;
+        if (!isTradeOpen) {
+            smartBet(currentBetStep, tradeDirection);
+            isTradeOpen = true;
         }
-      }
 
-      if (!Number.isFinite(normalized.pnl) && result.meta){
-        const metaCandidates = [
-          result.meta.pnl,
-          result.meta.profit,
-          result.meta.payout
-        ];
-        for (const candidate of metaCandidates){
-          const value = parseMoneyValue(candidate);
-          if (Number.isFinite(value)){
-            normalized.pnl = value;
-            break;
-          }
-        }
-      }
+        lastTradeTime = time;
+        
+        currentTrade.time = hTime;
+        currentTrade.betTime = betTime;
+        currentTrade.openPrice = globalPrice;
+        currentTrade.step = currentBetStep;
+        let betValue = getBetValue(currentTrade.step);
+        currentTrade.betValue = betValue;
+        currentTrade.betDirection = tradeDirection;
+        currentTrade.globalTrend = globalTrend;
+        currentTrade.priceTrend = priceTrend;
+        currentTrade.shortEMA = window.currentShortEMA;
+        currentTrade.longEMA = window.currentLongEMA;
+        currentTrade.emaDiff = window.currentShortEMA - window.currentLongEMA;
+        currentTrade.rsi = window.currentRSI;
+        currentTrade.bullishScore = bullishScore;
+        currentTrade.bearishScore = bearishScore;
+        currentTrade.scoreDiff = scoreDifference;
+        currentTrade.threshold = adjustedThreshold;
+        betHistory.push(currentTrade);
+        totalWager += betValue;
+        wagerDiv.innerHTML = totalWager;
 
-      if (Number.isFinite(result.closedAt)){
-        normalized.closedAt = result.closedAt;
-      } else if (Number.isFinite(result.closed)){
-        normalized.closedAt = result.closed;
-      } else if (Number.isFinite(result.time)){
-        normalized.closedAt = result.time;
-      }
-
-      const symbolCandidates = [
-        result.symbol,
-        result.asset,
-        result.pair,
-        result.underlying
-      ];
-      for (const candidate of symbolCandidates){
-        if (candidate){
-          const label = normalizeSymbolLabel(candidate);
-          if (label){
-            normalized.symbol = label;
-            break;
-          }
-        }
-      }
-
-      const statusCandidates = [
-        result.displayResult,
-        result.result,
-        result.status,
-        result.state,
-        result.outcome,
-        result.type,
-        result.winStatus
-      ];
-      for (const candidate of statusCandidates){
-        const mapped = normalizeResultKind(candidate);
-        if (mapped){
-          normalized.displayResult = mapped;
-          break;
-        }
-      }
-
-      if (!normalized.displayResult && typeof result.won === 'boolean'){
-        normalized.displayResult = result.won ? 'win' : 'loss';
-      }
-      if (!normalized.displayResult && typeof result.success === 'boolean'){
-        normalized.displayResult = result.success ? 'win' : 'loss';
-      }
-    } else if (typeof result === 'string'){
-      normalized.displayResult = normalizeResultKind(result);
-      if (!normalized.displayResult){
-        const parsed = parseMoneyValue(result);
-        if (Number.isFinite(parsed)){
-          normalized.pnl = parsed;
-          normalized.displayResult = classifyResultFromPnL(parsed);
-        }
-      }
-    } else if (typeof result === 'number'){
-      normalized.pnl = result;
-      normalized.displayResult = classifyResultFromPnL(result);
-    } else if (typeof result === 'boolean'){
-      normalized.displayResult = result ? 'win' : 'loss';
+        // Update maximum step
+        maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
+        maxStepDiv.innerHTML = maxStepInCycle;
+        
+        console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
     }
 
-    if (!normalized.displayResult && Number.isFinite(normalized.pnl)){
-      normalized.displayResult = classifyResultFromPnL(normalized.pnl);
+    // Calculate win percentage
+    let winCounter = 0;
+    for (var i = 0; i < betHistory.length; i++) {
+        if (betHistory[i].won === 'won'){
+            winCounter++
+        }
     }
-    if (!normalized.displayResult && fallbackTrade && Number.isFinite(fallbackTrade.pnl)){
-      normalized.displayResult = classifyResultFromPnL(fallbackTrade.pnl);
+
+    let winPercent = Math.round(winCounter / betHistory.length * 100 * 100 ) / 100;
+    wonDiv.innerHTML = winPercent;
+}
+
+let smartBet = (step, tradeDirection) => {
+
+    currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
+    profitPercentDivAdvisor.innerHTML = currentProfitPercent;
+
+    if (currentProfitPercent < 90){
+        console.log('%c BET IS NOT RECOMMENDED. Aborting mission! ', 'background: #B90000; color: #ffffff');
+        profitPercentDivAdvisor.style.background = '#B90000';
+        profitPercentDivAdvisor.style.color = "#ffffff";
+        profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
+        return;
     }
-    if (!normalized.displayResult) normalized.displayResult = 'loss';
 
-    normalized.stateResult = normalized.displayResult === 'win'
-      ? 'won'
-      : (normalized.displayResult === 'loss' ? 'lost' : 'returned');
+    let steps;
 
-    return normalized;
-  }
-
-  function onTradeResult(result){
-    state.isTradeOpen = false;
-    state.openTrade = null;
-    state.open = null;
-    const last = state.betHistory[state.betHistory.length - 1];
-    if (!last) return;
-    if (result == null) return;
-
-    if (!last.symbol) last.symbol = state.symbol;
-
-    const normalized = normalizeTradeResultPayload(result, last);
-    if (!normalized) return;
-
-    if (Number.isFinite(normalized.amount)) last.amount = normalized.amount;
-    if (normalized.symbol) last.symbol = normalized.symbol;
-
-    const prevTotal = state.totalProfit;
-    syncProfit();
-    let pnl = Number.isFinite(normalized.pnl) ? normalized.pnl : state.totalProfit - prevTotal;
-    if (!Number.isFinite(pnl)) pnl = 0;
-
-    last.pnl = pnl;
-    last.result = normalized.stateResult;
-    last.closedAt = Number.isFinite(normalized.closedAt) ? normalized.closedAt : Date.now();
-
-    state.currentWager = 0;
-    state.cycleProfit += pnl;
-    if (last.result === 'won') state.cycleProfit = 0;
-    applyMartingale(last.result);
-    setDirection('flat', last.result);
-    state.cycles.push({ result: last.result, profit: state.currentProfit, step: last.step });
-    if (state.cycles.length > 24) state.cycles.shift();
-    const now = Date.now();
-    state.lastDecision = { direction: last.direction || 'flat', reason: 'result:' + last.result, at: now };
-    const tradeSymbol = last.symbol || state.symbol;
-    const payout = Number.isFinite(last.payout) ? last.payout : NaN;
-    const resultLabel = last.result === 'won'
-      ? 'WIN'
-      : (last.result === 'lost' ? 'LOSS' : 'RET');
-    const timeLabel = humanTimeHHMM(last.closedAt || now);
-    const dirLabel = String(last.direction || 'flat').toUpperCase();
-    const payoutText = Number.isFinite(payout) ? payout : '—';
-    const message = [
-      `time=${timeLabel}`,
-      `sym=${tradeSymbol}`,
-      `dir=${dirLabel}`,
-      `step=${last.step}`,
-      `amt=${fmtMoney(Number.isFinite(last.amount) ? last.amount : 0)}`,
-      `payout=${payoutText}`,
-      `result=${resultLabel}`,
-      `pnl=${formatSignedFixed(pnl)}`,
-      `curBal=${fmtMoney(state.currentBalance)}`
-    ].join(' ');
-    logTradeResultEvent(message);
-    state.lastResult = { result: last.result, pnl, at: now, label: resultLabel };
-    const prepareReason = last.result === 'won' ? 'after_win' : (last.result === 'lost' ? 'after_loss' : 'returned');
-    schedulePrepare(prepareReason);
-    renderCycles();
-    updateTradingInfo();
-  }
-
-  const CLOSED_DEAL_CONTAINER_QUERIES = [
-    '.trades__list--closed',
-    '.trades-list--closed',
-    '.closed-deals__list',
-    '.history__list--closed',
-    '[data-tab="closed"] .trades-list',
-    '[data-tab="closed"] .deals-list',
-    '.deals-list[data-tab="closed"]',
-    '.deals-list[data-type="closed"]'
-  ];
-
-  const CLOSED_DEAL_PARENT_QUERIES = [
-    '[data-tab="closed"]',
-    '.tabs__content--closed',
-    '.tabs-content--closed',
-    '.trades__tab--closed',
-    '.history__tab--closed',
-    '.closed-deals',
-    '.section--closed'
-  ];
-
-  const CLOSED_DEAL_ROW_QUERIES = [
-    '[data-deal-id]',
-    '[data-transaction-id]',
-    '[data-order-id]',
-    '.trades-list__row',
-    '.trades__row',
-    '.deal-entry',
-    '.deal-item',
-    '.deal-card',
-    '.closed-deal',
-    '.history__row',
-    '.table__row',
-    'li',
-    'tr'
-  ];
-
-  const CLOSED_DEAL_SYMBOL_DATA_KEYS = ['symbol', 'asset', 'assetName', 'pair', 'underlying'];
-  const CLOSED_DEAL_SYMBOL_SELECTORS = [
-    '[data-symbol]',
-    '[data-asset]',
-    '[data-asset-name]',
-    '[data-underlying]',
-    '.deal-asset',
-    '.deal__asset',
-    '.trades-list__asset',
-    '.trades__asset',
-    '.trades__symbol',
-    '.symbol',
-    '.asset-name',
-    '.asset'
-  ];
-
-  const CLOSED_DEAL_AMOUNT_DATA_KEYS = ['amount', 'investment', 'invest', 'sum', 'stake', 'value', 'bet', 'dealAmount'];
-  const CLOSED_DEAL_AMOUNT_SELECTORS = [
-    '[data-amount]',
-    '[data-investment]',
-    '[data-invest]',
-    '[data-sum]',
-    '[data-stake]',
-    '[data-value]',
-    '.deal-amount',
-    '.deal__amount',
-    '.trades-list__amount',
-    '.trades__amount',
-    '.amount',
-    '.value'
-  ];
-
-  const CLOSED_DEAL_PNL_DATA_KEYS = ['pnl', 'profit', 'result', 'outcome', 'pl', 'payout'];
-  const CLOSED_DEAL_PNL_SELECTORS = [
-    '[data-pnl]',
-    '[data-profit]',
-    '[data-result]',
-    '.deal-profit',
-    '.deal__profit',
-    '.trades-list__profit',
-    '.trades__result',
-    '.profit',
-    '.result'
-  ];
-
-  function ensureClosedDealsObserver(){
-    if (!closedDealsWatcher.observer){
-      closedDealsWatcher.observer = new MutationObserver(handleClosedDealsMutation);
+    if (tradeDirection === 'null'){
+        console.log('trade dir is NULL');
     }
-    scanClosedDealsContainers();
-    if (closedDealsWatcher.scanTimer){
-      clearInterval(closedDealsWatcher.scanTimer);
-    }
-    closedDealsWatcher.scanTimer = setInterval(scanClosedDealsContainers, 2000);
-  }
 
-  function scanClosedDealsContainers(){
-    const found = new Set();
-    CLOSED_DEAL_CONTAINER_QUERIES.forEach(selector => {
-      try {
-        document.querySelectorAll(selector).forEach(node => {
-          if (qualifiesClosedDealsContainer(node)) found.add(node);
+    for (let i = 0; i <betArray.length;i++){
+        if (step == betArray[i].step){
+            steps = betArray[i].pressCount;
+        }
+    }
+
+    for (i=0; i < 30; i++){
+        setTimeout(function() {
+            decreaseBet();
+        }, i);
+    }
+
+    setTimeout(function() {  
+        for (i=0; i < steps; i++){
+            setTimeout(function() {
+                increaseBet();
+            }, i);
+        }
+    }, 50);
+
+    setTimeout(function() {  
+        if (tradeDirection == 'buy'){
+            buy();
+        } else {
+            sell();
+        }
+        let betValue = getBetValue(step);
+        // console.log('Betting: ' + betValue + ' / Step: ' + step + ' / Direction: ' + tradeDirection);
+    }, 100);
+}
+let getBetValue = (betStep) => {
+    let value;
+    for (let i=0;i<betArray.length;i++) {
+        if (betStep == betArray[i].step) {
+            value = betArray[i].value;
+        }
+    }
+    return value;
+}
+let takeRight = (arr, n = 1) => arr.slice(-n);
+Array.prototype.max = function() {
+    return Math.max.apply(null, this);
+};  
+Array.prototype.min = function() {
+    return Math.min.apply(null, this);
+};
+let resetCycle = (winStatus) => {
+
+    let time = Date.now();
+    let hTime = humanTime(time);
+      
+    // Пример: логирование сделки
+    // logTradeToGoogleSheets(appversion, winStatus, currentProfit, maxStepInCycle, symbolName);
+
+    console.log('%c RESET CYCLE! '+hTime, 'background: #9326FF; color: #ffffff');
+
+    profitDiv.style.background = 'inherit';
+
+    maxStepInCycle = 0;
+    
+    // Reset the current bet step when starting a new cycle
+    currentBetStep = 0;
+
+    if (cyclesToPlay > 0) {
+        cyclesStats.push(currentProfit);
+        startBalance = currentBalance;
+        cyclesToPlay--;
+        // cyclesDiv.innerHTML = cyclesToPlay;
+        let totalProfit = 0;
+        for (let i = 0; i < cyclesStats.length; i++) {
+            totalProfit += cyclesStats[i];
+        }
+
+        totalProfit = Math.round(totalProfit * 100) / 100;
+        totalProfitDiv.innerHTML = totalProfit;
+        if (totalProfit < 0) {
+            totalProfitDiv.style.background = '#B90000';
+        } else if (totalProfit > 0) {
+            totalProfitDiv.style.background = '#009500';
+        }
+        firstTradeBlock = false;
+    } else {
+        console.log('%c ----- ALL CYCLES ENDED! ----- '+hTime+' ------', 'background: #9326FF; color: #ffffff');
+    }
+}
+function updateHeaderPanel() {
+    // Get references to elements we need to update
+    const symbolElement = document.getElementById('trading-symbol');
+    const balanceElement = document.getElementById('balance');
+    const modeElement = document.getElementById('trading-mode');
+    const timeElement = document.getElementById('time');
+    
+    if (!symbolElement || !balanceElement || !modeElement) return;
+    
+    // Update trading symbol with additional market data if available
+    if (window.globalPrice) {
+        const priceChangeColor = window.priceDirection === 'up' ? '#00c800' : 
+                                window.priceDirection === 'down' ? '#ff3a3a' : '#ffffff';
+        
+        // Format the price with appropriate decimal places based on value
+        const formattedPrice = window.globalPrice < 1 ? 
+            window.globalPrice.toFixed(5) : 
+            window.globalPrice.toFixed(2);
+        
+        symbolElement.innerHTML = `${symbolName} <span style="color: ${priceChangeColor}; font-weight: bold;">${formattedPrice}</span>`;
+    }
+    
+    // Update balance with current account value
+    if (window.currentBalance) {
+        // Format balance with commas for thousands and fixed to 2 decimal places
+        const formattedBalance = parseFloat(window.currentBalance).toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
         });
-      } catch (_err){}
-    });
-    try {
-      document.querySelectorAll('.deals-list').forEach(node => {
-        if (qualifiesClosedDealsContainer(node)) found.add(node);
-      });
-    } catch (_err){}
-    found.forEach(attachClosedDealsContainer);
-  }
-
-  function attachClosedDealsContainer(node){
-    if (!node || closedDealsWatcher.containers.has(node)) return;
-    try {
-      closedDealsWatcher.observer.observe(node, { childList: true, subtree: true });
-      closedDealsWatcher.containers.add(node);
-    } catch (err){
-      console.warn('[Verter] closed deals observer attach failed', err);
+        
+        // Add color based on profit/loss compared to starting balance
+        const balanceColor = window.currentBalance > startBalance ? '#00c800' : 
+                            window.currentBalance < startBalance ? '#ff3a3a' : '#ffffff';
+        
+        balanceElement.innerHTML = `${formattedBalance}`;
+        balanceElement.style.color = balanceColor;
     }
-  }
-
-  function qualifiesClosedDealsContainer(node){
-    if (!node || node.nodeType !== 1) return false;
-    if (closedDealsWatcher.containers.has(node)) return true;
-    const dataset = node.dataset || {};
-    if (dataset.tab === 'closed' || dataset.type === 'closed' || dataset.state === 'closed' || dataset.list === 'closed'){
-      return true;
+    
+    // Update mode with additional information
+    if (modeElement) {
+        const sessionDuration = Math.floor((Date.now() - startTime) / 60000); // in minutes
+        modeElement.innerHTML = `${mode} <span style="font-size: 11px; opacity: 0.8;">(${sessionDuration} min)</span>`;
     }
-    try {
-      if (node.matches && node.matches('.trades__list--closed, .trades-list--closed, .closed-deals__list, .history__list--closed')){
-        return true;
-      }
-    } catch (_err){}
-    const className = (node.className || '').toString().toLowerCase();
-    if (className && className.includes('closed') && (className.includes('deal') || className.includes('trade'))){
-      return true;
+    
+    // Update time display
+    if (timeElement) {
+        const currentTime = new Date();
+        const hours = currentTime.getHours().toString().padStart(2, '0');
+        const minutes = currentTime.getMinutes().toString().padStart(2, '0');
+        const seconds = currentTime.getSeconds().toString().padStart(2, '0');
+        timeElement.innerHTML = `${hours}:${minutes}:${seconds}`;
     }
-    for (const selector of CLOSED_DEAL_PARENT_QUERIES){
-      try {
-        if (node.closest && node.closest(selector)) return true;
-      } catch (_err){}
-    }
-    return false;
-  }
-
-  function handleClosedDealsMutation(mutations){
-    if (!state.isTradeOpen || !state.openTrade) return;
-    const containers = new Set();
-    mutations.forEach(mutation => {
-      if (mutation.type !== 'childList') return;
-      const targetContainer = findClosedDealsContainer(mutation.target);
-      if (targetContainer) containers.add(targetContainer);
-      mutation.addedNodes && mutation.addedNodes.forEach(node => {
-        const candidate = findClosedDealsContainer(node);
-        if (candidate) containers.add(candidate);
-      });
-    });
-    containers.forEach(container => processClosedDealsContainer(container));
-  }
-
-  function findClosedDealsContainer(node){
-    if (!node || node.nodeType !== 1) return null;
-    if (closedDealsWatcher.containers.has(node)) return node;
-    for (const container of closedDealsWatcher.containers){
-      if (container.contains(node)) return container;
-    }
-    for (const selector of CLOSED_DEAL_CONTAINER_QUERIES){
-      try {
-        const match = node.closest(selector);
-        if (match) return match;
-      } catch (_err){}
-    }
-    if (node.classList && node.classList.contains('deals-list') && qualifiesClosedDealsContainer(node)){
-      return node;
-    }
-    return null;
-  }
-
-  function processClosedDealsContainer(container){
-    const row = findLastClosedDealRow(container);
-    if (!row) return;
-    const info = parseClosedDealRow(row, state.openTrade);
-    if (!info) return;
-    evaluateClosedDeal(info);
-  }
-
-  function isMeaningfulDealRow(node){
-    if (!node || node.nodeType !== 1) return false;
-    const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!text) return false;
-    if (/no (deals|trades)/i.test(text) && text.length < 64) return false;
-    return true;
-  }
-
-  function findLastClosedDealRow(container){
-    if (!container || container.nodeType !== 1) return null;
-    let node = container.lastElementChild;
-    while (node && node.nodeType === 1 && !isMeaningfulDealRow(node)){
-      node = node.previousElementSibling;
-    }
-    if (node && isMeaningfulDealRow(node)) return node;
-    for (const selector of CLOSED_DEAL_ROW_QUERIES){
-      try {
-        const rows = container.querySelectorAll(selector);
-        for (let i = rows.length - 1; i >= 0; i -= 1){
-          if (isMeaningfulDealRow(rows[i])) return rows[i];
+    
+    // Update sensitivity indicator if it exists
+    const sensitivityValue = document.getElementById('sensitivity-value');
+    if (sensitivityValue) {
+        // Color code based on sensitivity level
+        let sensitivityColor = '#ffffff';
+        if (signalSensitivity <= 3) {
+            sensitivityColor = '#ff3a3a'; // Red for aggressive
+        } else if (signalSensitivity <= 6) {
+            sensitivityColor = '#ffa500'; // Orange for moderate
+        } else {
+            sensitivityColor = '#00c800'; // Green for conservative
         }
-      } catch (_err){}
+        sensitivityValue.style.color = sensitivityColor;
     }
-    return null;
-  }
+    
+    // Update auto-trading status indicator if it exists
+    const autoTradingToggle = document.getElementById('auto-trading-toggle');
+    if (autoTradingToggle) {
+        const autoTradingLabel = autoTradingToggle.parentElement.querySelector('label');
+        if (autoTradingLabel) {
+            autoTradingLabel.style.color = autoTradingEnabled ? '#00c800' : '#ff3a3a';
+        }
+    }
+    
+    // Update market volatility indicator if available
+    if (window.marketVolatility !== undefined) {
+        const volatilityElement = document.getElementById('market-volatility');
+        if (volatilityElement) {
+            const volatility = window.marketVolatility * 100;
+            let volatilityColor = '#ffffff';
+            
+            if (volatility > 0.5) {
+                volatilityColor = '#ff3a3a'; // High volatility
+            } else if (volatility > 0.2) {
+                volatilityColor = '#ffa500'; // Medium volatility
+            } else {
+                volatilityColor = '#00c800'; // Low volatility
+            }
+            
+            volatilityElement.innerHTML = `${volatility.toFixed(2)}%`;
+            volatilityElement.style.color = volatilityColor;
+        }
+    }
+    
+    // Update support/resistance levels if available
+    if (window.supportResistance) {
+        const supportElement = document.getElementById('support-level');
+        const resistanceElement = document.getElementById('resistance-level');
+        
+        if (supportElement && window.supportResistance.support) {
+            const formattedSupport = window.supportResistance.support < 1 ? 
+                window.supportResistance.support.toFixed(5) : 
+                window.supportResistance.support.toFixed(2);
+            supportElement.innerHTML = formattedSupport;
+        }
+        
+        if (resistanceElement && window.supportResistance.resistance) {
+            const formattedResistance = window.supportResistance.resistance < 1 ? 
+                window.supportResistance.resistance.toFixed(5) : 
+                window.supportResistance.resistance.toFixed(2);
+            resistanceElement.innerHTML = formattedResistance;
+        }
+    }
+}
 
-  function parseClosedDealRow(row, openTrade){
-    if (!row || row.nodeType !== 1) return null;
-    const text = (row.textContent || '').replace(/\u00a0/g, ' ').trim();
-    if (!text) return null;
-    const info = {
-      node: row,
-      text,
-      symbol: null,
-      symbolKey: '',
-      amount: NaN,
-      pnl: NaN,
-      result: null
+// Call this function periodically to update the header panel
+// You can add this to your existing setInterval or create a new one
+setInterval(updateHeaderPanel, 1000); // Update every second
+function addUI() {
+    // create a new div element
+    const newDiv = document.createElement("div");
+    newDiv.style.width = "480px";
+    newDiv.style.position = "absolute";
+    newDiv.style.top = "130px";
+    newDiv.style.left = "110px";
+    newDiv.style.zIndex = "100500";
+    newDiv.style.background = "rgba(0, 0, 0, 0.8)"; // Slightly darker background
+    newDiv.style.padding = "20px";
+    newDiv.style.borderRadius = "10px";
+    newDiv.style.boxShadow = "0 4px 12px rgba(0, 0, 0, 0.5)"; // Add shadow for depth
+    newDiv.style.fontFamily = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif"; // Better font
+    newDiv.style.color = "#ddd"; // Lighter text color for better contrast
+    newDiv.style.maxHeight = "85vh";
+    newDiv.style.overflowY = "auto";
+    newDiv.style.scrollbarWidth = "thin";
+    newDiv.style.scrollbarColor = "#444 #222";
+
+    historyBetDiv = document.createElement("div");
+    historyBetDiv.style.width = "10px";
+    historyBetDiv.style.height = "10px";
+    historyBetDiv.style.padding = "2px";
+    historyBetDiv.style.display = "inline-block";
+    historyBetDiv.classList.add("history-bet");
+  
+    // Add CSS for the UI
+    const styleElement = document.createElement('style');
+    styleElement.textContent = `
+        .bot-trading-panel {
+            margin-bottom: 15px;
+            background-color: rgba(40, 40, 40, 0.7);
+            border-radius: 6px;
+            padding: 12px;
+        }
+        
+        .panel-header {
+            font-size: 14px;
+            font-weight: bold;
+            color: #aaa;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .panel-header .version {
+            font-size: 11px;
+            color: #666;
+            font-weight: normal;
+        }
+        
+        .info-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px dotted #333;
+        }
+        
+        .info-label {
+            color: #888;
+            font-size: 12px;
+        }
+        
+        .info-value {
+            font-weight: 500;
+            color: #ddd;
+            font-size: 12px;
+        }
+        
+        .profit-positive {
+            color: #00b300;
+        }
+        
+        .profit-negative {
+            color: #ff4d4d;
+        }
+        
+        .signal-buy {
+            color: #00b300;
+            font-weight: bold;
+        }
+        
+        .signal-sell {
+            color: #ff4d4d;
+            font-weight: bold;
+        }
+        
+        .signal-flat {
+            color: #aaa;
+        }
+        
+        .full-width {
+            grid-column: 1 / span 2;
+        }
+        
+        .cycles-history {
+            margin-top: 10px;
+            padding: 8px;
+            background-color: rgba(30, 30, 30, 0.7);
+            border-radius: 4px;
+            max-height: 80px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+    `;
+    document.head.appendChild(styleElement);
+    
+    // Add the version info
+    const headerPanel = document.createElement('div');
+    headerPanel.className = 'bot-trading-panel';
+    headerPanel.innerHTML = `
+        <div class="panel-header">
+            <span>Trading Bot</span>
+            <span class="version">${appversion}</span>
+        </div>
+        <div class="info-grid">
+            <div class="info-item full-width">
+                <span class="info-label">Trading Symbol:</span>
+                <span class="info-value" id="trading-symbol">${symbolName}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Start Balance:</span>
+                <span class="info-value">${startBalance}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Start Time:</span>
+                <span class="info-value">${startTime}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Mode:</span>
+                <span class="info-value">${mode}</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Reverse:</span>
+                <span class="info-value">${reverse}</span>
+            </div>
+        </div>
+    `;
+    
+    // Add the trading status panel
+    const statusPanel = document.createElement('div');
+    statusPanel.className = 'bot-trading-panel';
+    statusPanel.innerHTML = `
+        <div class="panel-header">
+            <span>Trading Status</span>
+            <span id="time" class="info-value">0:00</span>
+        </div>
+        <div class="info-grid">
+            <div class="info-item">
+                <span class="info-label">Signal:</span>
+                <span class="info-value" id="signal">none</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Direction:</span>
+                <span class="info-value" id="trade-dir">flat</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Cycle Profit:</span>
+                <span class="info-value" id="profit">$0</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Win Rate:</span>
+                <span class="info-value" id="won-percent">0%</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Current Wager:</span>
+                <span class="info-value" id="wager">$0</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Profit %:</span>
+                <span class="info-value" id="profit-percent">0%</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Max Step:</span>
+                <span class="info-value" id="max-step">0</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Total Profit:</span>
+                <span class="info-value" id="total-profit">$0</span>
+            </div>
+        </div>
+    `;
+    
+    // Add the cycles history panel
+    const cyclesPanel = document.createElement('div');
+    cyclesPanel.className = 'bot-trading-panel';
+    cyclesPanel.innerHTML = `
+        <div class="panel-header">
+            <span>Cycles History</span>
+        </div>
+        <div class="cycles-history" id="cycles-history"></div>
+    `;
+    
+    // Add the graphs panel
+    const graphsPanel = document.createElement('div');
+    graphsPanel.className = 'bot-trading-panel';
+    graphsPanel.innerHTML = `
+        <div class="panel-header">
+            <span>Technical Analysis</span>
+        </div>
+        <div id="graphs"></div>
+    `;
+    
+    // Append all panels to the main div
+    newDiv.appendChild(headerPanel);
+    newDiv.appendChild(statusPanel);
+    newDiv.appendChild(cyclesPanel);
+    newDiv.appendChild(graphsPanel);
+    
+    // Add the newly created element to the DOM
+    document.body.appendChild(newDiv);
+
+    // Get references to all the elements we need to update
+    profitDiv = document.getElementById("profit");
+    profitPercentDivAdvisor = document.getElementById("profit-percent");
+    historyDiv = document.getElementById("history-box");
+    signalDiv = document.getElementById("signal");
+    tradingSymbolDiv = document.getElementById("trading-symbol");
+    trendDiv = document.getElementById("price-trend");
+    globalTrendDiv = document.getElementById("global-trend");
+    tradeDirectionDiv = document.getElementById("trade-dir");
+    timeDiv = document.getElementById("time");
+    wonDiv = document.getElementById("won-percent");
+    wagerDiv = document.getElementById("wager");
+    maxStepDiv = document.getElementById("max-step");
+    totalProfitDiv = document.getElementById("total-profit");
+    cyclesHistoryDiv = document.getElementById("cycles-history");
+    graphContainer = document.getElementById("graphs");
+
+    // After creating all UI elements, add the sensitivity control
+    setTimeout(() => {
+        addSensitivityControl();
+    }, 500);
+}
+function updateIndicatorDisplay(insufficientData, indicators) {
+    // Create or update the indicator display container
+    let indicatorDisplay = document.getElementById('indicator-display');
+    if (!indicatorDisplay) {
+        indicatorDisplay = document.createElement('div');
+        indicatorDisplay.id = 'indicator-display';
+        indicatorDisplay.style.marginTop = '10px';
+        indicatorDisplay.style.padding = '10px';
+        indicatorDisplay.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+        indicatorDisplay.style.borderRadius = '5px';
+        document.getElementById('graphs').appendChild(indicatorDisplay);
+    }
+    
+    // If we don't have enough data, show a message
+    if (insufficientData) {
+        indicatorDisplay.innerHTML = '<div style="color: #ffaa00;">Collecting data for indicators...</div>';
+        return;
+    }
+    
+    // Format the indicators for display
+    const {
+        shortEMA, longEMA, emaDifference, rsiValue, macdData, 
+        bollingerBands, stochastic, rocValue, awesomeOsc, 
+        parabolicSAR, trend, priceAction, mtfSignal
+    } = indicators;
+    
+    // Color coding based on indicator values
+    const emaColor = emaDifference > 0 ? greenColor : (emaDifference < 0 ? redColor : 'white');
+    const rsiColor = rsiValue < 30 ? greenColor : (rsiValue > 70 ? redColor : 'white');
+    const macdColor = macdData.histogram > 0 ? greenColor : (macdData.histogram < 0 ? redColor : 'white');
+    const stochColor = stochastic.k < 20 ? greenColor : (stochastic.k > 80 ? redColor : 'white');
+    const rocColor = rocValue > 0 ? greenColor : (rocValue < 0 ? redColor : 'white');
+    const aoColor = awesomeOsc > 0 ? greenColor : (awesomeOsc < 0 ? redColor : 'white');
+    const trendColor = trend.includes('up') ? greenColor : (trend.includes('down') ? redColor : 'white');
+    const patternColor = priceAction.pattern.includes('bullish') ? greenColor : 
+                         (priceAction.pattern.includes('bearish') ? redColor : 'white');
+    const mtfColor = mtfSignal === 'buy' ? greenColor : (mtfSignal === 'sell' ? redColor : 'white');
+    
+    // Create HTML for indicator display
+    indicatorDisplay.innerHTML = `
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; color: white;">
+            <div>
+                <div><strong>EMA:</strong> <span style="color: ${emaColor}">Short: ${shortEMA.toFixed(5)}, Long: ${longEMA.toFixed(5)}</span></div>
+                <div><strong>Diff:</strong> <span style="color: ${emaColor}">${emaDifference.toFixed(5)}</span></div>
+                <div><strong>RSI:</strong> <span style="color: ${rsiColor}">${rsiValue.toFixed(2)}</span></div>
+                <div><strong>MACD:</strong> <span style="color: ${macdColor}">${macdData.macd.toFixed(5)} / ${macdData.signal.toFixed(5)}</span></div>
+                <div><strong>BB:</strong> <span>${bollingerBands.upper.toFixed(5)} / ${bollingerBands.middle.toFixed(5)} / ${bollingerBands.lower.toFixed(5)}</span></div>
+            </div>
+            <div>
+                <div><strong>Stoch:</strong> <span style="color: ${stochColor}">K: ${stochastic.k.toFixed(2)}, D: ${stochastic.d.toFixed(2)}</span></div>
+                <div><strong>ROC:</strong> <span style="color: ${rocColor}">${rocValue.toFixed(2)}</span></div>
+                <div><strong>AO:</strong> <span style="color: ${aoColor}">${awesomeOsc.toFixed(5)}</span></div>
+                <div><strong>Trend:</strong> <span style="color: ${trendColor}">${trend}</span></div>
+                <div><strong>Pattern:</strong> <span style="color: ${patternColor}">${priceAction.pattern}</span></div>
+                <div><strong>MTF:</strong> <span style="color: ${mtfColor}">${mtfSignal}</span></div>
+            </div>
+        </div>
+    `;
+}
+
+// Add this function to update the header panel with more information
+function updateHeaderPanel() {
+    const symbolElement = document.getElementById('trading-symbol');
+    const balanceElement = document.getElementById('balance');
+    const modeElement = document.getElementById('trading-mode');
+    const timeElement = document.getElementById('time');
+    
+    if (!symbolElement || !balanceElement || !modeElement) return;
+    
+    // Update trading symbol with additional market data if available
+    if (window.globalPrice) {
+        const priceChangeColor = window.priceDirection === 'up' ? '#00c800' : 
+                                window.priceDirection === 'down' ? '#ff3a3a' : '#ffffff';
+        
+        // Format the price with appropriate decimal places based on value
+        const formattedPrice = window.globalPrice < 1 ? 
+            window.globalPrice.toFixed(5) : 
+            window.globalPrice.toFixed(2);
+        
+        symbolElement.innerHTML = `${symbolName} <span style="color: ${priceChangeColor}; font-weight: bold;">${formattedPrice}</span>`;
+    }
+    
+    // Update balance with current account value
+    if (window.currentBalance) {
+        const formattedBalance = window.currentBalance.toLocaleString('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+        balanceElement.innerHTML = formattedBalance;
+    }
+    
+    // Update time display
+    if (timeElement) {
+        const now = new Date();
+        timeElement.innerHTML = now.toLocaleTimeString();
+    }
+    
+    // Update support/resistance levels if available
+    const supportElement = document.getElementById('support-level');
+    const resistanceElement = document.getElementById('resistance-level');
+    
+    if (supportElement && resistanceElement && window.supportResistance) {
+        if (window.supportResistance.support) {
+            const formattedSupport = window.supportResistance.support < 1 ? 
+                window.supportResistance.support.toFixed(5) : 
+                window.supportResistance.support.toFixed(2);
+            supportElement.innerHTML = formattedSupport;
+        }
+        
+        if (window.supportResistance.resistance) {
+            const formattedResistance = window.supportResistance.resistance < 1 ? 
+                window.supportResistance.resistance.toFixed(5) : 
+                window.supportResistance.resistance.toFixed(2);
+            resistanceElement.innerHTML = formattedResistance;
+        }
+    }
+}
+addUI();
+setInterval(queryPrice, 100);
+
+// Add these variables near the top of your file with other global variables
+let signalSensitivity = 3; // Default sensitivity threshold (can be 1-10)
+let autoTradingEnabled = true; // Toggle for auto-trading
+
+// Add a UI control for sensitivity
+function addSensitivityControl() {
+    const controlDiv = document.createElement('div');
+    controlDiv.style.marginTop = '15px';
+    controlDiv.style.marginBottom = '15px';
+    controlDiv.innerHTML = `
+        <div style="margin-bottom: 10px;">
+            <label for="sensitivity-slider">Signal Sensitivity: <span id="sensitivity-value">${signalSensitivity}</span></label>
+            <input type="range" id="sensitivity-slider" min="1" max="10" value="${signalSensitivity}" style="width: 200px;">
+        </div>
+        <div>
+            <label for="auto-trading-toggle">Auto Trading: </label>
+            <input type="checkbox" id="auto-trading-toggle" ${autoTradingEnabled ? 'checked' : ''}>
+        </div>
+    `;
+    
+    // Insert before the graphs div
+    const graphsDiv = document.getElementById('graphs');
+    graphsDiv.parentNode.insertBefore(controlDiv, graphsDiv);
+    
+    // Add event listeners
+    document.getElementById('sensitivity-slider').addEventListener('input', function(e) {
+        signalSensitivity = parseInt(e.target.value);
+        document.getElementById('sensitivity-value').textContent = signalSensitivity;
+        console.log(`Signal sensitivity set to: ${signalSensitivity}`);
+    });
+    
+    document.getElementById('auto-trading-toggle').addEventListener('change', function(e) {
+        autoTradingEnabled = e.target.checked;
+        console.log(`Auto trading ${autoTradingEnabled ? 'enabled' : 'disabled'}`);
+    });
+}
+
+let averageInArray = array => array.reduce((a, b) => a + b) / array.length;
+
+function visualizeCloseValues(arr1, arr2, maxTransform = 100) {
+    let samples = Math.min(20, arr1.length, arr2.length);
+    
+    let min = arr1[arr1.length - 1];
+    let max = arr1[arr1.length - 1];
+    for (let i = 1; i <= samples; i++) {
+        min = Math.min(min, arr1[arr1.length - i], arr2[arr1.length - i]);
+        max = Math.max(max, arr1[arr1.length - i], arr2[arr1.length - i]);
+    }
+    
+    let transformCount = Math.min(maxTransform, arr1.length, arr2.length);
+    let outArr1 = new Array(transformCount);
+    let outArr2 = new Array(transformCount);
+    for (let i = 1; i <= transformCount; i++) {
+        outArr1[transformCount - i] = (arr1[transformCount - i] - min) / (max - min);
+        outArr2[transformCount - i] = (arr2[transformCount - i] - min) / (max - min);
+    }
+
+    return {
+        arr1: outArr1,
+        arr2: outArr2,
     };
+}
+function updateIndicatorDisplay(insufficientData, indicators) {
+    // Create or update the indicator panels
+    if (!document.getElementById('price-indicators')) {
+        createIndicatorPanels();
+    }
+    
+    if (insufficientData) {
+        document.getElementById('ema-value').innerHTML = 'N/A';
+        document.getElementById('macd-value').innerHTML = 'N/A';
+        document.getElementById('roc-value').innerHTML = 'N/A';
+        document.getElementById('sar-value').innerHTML = 'N/A';
+        document.getElementById('pattern-value').innerHTML = 'Waiting for data...';
+        document.getElementById('candle-count').innerHTML = '0 (1m)';
+        return;
+    }
+    
+    const {
+        shortEMA,
+        longEMA,
+        emaDifference,
+        rsiValue,
+        macdData,
+        rocValue,
+        parabolicSAR,
+        priceAction,
+        candlePrices,
+        currentTime
+    } = indicators;
+    
+    // Update EMA display
+    const emaElement = document.getElementById('ema-value');
+    if (emaElement) {
+        emaElement.innerHTML = `${shortEMA.toFixed(5)} / ${longEMA.toFixed(5)}`;
+        emaElement.style.color = emaDifference > 0 ? '#00c800' : emaDifference < 0 ? '#ff3a3a' : '#ffffff';
+    }
+    
+    // Update MACD display
+    const macdElement = document.getElementById('macd-value');
+    if (macdElement && macdData) {
+        macdElement.innerHTML = macdData.histogram ? macdData.histogram.toFixed(5) : 'N/A';
+        macdElement.style.color = macdData.histogram > 0 ? '#00c800' : macdData.histogram < 0 ? '#ff3a3a' : '#ffffff';
+    }
+    
+    // Update ROC display
+    const rocElement = document.getElementById('roc-value');
+    if (rocElement) {
+        rocElement.innerHTML = rocValue ? rocValue.toFixed(4) + '%' : 'N/A';
+        rocElement.style.color = rocValue > 0 ? '#00c800' : rocValue < 0 ? '#ff3a3a' : '#ffffff';
+    }
+    
+    // Update SAR display
+    const sarElement = document.getElementById('sar-value');
+    if (sarElement && parabolicSAR) {
+        sarElement.innerHTML = parabolicSAR.isUpTrend ? 'UP' : 'DOWN';
+        sarElement.style.color = parabolicSAR.isUpTrend ? '#00c800' : '#ff3a3a';
+    }
+    
+    // Update Pattern display
+    const patternElement = document.getElementById('pattern-value');
+    if (patternElement && priceAction) {
+        patternElement.innerHTML = priceAction.pattern || 'neutral';
+        if (priceAction.pattern.includes('bullish')) {
+            patternElement.style.color = '#00c800';
+        } else if (priceAction.pattern.includes('bearish')) {
+            patternElement.style.color = '#ff3a3a';
+        } else {
+            patternElement.style.color = '#ffffff';
+        }
+    }
+    
+    // Update candle count
+    const candleCountElement = document.getElementById('candle-count');
+    if (candleCountElement) {
+        candleCountElement.innerHTML = `${candlePrices.length} (1m)`;
+    }
+    
+    // Update next candle timer
+    const nextCandleElement = document.getElementById('next-candle');
+    if (nextCandleElement) {
+        const timeUntilNextCandle = candleInterval - (currentTime - lastCandleTime);
+        nextCandleElement.innerHTML = `${Math.round(timeUntilNextCandle/1000)}s`;
+    }
+}
 
-    const symbol = readSymbolFromRow(row);
-    if (symbol){
-      info.symbol = symbol;
-      info.symbolKey = makeSymbolKey(symbol);
-    } else if (openTrade && openTrade.symbol && textContainsSymbol(text, openTrade.symbol)){
-      info.symbol = openTrade.symbol;
-      info.symbolKey = openTrade.symbolKey || makeSymbolKey(openTrade.symbol);
+function createIndicatorPanels() {
+    const container = document.getElementById('graphs') || document.body;
+    
+    // Create Price Indicators Panel
+    const pricePanel = document.createElement('div');
+    pricePanel.id = 'price-indicators';
+    pricePanel.className = 'indicator-panel';
+    pricePanel.innerHTML = `
+        <h3>Price Indicators</h3>
+        <div class="indicator-row">
+            <span class="indicator-label">EMA:</span>
+            <span id="ema-value" class="indicator-value">N/A</span>
+        </div>
+        <div class="indicator-row">
+            <span class="indicator-label">MACD:</span>
+            <span id="macd-value" class="indicator-value">N/A</span>
+        </div>
+    `;
+    
+    // Create Momentum & Trend Panel
+    const momentumPanel = document.createElement('div');
+    momentumPanel.id = 'momentum-trend';
+    momentumPanel.className = 'indicator-panel';
+    momentumPanel.innerHTML = `
+        <h3>Momentum & Trend</h3>
+        <div class="indicator-row">
+            <span class="indicator-label">ROC:</span>
+            <span id="roc-value" class="indicator-value">N/A</span>
+        </div>
+        <div class="indicator-row">
+            <span class="indicator-label">SAR:</span>
+            <span id="sar-value" class="indicator-value">N/A</span>
+        </div>
+    `;
+    
+    // Create Pattern & Analysis Panel
+    const patternPanel = document.createElement('div');
+    patternPanel.id = 'pattern-analysis';
+    patternPanel.className = 'indicator-panel';
+    patternPanel.innerHTML = `
+        <h3>Pattern & Analysis</h3>
+        <div class="indicator-row">
+            <span class="indicator-label">Pattern:</span>
+            <span id="pattern-value" class="indicator-value">neutral</span>
+        </div>
+    `;
+    
+    // Create Candle Data Panel
+    const candlePanel = document.createElement('div');
+    candlePanel.id = 'candle-data';
+    candlePanel.className = 'indicator-panel';
+    candlePanel.innerHTML = `
+        <h3>Candle Data</h3>
+        <div class="indicator-row">
+            <span class="indicator-label">Candles:</span>
+            <span id="candle-count" class="indicator-value">0 (1m)</span>
+        </div>
+        <div class="indicator-row">
+            <span class="indicator-label">Next Candle:</span>
+            <span id="next-candle" class="indicator-value">60s</span>
+        </div>
+    `;
+    
+    // Add CSS for the panels
+    const style = document.createElement('style');
+    style.textContent = `
+        .indicator-panel {
+            background-color: rgba(30, 30, 30, 0.8);
+            border-radius: 5px;
+            padding: 5px;
+        }
+        .indicator-panel h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #aaa;
+        }
+        .indicator-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+        .indicator-label {
+            color: #aaa;
+        }
+        .indicator-value {
+            font-weight: bold;
+        }
+    `;
+    
+    document.head.appendChild(style);
+    
+    // Append all panels to the container
+    container.appendChild(pricePanel);
+    container.appendChild(momentumPanel);
+    container.appendChild(patternPanel);
+    container.appendChild(candlePanel);
+}
+
+var styles = `
+    .sqz-bar { 
+        width: 6px;
+        background-color: #ccc;
+        display: inline-block;
+        margin: 10px 20px 0 40px;
+        position: absolute;
+        bottom: 80px;
+    }
+    .sqz-dot { 
+        width: 6px;
+        height: 6px;
+        background-color: #ccc;
+        display: inline-block;
+        margin: 10px 20px 0 40px;
+        position: absolute;
+        bottom: 80px;
+    }
+    .max-cycle {
+        text-align: center;
+        position: relative;
+        bottom: 1px;
+        font-size: 12px;
+        background: #3b3b3b;
+        padding: 2px 5px;
+        border-radius: 3px;
+    }
+    .mesa-bar {
+        width: 360px;
+        height: 2px;
+        background-color: #ccc;
+        display: inline-block;
+        margin: 10px 20px;
+        position: absolute;
+        bottom: 80px;
+    }
+    #mama-bar {
+        background-color: #7344A6;
+    }
+    #fama-bar {
+        background-color: #E1A971;
+    }
+    span {
+        padding: 5px 10px;
+        display: inline-block;
+        border-radius: 3px;
     }
 
-    const amount = readAmountFromRow(row, text, openTrade);
-    if (Number.isFinite(amount)) info.amount = amount;
+`
 
-    const pnl = readPnLFromRow(row, text);
-    if (Number.isFinite(pnl)) info.pnl = pnl;
+var styleSheet = document.createElement("style");
+styleSheet.textContent = styles;
+document.head.appendChild(styleSheet);
 
-    const result = detectResultFromRow(row);
-    if (result) info.result = result;
-    if (!info.result){
-      const derived = classifyResultFromPnL(info.pnl);
-      if (derived) info.result = derived;
-    }
+function logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit) {
 
-    return info;
-  }
-
-  function readSymbolFromRow(row){
-    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
-    for (const element of elements){
-      const dataset = element.dataset || {};
-      for (const key of CLOSED_DEAL_SYMBOL_DATA_KEYS){
-        if (dataset[key]){
-          const label = normalizeSymbolLabel(dataset[key]);
-          if (label) return label;
-        }
-      }
-      for (const key of CLOSED_DEAL_SYMBOL_DATA_KEYS){
-        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
-        if (element.hasAttribute && element.hasAttribute(attrName)){
-          const label = normalizeSymbolLabel(element.getAttribute(attrName));
-          if (label) return label;
-        }
-      }
+    // logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit);
+    const data = { appversion, reverse, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit };
+  
+    fetch(webhookUrl, {
+    method: 'POST',
+    mode: 'no-cors', // This will bypass CORS, but with limitations
+    body: JSON.stringify(data),
+    headers: {
+        'Content-Type': 'application/json'
     }
-    for (const selector of CLOSED_DEAL_SYMBOL_SELECTORS){
-      try {
-        const el = row.querySelector(selector);
-        if (el){
-          const label = normalizeSymbolLabel(el.textContent || el.innerText || (el.getAttribute && el.getAttribute('data-symbol')));
-          if (label) return label;
-        }
-      } catch (_err){}
-    }
-    const text = (row.textContent || '').toUpperCase();
-    let match = text.match(/([A-Z]{2,6}\s*\/\s*[A-Z]{2,6})/);
-    if (match) return normalizeSymbolLabel(match[1]);
-    match = text.match(/([A-Z]{2,6}\s+[A-Z]{2,6})/);
-    if (match) return normalizeSymbolLabel(match[1]);
-    return null;
-  }
-
-  function readAmountFromRow(row, text, openTrade){
-    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
-    for (const element of elements){
-      const dataset = element.dataset || {};
-      for (const key of CLOSED_DEAL_AMOUNT_DATA_KEYS){
-        if (dataset[key] != null){
-          const value = parseMoneyValue(dataset[key]);
-          if (Number.isFinite(value)) return value;
-        }
-      }
-      for (const key of CLOSED_DEAL_AMOUNT_DATA_KEYS){
-        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
-        if (element.hasAttribute && element.hasAttribute(attrName)){
-          const value = parseMoneyValue(element.getAttribute(attrName));
-          if (Number.isFinite(value)) return value;
-        }
-      }
-    }
-    for (const selector of CLOSED_DEAL_AMOUNT_SELECTORS){
-      try {
-        const el = row.querySelector(selector);
-        if (el){
-          const value = parseMoneyValue(el.textContent || el.innerText || (el.getAttribute && el.getAttribute('data-value')));
-          if (Number.isFinite(value)) return value;
-        }
-      } catch (_err){}
-    }
-    const target = openTrade ? openTrade.amount : NaN;
-    const fallback = findAmountInText(text, target);
-    return Number.isFinite(fallback) ? fallback : NaN;
-  }
-
-  function readPnLFromRow(row, text){
-    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
-    const datasetKeys = CLOSED_DEAL_PNL_DATA_KEYS.concat(['status', 'state', 'outcome']);
-    for (const element of elements){
-      const dataset = element.dataset || {};
-      for (const key of datasetKeys){
-        if (dataset[key] != null){
-          const value = parseMoneyValue(dataset[key]);
-          if (Number.isFinite(value)) return value;
-        }
-      }
-      for (const key of datasetKeys){
-        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
-        if (element.hasAttribute && element.hasAttribute(attrName)){
-          const value = parseMoneyValue(element.getAttribute(attrName));
-          if (Number.isFinite(value)) return value;
-        }
-      }
-    }
-    for (const selector of CLOSED_DEAL_PNL_SELECTORS){
-      try {
-        const el = row.querySelector(selector);
-        if (el){
-          const value = parseMoneyValue(el.textContent || el.innerText || (el.getAttribute && el.getAttribute('data-value')));
-          if (Number.isFinite(value)) return value;
-        }
-      } catch (_err){}
-    }
-    const fallback = findPnLInText(text);
-    return Number.isFinite(fallback) ? fallback : NaN;
-  }
-
-  function detectResultFromRow(row){
-    const elements = [row].concat(Array.from(row.querySelectorAll('*')));
-    const datasetKeys = ['result', 'status', 'state', 'outcome', 'type', 'winStatus'];
-    for (const element of elements){
-      const dataset = element.dataset || {};
-      for (const key of datasetKeys){
-        if (dataset[key] != null){
-          const mapped = normalizeResultKind(dataset[key]);
-          if (mapped) return mapped;
-        }
-      }
-      for (const key of datasetKeys){
-        const attrName = 'data-' + key.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
-        if (element.hasAttribute && element.hasAttribute(attrName)){
-          const mapped = normalizeResultKind(element.getAttribute(attrName));
-          if (mapped) return mapped;
-        }
-      }
-    }
-    let classBuffer = '';
-    elements.forEach(element => {
-      if (!element) return;
-      if (typeof element.className === 'string'){
-        classBuffer += ' ' + element.className;
-      } else if (element.classList && element.classList.length){
-        classBuffer += ' ' + Array.from(element.classList).join(' ');
-      } else if (element.className && typeof element.className.baseVal === 'string'){
-        classBuffer += ' ' + element.className.baseVal;
-      }
+    })
+    .then(res => res.text())
+    .then(response => {
+    // console.log('Trade logged:', response);
+    })
+    .catch(err => {
+    console.error('Error logging trade:', err);
     });
-    const mappedFromClass = normalizeResultKind(classBuffer);
-    if (mappedFromClass) return mappedFromClass;
-    const text = (row.textContent || '').trim();
-    const mappedFromText = normalizeResultKind(text);
-    return mappedFromText || null;
   }
 
-  function evaluateClosedDeal(info){
-    if (!state.isTradeOpen || !state.openTrade) return;
-    const open = state.openTrade;
-    const now = Date.now();
-    if (Number.isFinite(open.openedAt) && now - open.openedAt > 90000) return;
-
-    if (info.symbolKey && open.symbolKey && info.symbolKey !== open.symbolKey) return;
-    if (!info.symbol && open.symbol && info.text && !textContainsSymbol(info.text, open.symbol)) return;
-
-    let amountMatches = false;
-    if (Number.isFinite(info.amount)){
-      amountMatches = approxEqual(info.amount, open.amount, 0.02);
-    } else if (info.text){
-      amountMatches = textContainsAmount(info.text, open.amount);
+// Helper function to calculate EMA
+function calculateEMA(prices, period) {
+    if (prices.length < period) {
+        // Not enough data points, return simple average
+        return prices.reduce((sum, price) => sum + price, 0) / prices.length;
     }
-    if (!amountMatches) return;
-
-    const resultKind = info.result || classifyResultFromPnL(info.pnl);
-    if (!resultKind) return;
-
-    const payload = {
-      source: 'observer',
-      symbol: info.symbol || open.symbol,
-      amount: Number.isFinite(info.amount) ? info.amount : open.amount,
-      pnl: Number.isFinite(info.pnl) ? info.pnl : NaN,
-      result: resultKind,
-      closedAt: now
-    };
-    onTradeResult(payload);
-  }
-
-  function observeTradeResults(){
-    const original = window.recordTradeResult;
-    window.recordTradeResult = function(res){
-      try { onTradeResult(res); } catch (err) { console.error(err); }
-      if (typeof original === 'function') return original.apply(this, arguments);
-    };
-    ensureClosedDealsObserver();
-  }
-
-  function handleBootFailure(err){
-    let message = 'unknown error';
-    if (err){
-      if (err && err.message){
-        message = err.message;
-      } else {
-        try { message = String(err); } catch (_){ message = 'n/a'; }
-      }
+    
+    const k = 2 / (period + 1); // Smoothing factor
+    
+    // Calculate initial SMA
+    let ema = prices.slice(0, period).reduce((sum, price) => sum + price, 0) / period;
+    
+    // Calculate EMA for remaining prices
+    for (let i = period; i < prices.length; i++) {
+        ema = prices[i] * k + ema * (1 - k);
     }
-    try { console.error('[BOOT-FAIL] ' + message); } catch (_err){}
-    try {
-      Object.keys(watchers).forEach(key => {
-        const timerId = watchers[key];
-        if (timerId != null){
-          clearInterval(timerId);
-          watchers[key] = null;
+    
+    return ema;
+}
+
+// Add a function to detect support and resistance levels
+function detectSupportResistance(prices, lookback = 50, threshold = 0.0005) {
+    if (prices.length < lookback) {
+        return { support: 0, resistance: 0 };
+    }
+    
+    const recentPrices = prices.slice(-lookback);
+    const currentPrice = prices[prices.length - 1];
+    
+    // Find local minima and maxima
+    const localMinima = [];
+    const localMaxima = [];
+    
+    for (let i = 1; i < recentPrices.length - 1; i++) {
+        if (recentPrices[i] < recentPrices[i-1] && recentPrices[i] < recentPrices[i+1]) {
+            localMinima.push(recentPrices[i]);
         }
-      });
-      if (dealIndicatorWatcher.scanTimer){
-        clearInterval(dealIndicatorWatcher.scanTimer);
-        dealIndicatorWatcher.scanTimer = null;
-      }
-      if (dealIndicatorWatcher.observer && typeof dealIndicatorWatcher.observer.disconnect === 'function'){
-        dealIndicatorWatcher.observer.disconnect();
-      }
-      dealIndicatorWatcher.observer = null;
-      dealIndicatorWatcher.container = null;
-      if (closedDealsWatcher.scanTimer){
-        clearInterval(closedDealsWatcher.scanTimer);
-        closedDealsWatcher.scanTimer = null;
-      }
-      if (closedDealsWatcher.observer && typeof closedDealsWatcher.observer.disconnect === 'function'){
-        closedDealsWatcher.observer.disconnect();
-        closedDealsWatcher.observer = null;
-      }
-    } catch (_cleanupErr){}
-    window.__VERTER_ACTIVE__ = false;
-  }
+        if (recentPrices[i] > recentPrices[i-1] && recentPrices[i] > recentPrices[i+1]) {
+            localMaxima.push(recentPrices[i]);
+        }
+    }
+    
+    // Find closest support and resistance
+    let closestSupport = 0;
+    let closestResistance = Infinity;
+    
+    for (const min of localMinima) {
+        if (min < currentPrice && min > closestSupport) {
+            closestSupport = min;
+        }
+    }
+    
+    for (const max of localMaxima) {
+        if (max > currentPrice && max < closestResistance) {
+            closestResistance = max;
+        }
+    }
+    
+    // If no support/resistance found, use simple percentage
+    if (closestSupport === 0) {
+        closestSupport = currentPrice * (1 - threshold);
+    }
+    
+    if (closestResistance === Infinity) {
+        closestResistance = currentPrice * (1 + threshold);
+    }
+    
+    return { support: closestSupport, resistance: closestResistance };
+}
 
-  function manualAssetReset(){
-    const prevStep = state.currentBetStep;
-    state.betHistory = [];
-    state.currentBetStep = 0;
-    state.lossStreak = 0;
-    state.maxStep = 0;
-    state.isTradeOpen = false;
-    state.openTrade = null;
-    state.open = null;
-    state.currentWager = 0;
-    state.currentProfit = 0;
-    state.totalProfit = 0;
-    state.cycleProfit = 0;
-    state.pauseUntil = 0;
-    state.minuteGate = false;
-    state.minuteSignals = [];
-    state.minuteSignalsPending = true;
-    state.latestSignals = [];
-    state.topSignals = [];
-    state.virtualStats[state.symbol] = Object.create(null);
-    state.cycles = [];
-    state.lastTopHit = null;
-    state.minuteTimer.tradeCycleId = -1;
-    state.minuteTimer.windowConsumed = false;
-    state.minuteTimer.targetCycleId = state.minuteTimer.activeCycleId;
-    state.signalCache = Object.create(null);
-    state.pendingTrade = null;
-    state.lastOrderDecision = { decision: 'skip', reason: 'reset', at: Date.now() };
-    state.lastResult = { result: null, pnl: 0, at: 0, label: '—' };
-    state.betInput = null;
-    updateTradingInfo();
-    renderAccuracy();
-    renderTopSignals();
-    renderCycles();
-    setDirection('flat', 'reset');
-    setText(ui.signalBox, '—');
-    state.lastDecision = { direction: 'flat', reason: 'reset', at: Date.now() };
-    recordNextBet('startup', prevStep, state.currentBetStep);
-    schedulePrepare('startup');
-  }
+// Add a function to detect price momentum
+function calculateMomentum(prices, period = 10) {
+    if (prices.length < period + 1) {
+        return 0;
+    }
+    
+    // Calculate momentum as the rate of change
+    const currentPrice = prices[prices.length - 1];
+    const pastPrice = prices[prices.length - 1 - period];
+    
+    return ((currentPrice - pastPrice) / pastPrice) * 100;
+}
 
-  function observeSymbolChanges(){
-    const observer = new MutationObserver(() => {
-      const symbol = (symbolDiv.textContent || '').replace('/', ' ').trim();
-      if (symbol !== state.symbol){
-        state.symbol = symbol;
-        manualAssetReset();
-        if (ui.tradingSymbol) ui.tradingSymbol.textContent = 'Trading · ' + symbol;
-      }
-    });
-    observer.observe(symbolDiv, { childList: true, subtree: true });
-  }
+// Helper function to calculate RSI
+function calculateRSI(prices, period) {
+    if (prices.length <= period) {
+        return 50; // Default neutral value if not enough data
+    }
+    
+    // Calculate price changes
+    const changes = [];
+    for (let i = 1; i < prices.length; i++) {
+        changes.push(prices[i] - prices[i - 1]);
+    }
+    
+    // Separate gains and losses
+    const gains = changes.map(change => change > 0 ? change : 0);
+    const losses = changes.map(change => change < 0 ? Math.abs(change) : 0);
+    
+    // Calculate average gains and losses
+    let avgGain = gains.slice(0, period).reduce((sum, gain) => sum + gain, 0) / period;
+    let avgLoss = losses.slice(0, period).reduce((sum, loss) => sum + loss, 0) / period;
+    
+    // Calculate RSI for remaining periods using smoothed averages
+    for (let i = period; i < changes.length; i++) {
+        avgGain = ((avgGain * (period - 1)) + gains[i]) / period;
+        avgLoss = ((avgLoss * (period - 1)) + losses[i]) / period;
+    }
+    
+    if (avgLoss === 0) return 100; // Avoid division by zero
+    
+    const rs = avgGain / avgLoss;
+    const rsi = 100 - (100 / (1 + rs));
+    
+    return rsi;
+}
 
-  function setupTimers(){
-    watchers.signalTimer = setInterval(() => {
-      const now = Date.now();
-      if (now - state.lastSignalCheck >= signalCheckInterval){
-        state.lastSignalCheck = now;
-        updateMinuteBoundary(now);
-        updatePrice();
-        evaluateSignals();
-        tradeLogic(now);
-        updateTradingInfo();
-        logMinuteSnapshot(now);
-      }
-    }, signalCheckInterval);
+// Add a function to calculate MACD
+function calculateMACD(prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    if (prices.length < slowPeriod) {
+        return {
+            macd: 0,
+            signal: 0,
+            histogram: 0
+        };
+    }
+    
+    const fastEMA = calculateEMA(prices, fastPeriod);
+    const slowEMA = calculateEMA(prices, slowPeriod);
+    const macdLine = fastEMA - slowEMA;
+    
+    // For signal line, we need MACD values over time, but for simplicity, return current values
+    return {
+        macd: macdLine,
+        signal: 0, // Simplified - would need historical MACD values for proper signal line
+        histogram: macdLine
+    };
+}
 
-    watchers.chartTimer = setInterval(renderChart, 2000);
-  }
+// Add a function to detect divergence between price and RSI
+function detectDivergence(prices, rsiValues, lookbackPeriod = 5) {
+    if (prices.length < lookbackPeriod || rsiValues.length < lookbackPeriod) {
+        return 'none';
+    }
+    
+    const recentPrices = prices.slice(-lookbackPeriod);
+    const recentRSI = rsiValues.slice(-lookbackPeriod);
+    
+    const priceDirection = recentPrices[recentPrices.length - 1] > recentPrices[0] ? 'up' : 'down';
+    const rsiDirection = recentRSI[recentRSI.length - 1] > recentRSI[0] ? 'up' : 'down';
+    
+    if (priceDirection === 'up' && rsiDirection === 'down') {
+        return 'bearish'; // Price up, RSI down - bearish divergence
+    } else if (priceDirection === 'down' && rsiDirection === 'up') {
+        return 'bullish'; // Price down, RSI up - bullish divergence
+    }
+    
+    return 'none';
+}
 
-  window.VERTER = Object.assign(window.VERTER || {}, {
-    version: APP_VERSION,
-    build: BUILD_TAG,
-    manualAssetReset
-  });
+// Add a function to calculate Bollinger Bands
+// Add this function to calculate Bollinger Bands
+function calculateBollingerBands(prices, period = 20, stdDevMultiplier = 2) {
+    if (prices.length < period) {
+        return { upper: 0, middle: 0, lower: 0 };
+    }
+    
+    const recentPrices = prices.slice(-period);
+    const sma = recentPrices.reduce((sum, price) => sum + price, 0) / period;
+    
+    // Calculate standard deviation
+    const variance = recentPrices.reduce((sum, price) => {
+        return sum + Math.pow(price - sma, 2);
+    }, 0) / period;
+    
+    const stdDev = Math.sqrt(variance);
+    
+    return {
+        upper: sma + (stdDevMultiplier * stdDev),
+        middle: sma,
+        lower: sma - (stdDevMultiplier * stdDev)
+    };
+}
 
-  function boot(){
-    const startTs = Date.now();
-    const startBalance = readBalanceValue();
-    state.startTime = humanTimeHHMM(startTs);
-    state.startBalance = startBalance;
-    state.currentBalance = startBalance;
-    state.currentProfit = 0;
-    state.totalProfit = 0;
-    buildUI();
-    syncProfit();
-    updateTradingInfo();
-    logInfo('BOOT', `start=${state.startTime} startBal=${fmtMoney(state.startBalance)}`);
-    observeTradeResults();
-    observeDealIndicatorResults();
-    observeSymbolChanges();
-    setupTimers();
-    recordNextBet('startup', state.currentBetStep, state.currentBetStep);
-    schedulePrepare('startup');
-    renderAccuracy();
-    renderTopSignals();
-    renderChart();
-    renderCycles();
-  }
+// Add this function to calculate MACD
+function calculateMACD(prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+    if (prices.length < slowPeriod + signalPeriod) {
+        return { macd: 0, signal: 0, histogram: 0 };
+    }
+    
+    // Calculate EMAs
+    const fastEMA = calculateEMA(prices, fastPeriod);
+    const slowEMA = calculateEMA(prices, slowPeriod);
+    
+    // Calculate MACD line
+    const macdLine = fastEMA - slowEMA;
+    
+    // Calculate signal line (EMA of MACD line)
+    // For simplicity, we'll use the current MACD value
+    // In a full implementation, you'd calculate EMA of MACD values
+    const signalLine = macdLine * 0.9; // Simplified for this example
+    
+    // Calculate histogram
+    const histogram = macdLine - signalLine;
+    
+    return {
+        macd: macdLine,
+        signal: signalLine,
+        histogram: histogram
+    };
+}
 
-  try {
-    boot();
-  } catch (err){
-    handleBootFailure(err);
-  }
-})();
+// Add a function to calculate Stochastic Oscillator
+function calculateStochastic(prices, period = 14, smoothK = 3, smoothD = 3) {
+    if (prices.length < period) {
+        return {
+            k: 50,
+            d: 50,
+            k_prev: 50
+        };
+    }
+    
+    // Get the recent prices for calculation
+    const recentPrices = prices.slice(-period);
+    const currentPrice = prices[prices.length - 1];
+    
+    // Find highest high and lowest low in the period
+    const highestHigh = Math.max(...recentPrices);
+    const lowestLow = Math.min(...recentPrices);
+    
+    // Calculate %K
+    let rawK;
+    if (highestHigh === lowestLow) {
+        rawK = 50; // Avoid division by zero
+    } else {
+        rawK = ((currentPrice - lowestLow) / (highestHigh - lowestLow)) * 100;
+    }
+    
+    // For simplicity, we'll use the raw %K as smoothed %K
+    // In a full implementation, you'd smooth this over smoothK periods
+    const k = rawK;
+    
+    // Calculate %D as SMA of %K
+    // For simplicity, we'll use current %K value
+    // In a full implementation, you'd average %K values over smoothD periods
+    const d = k;
+    
+    // Store previous K value for crossover detection
+    const k_prev = window.previousStochK || k;
+    window.previousStochK = k;
+    
+    return {
+        k: k,
+        d: d,
+        k_prev: k_prev
+    };
+}
+
