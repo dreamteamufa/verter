@@ -1,4 +1,4 @@
-const appversion = "Verter ver. 2.1";
+const appversion = "Verter ver. 2.2 (OrderGate+VirtFix)";
 const reverse = false; // Change to true for reverse mode
 // const webhookUrl = 'https://script.google.com/macros/s/AKfycbyz--BcEvGJq05MN5m9a6uGiUUhYe8WrpxOKMWE6qstfj15j9L8ahnK7DaVWaSbPAPG/exec'; //A1
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
@@ -37,6 +37,13 @@ let maxStepInCycle = 0;
 
 // const mode = 'REAL';
 const mode = 'DEMO';
+
+const ORDER_COOLDOWN_MS = 5000;
+const SIGNAL_DEBOUNCE_MS = 1000;
+
+let orderLock = false;
+let orderLockTs = 0;
+const lastSignalTimestamps = new Map();
 
 let cyclesToPlay = 30;
 let cyclesStats = [];
@@ -317,6 +324,71 @@ let minTimeBetweenTrades = 5000; // 5 seconds minimum between trades
 let lastSignalCheck = 0;
 let signalCheckInterval = 1000; // Check for trading signals every 1 second
 
+function canOpenRealOrder() {
+    if (orderLock) {
+        return false;
+    }
+    return Date.now() - orderLockTs >= ORDER_COOLDOWN_MS;
+}
+
+function tryEnterOrderGate(tag = 'order') {
+    if (!canOpenRealOrder()) {
+        console.log(`[ORDER-GATE][BLOCK] duplicate prevented`);
+        return null;
+    }
+
+    orderLock = true;
+    const enterTs = Date.now();
+    console.log(`[ORDER-GATE][ENTER] ${tag} ${new Date(enterTs).toISOString()}`);
+
+    return (ok = true) => {
+        orderLock = false;
+        if (ok) {
+            orderLockTs = Date.now();
+        }
+        const status = ok ? 'ok' : 'abort';
+        console.log(`[ORDER-GATE][EXIT] ${tag} ${status}`);
+    };
+}
+
+function isDuplicateSignal(asset, signalId, direction) {
+    if (!asset || !signalId || !direction) {
+        return false;
+    }
+
+    const key = `${asset}|${signalId}|${direction}`;
+    const now = Date.now();
+    const lastTs = lastSignalTimestamps.get(key);
+
+    if (lastTs && now - lastTs < SIGNAL_DEBOUNCE_MS) {
+        return true;
+    }
+
+    lastSignalTimestamps.set(key, now);
+    return false;
+}
+
+function openRealOrderSafe(params = {}) {
+    const tag = params.tag || 'order';
+    const release = tryEnterOrderGate(tag);
+
+    if (!release) {
+        return false;
+    }
+
+    let ok = false;
+
+    try {
+        const result = openRealOrderImpl(params);
+        ok = result !== false;
+        return result;
+    } catch (error) {
+        throw error;
+    } finally {
+        release(ok);
+    }
+}
+
 let queryPrice = () => {
     time = Date.now();
     hTime = humanTime(time);
@@ -550,30 +622,33 @@ function getMultiTimeframeSignal() {
     return 'flat';
 }
 
-function getVirtualSignalKey(signalId, asset) {
-    return `${signalId}::${asset}`;
+function getVirtualSignalKey(asset, signalId) {
+    return `${asset}|${signalId}`;
 }
 
-function processVirtualSignal(signalId, signalLabel, direction) {
-    if (!virtualTradingEnabled) return;
-    if (!signalId || !signalLabel) return;
-    if (!direction || direction === 'flat' || direction === 'none') return;
+function openVirtualIfFree({ asset, signalId, signalLabel, direction }) {
+    if (!virtualTradingEnabled) return false;
+    if (!asset || !signalId || !direction) return false;
 
     const normalizedDirection = direction.toUpperCase();
-    if (normalizedDirection !== 'BUY' && normalizedDirection !== 'SELL') return;
+    if (normalizedDirection !== 'BUY' && normalizedDirection !== 'SELL') return false;
 
-    const asset = symbolName || 'Unknown';
-    const signalKey = getVirtualSignalKey(signalId, asset);
+    const key = getVirtualSignalKey(asset, signalId);
 
-    if (virtTradesActive.has(signalKey)) return;
+    if (virtTradesActive.has(key)) {
+        console.log(`[VIRT][BLOCK] already active`);
+        return false;
+    }
 
     createVirtualTrade({
         signalId,
         signalLabel,
         direction: normalizedDirection,
         asset,
-        signalKey
+        signalKey: key
     });
+
+    return true;
 }
 
 function createVirtualTrade({ signalId, signalLabel, direction, asset, signalKey }) {
@@ -591,14 +666,14 @@ function createVirtualTrade({ signalId, signalLabel, direction, asset, signalKey
         signalKey
     };
 
-    trade.timeoutId = setTimeout(() => closeVirtualTrade(signalKey), VIRT_TRADE_DURATION);
+    trade.timeoutId = setTimeout(() => closeVirtual(signalKey), VIRT_TRADE_DURATION);
     virtTradesActive.set(signalKey, trade);
 
     console.log(`[VIRT-OPEN] signal=${signalId} asset=${asset} dir=${direction} open=${formatVirtualLogPrice(openPrice)} t=${new Date(now).toISOString()}`);
     updateVirtualTradingUI();
 }
 
-function closeVirtualTrade(signalKey, attempt = 0) {
+function closeVirtual(signalKey, attempt = 0) {
     const trade = virtTradesActive.get(signalKey);
     if (!trade) return;
 
@@ -610,7 +685,7 @@ function closeVirtualTrade(signalKey, attempt = 0) {
     const price = Number.isFinite(globalPrice) ? globalPrice : null;
 
     if ((price === null || Number.isNaN(price)) && attempt < 3) {
-        trade.timeoutId = setTimeout(() => closeVirtualTrade(signalKey, attempt + 1), 500);
+        trade.timeoutId = setTimeout(() => closeVirtual(signalKey, attempt + 1), 500);
         return;
     }
 
@@ -1066,7 +1141,12 @@ function calculateIndicators() {
 
     const virtSignalId = signal !== 'flat' ? `core-main-${signal}` : 'core-main';
     const virtSignalLabel = signal !== 'flat' ? `Core ${signal.toUpperCase()}` : 'Core';
-    processVirtualSignal(virtSignalId, virtSignalLabel, signal);
+    window.currentSignalMeta = {
+        id: virtSignalId,
+        label: virtSignalLabel,
+        asset: symbolName || 'Unknown',
+        direction: signal
+    };
     
     // Update the indicator display
     updateIndicatorDisplay(false, {
@@ -1413,15 +1493,42 @@ function tradeLogic() {
         cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('lose');
     } else if (cyclesToPlay > 0 && tradeDirection !== 'flat' && autoTradingEnabled){
-        // Execute trade and update last trade time
-
-        if (!isTradeOpen) {
-            smartBet(currentBetStep, tradeDirection);
-            isTradeOpen = true;
+        if (isTradeOpen) {
+            return;
         }
 
+        const signalMeta = window.currentSignalMeta || {};
+        const asset = signalMeta.asset || symbolName || 'Unknown';
+        const signalId = signalMeta.id || `core-main-${tradeDirection}`;
+        const signalLabel = signalMeta.label || `Core ${tradeDirection.toUpperCase()}`;
+        const normalizedDirection = tradeDirection === 'buy' ? 'BUY' : 'SELL';
+
+        if (isDuplicateSignal(asset, signalId, normalizedDirection)) {
+            console.log(`[SIGNAL][SKIP] debounce`);
+            return;
+        }
+
+        openVirtualIfFree({
+            asset,
+            signalId,
+            signalLabel,
+            direction: normalizedDirection
+        });
+
+        const orderTag = `${asset}:${signalId}`;
+        const orderResult = openRealOrderSafe({
+            step: currentBetStep,
+            tradeDirection,
+            tag: orderTag
+        });
+
+        if (orderResult === false) {
+            return;
+        }
+
+        isTradeOpen = true;
         lastTradeTime = time;
-        
+
         currentTrade.time = hTime;
         currentTrade.betTime = betTime;
         currentTrade.openPrice = globalPrice;
@@ -1446,8 +1553,6 @@ function tradeLogic() {
         // Update maximum step
         maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
         maxStepDiv.innerHTML = maxStepInCycle;
-        
-        console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
     }
 
     // Calculate win percentage
@@ -1462,7 +1567,7 @@ function tradeLogic() {
     wonDiv.innerHTML = winPercent;
 }
 
-let smartBet = (step, tradeDirection) => {
+function smartBet(step, tradeDirection) {
 
     currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
     profitPercentDivAdvisor.innerHTML = currentProfitPercent;
@@ -1472,7 +1577,7 @@ let smartBet = (step, tradeDirection) => {
         profitPercentDivAdvisor.style.background = '#B90000';
         profitPercentDivAdvisor.style.color = "#ffffff";
         profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
-        return;
+        return false;
     }
 
     let steps;
@@ -1501,7 +1606,7 @@ let smartBet = (step, tradeDirection) => {
         }
     }, 50);
 
-    setTimeout(function() {  
+    setTimeout(function() {
         if (tradeDirection == 'buy'){
             buy();
         } else {
@@ -1510,6 +1615,22 @@ let smartBet = (step, tradeDirection) => {
         let betValue = getBetValue(step);
         // console.log('Betting: ' + betValue + ' / Step: ' + step + ' / Direction: ' + tradeDirection);
     }, 100);
+    return true;
+}
+
+function openRealOrderImpl(params = {}) {
+    const { step = 0, tradeDirection } = params;
+    if (!tradeDirection) {
+        return false;
+    }
+
+    const normalizedDirection = tradeDirection.toLowerCase();
+    if (normalizedDirection !== 'buy' && normalizedDirection !== 'sell') {
+        return false;
+    }
+
+    const result = smartBet(step, normalizedDirection);
+    return result !== false;
 }
 let getBetValue = (betStep) => {
     let value;
