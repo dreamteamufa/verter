@@ -15,6 +15,10 @@ const config = {
         minTimeBetweenTrades: 5000,
         signalCheckInterval: 1000
     },
+    virtualTrading: {
+        tradeDurationMs: 60 * 1000,
+        retentionMs: 60 * 60 * 1000
+    },
     colors: {
         green: '#009500',
         red: '#B90000'
@@ -299,7 +303,10 @@ const state = {
     lastUpdate5m: 0,
     lastUpdate15m: 0,
     signalSensitivity: 3,
-    autoTradingEnabled: true
+    autoTradingEnabled: true,
+    virtualTrades: [],
+    activeVirtualTrades: {},
+    virtualStatsDiv: null
 };
 
 const panelMap = {
@@ -356,6 +363,192 @@ function updatePanel(field, value, options = {}) {
         element.style.background = '';
         element.style.backgroundColor = '';
     }
+}
+
+function startVirtualTrade(signal, direction, price) {
+    if (!signal || signal === 'flat') {
+        return;
+    }
+
+    if (Object.keys(state.activeVirtualTrades).length > 0 || state.activeVirtualTrades[signal]) {
+        return;
+    }
+
+    const entryPrice = typeof price === 'number' ? price : state.globalPrice;
+    if (entryPrice === undefined) {
+        return;
+    }
+
+    const trade = {
+        signal,
+        direction,
+        entryPrice,
+        startTime: Date.now(),
+        timeoutId: null
+    };
+
+    trade.timeoutId = setTimeout(() => {
+        closeVirtualTrade(signal);
+    }, config.virtualTrading.tradeDurationMs);
+
+    state.activeVirtualTrades[signal] = trade;
+}
+
+function closeVirtualTrade(signal) {
+    const trade = state.activeVirtualTrades[signal];
+    if (!trade) {
+        return;
+    }
+
+    if (trade.timeoutId) {
+        clearTimeout(trade.timeoutId);
+    }
+
+    const closeTime = Date.now();
+    const exitPrice = state.globalPrice !== undefined ? state.globalPrice : trade.entryPrice;
+    let outcome = 'draw';
+    let priceDelta = 0;
+
+    if (trade.direction === 'buy') {
+        priceDelta = exitPrice - trade.entryPrice;
+        if (priceDelta > 0) outcome = 'win';
+        else if (priceDelta < 0) outcome = 'loss';
+    } else if (trade.direction === 'sell') {
+        priceDelta = trade.entryPrice - exitPrice;
+        if (priceDelta > 0) outcome = 'win';
+        else if (priceDelta < 0) outcome = 'loss';
+    }
+
+    state.virtualTrades.push({
+        signal: trade.signal,
+        direction: trade.direction,
+        entryPrice: trade.entryPrice,
+        exitPrice,
+        startTime: trade.startTime,
+        closeTime,
+        outcome,
+        priceDelta,
+        durationMs: closeTime - trade.startTime
+    });
+
+    delete state.activeVirtualTrades[signal];
+    updateVirtualTradeStats();
+}
+
+function cleanupOldVirtualTrades() {
+    const cutoff = Date.now() - config.virtualTrading.retentionMs;
+    state.virtualTrades = state.virtualTrades.filter(trade => {
+        const referenceTime = trade.closeTime || trade.startTime;
+        return referenceTime >= cutoff;
+    });
+}
+
+function getVirtualStats() {
+    if (!Array.isArray(state.virtualTrades) || state.virtualTrades.length === 0) {
+        return [];
+    }
+
+    const statsMap = new Map();
+
+    state.virtualTrades.forEach(trade => {
+        const key = trade.signal || 'unknown';
+        if (!statsMap.has(key)) {
+            statsMap.set(key, {
+                signal: key,
+                total: 0,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+                totalDelta: 0,
+                lastCloseTime: 0
+            });
+        }
+
+        const entry = statsMap.get(key);
+        entry.total += 1;
+        entry.totalDelta += trade.priceDelta;
+        entry.lastCloseTime = Math.max(entry.lastCloseTime, trade.closeTime || trade.startTime);
+
+        if (trade.outcome === 'win') {
+            entry.wins += 1;
+        } else if (trade.outcome === 'loss') {
+            entry.losses += 1;
+        } else {
+            entry.draws += 1;
+        }
+    });
+
+    return Array.from(statsMap.values()).map(entry => {
+        const winRate = entry.total ? (entry.wins / entry.total) * 100 : 0;
+        const avgDelta = entry.total ? entry.totalDelta / entry.total : 0;
+        return {
+            signal: entry.signal,
+            total: entry.total,
+            wins: entry.wins,
+            losses: entry.losses,
+            draws: entry.draws,
+            totalDelta: entry.totalDelta,
+            lastCloseTime: entry.lastCloseTime,
+            winRate,
+            avgDelta
+        };
+    }).sort((a, b) => {
+        if (b.winRate === a.winRate) {
+            return b.total - a.total;
+        }
+        return b.winRate - a.winRate;
+    });
+}
+
+function updateVirtualTradeStats() {
+    if (!state.virtualStatsDiv) {
+        return;
+    }
+
+    cleanupOldVirtualTrades();
+
+    const stats = getVirtualStats();
+    if (!stats.length) {
+        state.virtualStatsDiv.innerHTML = '<div style="color: #ccc;">No virtual trades yet.</div>';
+        return;
+    }
+
+    let rowsHtml = stats.map(entry => {
+        const winRate = entry.winRate.toFixed(1);
+        const avgDelta = entry.avgDelta >= 0 ? `+${entry.avgDelta.toFixed(5)}` : entry.avgDelta.toFixed(5);
+        const lastTime = new Date(entry.lastCloseTime).toLocaleTimeString();
+        return `
+            <tr>
+                <td>${entry.signal}</td>
+                <td>${entry.total}</td>
+                <td>${entry.wins}</td>
+                <td>${entry.losses}</td>
+                <td>${entry.draws}</td>
+                <td>${winRate}%</td>
+                <td>${avgDelta}</td>
+                <td>${lastTime}</td>
+            </tr>
+        `;
+    }).join('');
+
+    state.virtualStatsDiv.innerHTML = `
+        <div style="color: #fff; font-weight: bold; margin-bottom: 6px;">Virtual Trade Stats (60m)</div>
+        <table style="width: 100%; border-collapse: collapse; color: #fff; font-size: 12px;">
+            <thead>
+                <tr style="text-align: left;">
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Signal</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Trades</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Wins</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Losses</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Draws</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Win %</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Avg Δ</th>
+                    <th style="padding: 2px 4px; border-bottom: 1px solid rgba(255,255,255,0.2);">Last</th>
+                </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+        </table>
+    `;
 }
 
 const mode = 'DEMO';
@@ -574,6 +767,7 @@ let queryPrice = () => {
     state.time = Date.now();
     state.hTime = humanTime(state.time);
     updatePanel('time', state.hTime);
+    updateVirtualTradeStats();
 
     // Get the current price
     state.text = state.targetElement2.innerHTML;
@@ -977,6 +1171,7 @@ function updateIndicatorUI(scores, values, context) {
     });
 
     window.currentSignal = signal;
+    startVirtualTrade(window.currentSignal, window.currentSignal, state.globalPrice);
     window.currentShortEMA = shortEMA;
     window.currentLongEMA = longEMA;
     window.currentRSI = rsiValue;
@@ -1783,6 +1978,12 @@ function addUI() {
             </div>
         </div>
     `;
+
+    const parentPanel = statusPanel;
+    state.virtualStatsDiv = document.createElement('div');
+    state.virtualStatsDiv.style.marginTop = '10px';
+    state.virtualStatsDiv.style.fontSize = '12px';
+    parentPanel.appendChild(state.virtualStatsDiv);
     
     // Add the cycles history panel
     const cyclesPanel = document.createElement('div');
@@ -1829,6 +2030,8 @@ function addUI() {
     state.totalProfitDiv = document.getElementById("total-profit");
     state.cyclesHistoryDiv = document.getElementById("cycles-history");
     state.graphContainer = document.getElementById("graphs");
+
+    updateVirtualTradeStats();
 
     // After creating all UI elements, add the sensitivity control
     setTimeout(() => {
