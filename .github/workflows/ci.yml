@@ -1,9 +1,8 @@
 name: PR CI (lint + test + build)
-
 on:
   pull_request:
   push:
-    branches-ignore: [ main ]  # пуши в фиче-ветки
+    branches-ignore: [ main ]
 
 jobs:
   pr-ci:
@@ -15,23 +14,34 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'        # без cache:'npm', чтобы не требовался lock
+          node-version: '20'
+
       - name: Install deps
         run: npm install
-      
-       - name: Sanitize source
+
+      - name: Sanitize source
         run: |
           F=src/Verter.user.js
-          perl -CSD -pe 's/\x{FEFF}|\x{200B}//g' -i "$F"
+          perl -CSD -pe 's/\x{FEFF}|\x{200B}|\x{00A0}|\x{200E}|\x{200F}|\x{202A}|\x{202B}|\x{202C}|\x{202D}|\x{202E}|\x{2066}|\x{2067}|\x{2068}|\x{2069}|\x{2028}|\x{2029}//g' -i "$F"
           perl -CSD -pe "s/\x{2026}/.../g" -i "$F"
-          perl -CSD -pe "tr/\x{2013}\x{2014}/--/" -i "$F"
-          perl -CSD -pe "tr/\x{2018}\x{2019}\x{201C}\x{201D}/''\"\"/" -i "$F"
+          perl -CSD -pe "tr/\x{2013}\x{2014}/-/" -i "$F"
+          perl -CSD -pe "tr/\x{2018}\x{2019}/'/" -i "$F"
+          perl -CSD -pe 'tr/\x{201C}\x{201D}/"/' -i "$F"
+          awk '{ sub(/\r$/,""); print }' "$F" > "$F.tmp" && mv "$F.tmp" "$F"
+          ! grep -nP "[\x00-\x08\x0B\x0C\x0E-\x1F]" "$F" || (echo "Control chars remain" && exit 2)
 
-      - name: Run PCS (syntax + lint + test + build)
+      - name: PCS (syntax + lint + test + build)
         run: npm run pcs
+
+      - name: Make pack.sh executable
+        run: chmod +x pack.sh
+
+      - name: Pack (review ZIP)
+        run: ./pack.sh
 
       - name: Upload build artifact (ZIP for reviewers)
         uses: actions/upload-artifact@v4
         with:
           name: Verter_SAFE.zip
           path: build/Verter_SAFE.zip
+          if-no-files-found: error
