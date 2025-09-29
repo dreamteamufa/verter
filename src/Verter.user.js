@@ -1,4 +1,4 @@
-const appversion = "Verter ver. 2.2 (OrderGate+VirtFix)";
+const appversion = "Verter ver. 2.2";
 const reverse = false; // Change to true for reverse mode
 // const webhookUrl = 'https://script.google.com/macros/s/AKfycbyz--BcEvGJq05MN5m9a6uGiUUhYe8WrpxOKMWE6qstfj15j9L8ahnK7DaVWaSbPAPG/exec'; //A1
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
@@ -38,12 +38,14 @@ let maxStepInCycle = 0;
 // const mode = 'REAL';
 const mode = 'DEMO';
 
-const ORDER_COOLDOWN_MS = 5000;
-const SIGNAL_DEBOUNCE_MS = 1000;
+/* ORDER-GATE */
+var ORDER_COOLDOWN_MS = 5000;
+var orderLock = false;
+var orderLockTs = 0;
 
-let orderLock = false;
-let orderLockTs = 0;
-const lastSignalTimestamps = new Map();
+let lastSignalKey = '';
+let lastSignalTs = 0;
+const SIGNAL_DEBOUNCE_MS = 1000;
 
 let cyclesToPlay = 30;
 let cyclesStats = [];
@@ -228,7 +230,7 @@ let lastPrice;
 const VIRT_TRADE_DURATION = 60000;
 const VIRT_HISTORY_WINDOW = 60 * 60000;
 let virtualTradingEnabled = true;
-let virtTradesActive = new Map();
+const virtTradesActive = new Map();
 let virtTradesHistory = [];
 let virtStats = new Map();
 let virtCleanupTimer = null;
@@ -241,6 +243,7 @@ let virtToggleInput;
 let virtToggleStatus;
 let virtAssetFilterInput;
 let virtSignalFilterInput;
+let onVirtualClosed;
 
 const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
 if (mode == 'REAL'){
@@ -324,69 +327,38 @@ let minTimeBetweenTrades = 5000; // 5 seconds minimum between trades
 let lastSignalCheck = 0;
 let signalCheckInterval = 1000; // Check for trading signals every 1 second
 
-function canOpenRealOrder() {
-    if (orderLock) {
-        return false;
-    }
-    return Date.now() - orderLockTs >= ORDER_COOLDOWN_MS;
+function canOpenRealOrder(){
+    if (orderLock) return false;
+    return (Date.now() - orderLockTs) >= ORDER_COOLDOWN_MS;
 }
 
-function tryEnterOrderGate(tag = 'order') {
-    if (!canOpenRealOrder()) {
-        console.log(`[ORDER-GATE][BLOCK] duplicate prevented`);
-        return null;
-    }
-
-    orderLock = true;
-    const enterTs = Date.now();
-    console.log(`[ORDER-GATE][ENTER] ${tag} ${new Date(enterTs).toISOString()}`);
-
-    return (ok = true) => {
-        orderLock = false;
-        if (ok) {
-            orderLockTs = Date.now();
-        }
-        const status = ok ? 'ok' : 'abort';
-        console.log(`[ORDER-GATE][EXIT] ${tag} ${status}`);
+function tryEnterOrderGate(tag){
+    if (!canOpenRealOrder()) return null;
+    orderLock = true; orderLockTs = Date.now();
+    console.log('[ORDER-GATE][ENTER]', tag, new Date(orderLockTs).toISOString());
+    let released = false;
+    return function release(ok){
+        if (released) return; released = true; orderLock = false;
+        if (ok === false) orderLockTs = Date.now() - ORDER_COOLDOWN_MS;
+        console.log('[ORDER-GATE][EXIT]', tag, ok ? 'ok' : 'abort');
     };
 }
 
-function isDuplicateSignal(asset, signalId, direction) {
-    if (!asset || !signalId || !direction) {
-        return false;
-    }
-
-    const key = `${asset}|${signalId}|${direction}`;
-    const now = Date.now();
-    const lastTs = lastSignalTimestamps.get(key);
-
-    if (lastTs && now - lastTs < SIGNAL_DEBOUNCE_MS) {
-        return true;
-    }
-
-    lastSignalTimestamps.set(key, now);
-    return false;
+function isDuplicateSignal(asset, signalId, direction){
+    const key = asset+'|'+signalId+'|'+direction;
+    const now = performance.now();
+    const dup = (key === lastSignalKey) && (now - lastSignalTs < SIGNAL_DEBOUNCE_MS);
+    lastSignalKey = key; lastSignalTs = now; return dup;
 }
 
-function openRealOrderSafe(params = {}) {
-    const tag = params.tag || 'order';
+async function openRealOrderSafe(params = {}){
+    const tag = params && params.tag ? params.tag : 'real';
     const release = tryEnterOrderGate(tag);
-
-    if (!release) {
-        return false;
-    }
-
-    let ok = false;
-
-    try {
-        const result = openRealOrderImpl(params);
-        ok = result !== false;
-        return result;
-    } catch (error) {
-        throw error;
-    } finally {
-        release(ok);
-    }
+    if (!release){ console.warn('[ORDER-GATE][BLOCK] duplicate prevented'); return { ok:false, reason:'duplicate' }; }
+    try{
+        const ok = await openRealOrderImpl(params);
+        release(ok === true); return { ok: !!ok };
+    }catch(e){ release(false); throw e; }
 }
 
 let queryPrice = () => {
@@ -622,111 +594,81 @@ function getMultiTimeframeSignal() {
     return 'flat';
 }
 
-function getVirtualSignalKey(asset, signalId) {
-    return `${asset}|${signalId}`;
+function _virtKey(asset, signalId){
+    return asset+'|'+signalId;
 }
 
-function openVirtualIfFree({ asset, signalId, signalLabel, direction }) {
-    if (!virtualTradingEnabled) return false;
-    if (!asset || !signalId || !direction) return false;
+function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel }){
+    if (!virtualTradingEnabled) return null;
+    if (!asset || !signalId || !direction) return null;
 
     const normalizedDirection = direction.toUpperCase();
-    if (normalizedDirection !== 'BUY' && normalizedDirection !== 'SELL') return false;
+    if (normalizedDirection !== 'BUY' && normalizedDirection !== 'SELL') return null;
 
-    const key = getVirtualSignalKey(asset, signalId);
-
-    if (virtTradesActive.has(key)) {
-        console.log(`[VIRT][BLOCK] already active`);
-        return false;
+    const key = _virtKey(asset, signalId);
+    if (virtTradesActive.has(key)){
+        console.warn('[VIRT-BLOCK]', 'already active', key);
+        return null;
     }
 
-    createVirtualTrade({
+    const openPrice = Number.isFinite(priceOpen) ? priceOpen : currentPrice();
+    const tOpen = Date.now();
+    const trade = {
+        id: key+'@'+tOpen,
+        asset,
         signalId,
         signalLabel,
         direction: normalizedDirection,
-        asset,
-        signalKey: key
-    });
-
-    return true;
-}
-
-function createVirtualTrade({ signalId, signalLabel, direction, asset, signalKey }) {
-    const now = Date.now();
-    const openPrice = Number.isFinite(globalPrice) ? globalPrice : null;
-
-    const trade = {
-        id: `${signalKey}-${now}`,
-        signalId,
-        signalLabel,
-        asset,
-        direction,
-        tOpen: now,
+        tOpen,
         priceOpen: openPrice,
-        signalKey
+        signalKey: key
     };
 
-    trade.timeoutId = setTimeout(() => closeVirtual(signalKey), VIRT_TRADE_DURATION);
-    virtTradesActive.set(signalKey, trade);
+    trade.timeoutId = setTimeout(() => closeVirtual(key), 60_000);
+    virtTradesActive.set(key, trade);
 
-    console.log(`[VIRT-OPEN] signal=${signalId} asset=${asset} dir=${direction} open=${formatVirtualLogPrice(openPrice)} t=${new Date(now).toISOString()}`);
+    console.log('[VIRT-OPEN]', key, normalizedDirection, openPrice);
     updateVirtualTradingUI();
+    return trade;
 }
 
-function closeVirtual(signalKey, attempt = 0) {
-    const trade = virtTradesActive.get(signalKey);
-    if (!trade) return;
+function closeVirtual(key){
+    const trade = virtTradesActive.get(key); if (!trade) return;
 
-    if (trade.timeoutId) {
+    if (trade.timeoutId){
         clearTimeout(trade.timeoutId);
         trade.timeoutId = null;
     }
 
-    const price = Number.isFinite(globalPrice) ? globalPrice : null;
-
-    if ((price === null || Number.isNaN(price)) && attempt < 3) {
-        trade.timeoutId = setTimeout(() => closeVirtual(signalKey, attempt + 1), 500);
-        return;
+    const priceClose = currentPrice();
+    let result;
+    if (!Number.isFinite(trade.priceOpen) || !Number.isFinite(priceClose)) {
+        result = 'return';
+    } else if (trade.direction === 'BUY') {
+        result = priceClose>trade.priceOpen ? 'win' : priceClose<trade.priceOpen ? 'loss' : 'return';
+    } else {
+        result = priceClose<trade.priceOpen ? 'win' : priceClose>trade.priceOpen ? 'loss' : 'return';
     }
 
-    const closeTime = Date.now();
-    const priceClose = Number.isFinite(price) ? price : trade.priceOpen;
-    const result = determineVirtualResult(trade, priceClose);
-
-    trade.tClose = closeTime;
+    trade.tClose = Date.now();
     trade.priceClose = priceClose;
     trade.result = result;
 
-    virtTradesActive.delete(signalKey);
+    virtTradesActive.delete(key);
     virtTradesHistory.push(trade);
+
+    if (typeof onVirtualClosed === 'function') {
+        onVirtualClosed(trade);
+    }
+
+    console.log('[VIRT-CLOSE]', key, result, trade.priceOpen, '→', priceClose);
 
     cleanupVirtualHistory(false);
     updateVirtualTradingUI();
-
-    const delta = Number.isFinite(trade.priceOpen) && Number.isFinite(priceClose)
-        ? priceClose - trade.priceOpen
-        : null;
-    const deltaStr = delta !== null ? delta.toFixed(5) : 'n/a';
-
-    console.log(`[VIRT-CLOSE] signal=${trade.signalId} result=${result} open=${formatVirtualLogPrice(trade.priceOpen)} close=${formatVirtualLogPrice(priceClose)} Δ=${deltaStr}`);
 }
 
-function determineVirtualResult(trade, priceClose) {
-    if (!Number.isFinite(trade.priceOpen) || !Number.isFinite(priceClose)) return 'return';
-
-    if (trade.direction === 'BUY') {
-        if (priceClose > trade.priceOpen) return 'win';
-        if (priceClose < trade.priceOpen) return 'loss';
-        return 'return';
-    }
-
-    if (trade.direction === 'SELL') {
-        if (priceClose < trade.priceOpen) return 'win';
-        if (priceClose > trade.priceOpen) return 'loss';
-        return 'return';
-    }
-
-    return 'return';
+function currentPrice(){
+    return Number.isFinite(globalPrice) ? globalPrice : null;
 }
 
 function rebuildVirtStats() {
@@ -1394,7 +1336,7 @@ function debugTradeStatus() {
 }
 
 /// Modify the tradeLogic function to use the sensitivity parameter
-function tradeLogic() {
+async function tradeLogic() {
     let tradeDirection;
     let currentTrade = {};
 
@@ -1504,25 +1446,32 @@ function tradeLogic() {
         const normalizedDirection = tradeDirection === 'buy' ? 'BUY' : 'SELL';
 
         if (isDuplicateSignal(asset, signalId, normalizedDirection)) {
-            console.log(`[SIGNAL][SKIP] debounce`);
+            console.warn('[SIGNAL] debounce skip');
             return;
         }
 
         openVirtualIfFree({
             asset,
             signalId,
+            direction: normalizedDirection,
             signalLabel,
-            direction: normalizedDirection
+            priceOpen: currentPrice()
         });
 
         const orderTag = `${asset}:${signalId}`;
-        const orderResult = openRealOrderSafe({
-            step: currentBetStep,
-            tradeDirection,
-            tag: orderTag
-        });
+        let orderResult;
+        try {
+            orderResult = await openRealOrderSafe({
+                step: currentBetStep,
+                tradeDirection,
+                tag: orderTag
+            });
+        } catch (error) {
+            console.warn('[ORDER-GATE][ERROR]', error);
+            return;
+        }
 
-        if (orderResult === false) {
+        if (!orderResult.ok) {
             return;
         }
 
