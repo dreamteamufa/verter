@@ -1,61 +1,60 @@
-name: Auto Release on push to main
-
+name: build-and-release
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: {}  # позволяет запускать вручную из вкладки Actions
+    branches:
+      - main
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          # ВАЖНО: убрали cache:'npm', чтобы не требовался package-lock.json
 
       - name: Install deps
         run: npm install
 
-      - name: Run PCS (syntax + lint + test + build)
+      # Новый шаг: очистка файла от невидимых символов
+      - name: Sanitize source
+        run: |
+          echo "Cleaning src/Verter.user.js..."
+          F=src/Verter.user.js
+          perl -CSD -pe 's/\x{FEFF}|\x{200B}//g' -i "$F"
+          perl -CSD -pe "s/\x{2026}/.../g" -i "$F"
+          perl -CSD -pe "tr/\x{2013}\x{2014}/--/" -i "$F"
+          perl -CSD -pe "tr/\x{2018}\x{2019}\x{201C}\x{201D}/''\"\"/" -i "$F"
+
+      - name: PCS (syntax + lint + build)
         run: npm run pcs
 
-      - name: Upload artifact (for Actions UI)
+      - name: Pack
+        run: bash pack.sh
+
+      - name: Upload artifact (named)
         uses: actions/upload-artifact@v4
         with:
-          name: Verter_SAFE.zip
+          name: verter-named
+          path: |
+            build/*.zip
+            build/ARTIFACT_NAME.txt
+            build/RELEASE_TAG.txt
+            build/RELEASE_TITLE.txt
+          if-no-files-found: error
+
+      - name: Upload artifact (compat)
+        uses: actions/upload-artifact@v4
+        with:
+          name: verter-safe
           path: build/Verter_SAFE.zip
 
-      # Генерим уникальный тег и имя релиза
-      - name: Compute tag & name
-        id: meta
-        run: |
-          TS=$(date -u +'%Y%m%d-%H%M%S')
-          RUN=${GITHUB_RUN_NUMBER}
-          SHA=$(git rev-parse --short HEAD)
-          TAG="auto-${TS}-r${RUN}-${SHA}"
-          NAME="Verter ${TAG}"
-          echo "tag=${TAG}"   >> $GITHUB_OUTPUT
-          echo "name=${NAME}" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release and attach ZIP
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name:  ${{ steps.meta.outputs.tag }}
-          name:      ${{ steps.meta.outputs.name }}
-          body: |
-            Automated release from CI.
-            Commit: ${{ github.sha }}
-          draft: false
-          prerelease: false
-          files: |
-            build/Verter_SAFE.zip
+          tag_name: ${{ github.sha }}
+          name: Verter ver. 2.2 — OrderGate+VirtFix
+          files: build/*.zip
