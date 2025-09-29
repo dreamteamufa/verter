@@ -607,7 +607,7 @@ function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel 
 
     const key = _virtKey(asset, signalId);
     if (virtTradesActive.has(key)){
-        console.warn('[VIRT-BLOCK]', 'already active', key);
+        console.warn('[VIRT][BLOCK]', 'already active', key);
         return null;
     }
 
@@ -1446,7 +1446,7 @@ async function tradeLogic() {
         const normalizedDirection = tradeDirection === 'buy' ? 'BUY' : 'SELL';
 
         if (isDuplicateSignal(asset, signalId, normalizedDirection)) {
-            console.warn('[SIGNAL] debounce skip');
+            console.warn('[SIGNAL][SKIP] debounce');
             return;
         }
 
