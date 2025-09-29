@@ -18,6 +18,14 @@ jobs:
           node-version: '20'        # без cache:'npm', чтобы не требовался lock
       - name: Install deps
         run: npm install
+      
+       - name: Sanitize source
+        run: |
+          F=src/Verter.user.js
+          perl -CSD -pe 's/\x{FEFF}|\x{200B}//g' -i "$F"
+          perl -CSD -pe "s/\x{2026}/.../g" -i "$F"
+          perl -CSD -pe "tr/\x{2013}\x{2014}/--/" -i "$F"
+          perl -CSD -pe "tr/\x{2018}\x{2019}\x{201C}\x{201D}/''\"\"/" -i "$F"
 
       - name: Run PCS (syntax + lint + test + build)
         run: npm run pcs
