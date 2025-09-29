@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC="src/Verter.user.js"
+if [[ ! -f "$SRC" ]]; then echo "ERR: not found $SRC" >&2; exit 1; fi
+
+APPV=$(sed -n 's/.*appversion *= *"\(.*\)".*/\1/p' "$SRC" | head -1)   # "Verter ver. 2.2"
+if [[ -z "$APPV" ]]; then echo "ERR: appversion not found in $SRC" >&2; exit 2; fi
+
+VER=${APPV##*ver. }           # "2.2"
+APP=${APPV%% ver*}            # "Verter"
+LABEL="OrderGate+VirtFix"
+STAMP=$(date +%Y%m%d-%H%M)
+
+OUTDIR="build"
+NAME="${APP}_ver_${VER}_(${LABEL})_${STAMP}.zip"
+
+mkdir -p "$OUTDIR"
+zip -r "${OUTDIR}/${NAME}" "$SRC" README.md >/dev/null
+cp "${OUTDIR}/${NAME}" "${OUTDIR}/Verter_SAFE.zip"
+
+printf '%s\n' "$NAME" > "${OUTDIR}/ARTIFACT_NAME.txt"
+printf 'v%s\n' "$VER" > "${OUTDIR}/RELEASE_TAG.txt"
+printf '%s — %s\n' "$APPV" "$LABEL" > "${OUTDIR}/RELEASE_TITLE.txt"
+
+echo "Built: ${OUTDIR}/${NAME}"
+echo "Alias: ${OUTDIR}/Verter_SAFE.zip"
