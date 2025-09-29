@@ -81,6 +81,27 @@ function getTooltipElements() {
     return Array.from(document.getElementsByClassName('tooltip-text'));
 }
 
+const TradeControls = {
+    buy() {
+        document.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 87, shiftKey: true }));
+    },
+    sell() {
+        document.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 83, shiftKey: true }));
+    },
+    decreaseBet() {
+        document.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 65, shiftKey: true }));
+    },
+    increaseBet() {
+        document.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 68, shiftKey: true }));
+    },
+    setValue(v) {
+        const input = getBetInputElement();
+        if (input) {
+            input.value = v;
+        }
+    }
+};
+
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
 
 const Indicators = {
@@ -539,17 +560,6 @@ state.lastMax = state.startPrice;
 state.betInput = getBetInputElement();
 state.betDivContent = state.betInput ? state.betInput.value : '';
 state.betValue = parseFloat(state.betDivContent);
-
-let buy = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 87, shiftKey: true}));
-let sell = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 83, shiftKey: true}));
-let decreaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 65, shiftKey: true}));
-let increaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 68, shiftKey: true}));
-let setValue = v => {
-    const input = getBetInputElement();
-    if (input) {
-        input.value = v;
-    }
-};
 
 let updateMinMax = () => {
     if (state.globalPrice > state.lastMax) {
@@ -1391,23 +1401,23 @@ let smartBet = (step, tradeDirection) => {
 
     for (i=0; i < 30; i++){
         setTimeout(function() {
-            decreaseBet();
+            TradeControls.decreaseBet();
         }, i);
     }
 
-    setTimeout(function() {  
+    setTimeout(function() {
         for (i=0; i < steps; i++){
             setTimeout(function() {
-                increaseBet();
+                TradeControls.increaseBet();
             }, i);
         }
     }, 50);
 
-    setTimeout(function() {  
+    setTimeout(function() {
         if (tradeDirection == 'buy'){
-            buy();
+            TradeControls.buy();
         } else {
-            sell();
+            TradeControls.sell();
         }
         let betValue = getBetValue(step);
     }, 100);
