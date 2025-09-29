@@ -1,4 +1,4 @@
-const appversion = "Verter ver. 2.2";
+const appversion = "Verter ver. 2.3";
 const reverse = false; // Change to true for reverse mode
 // const webhookUrl = 'https://script.google.com/macros/s/AKfycbyz--BcEvGJq05MN5m9a6uGiUUhYe8WrpxOKMWE6qstfj15j9L8ahnK7DaVWaSbPAPG/exec'; //A1
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
@@ -39,9 +39,9 @@ let maxStepInCycle = 0;
 const mode = 'DEMO';
 
 /* ORDER-GATE */
-var ORDER_COOLDOWN_MS = 5000;
-var orderLock = false;
-var orderLockTs = 0;
+const ORDER_COOLDOWN_MS = 5000;
+let orderLock = false;
+let orderLockTs = 0;
 
 let lastSignalKey = '';
 let lastSignalTs = 0;
@@ -233,6 +233,7 @@ let virtualTradingEnabled = true;
 const virtTradesActive = new Map();
 let virtTradesHistory = [];
 let virtStats = new Map();
+const virtSignalLabels = new Map();
 let virtCleanupTimer = null;
 let virtAutoUpdateTimer = null;
 const virtFilters = { asset: '', signal: '' };
@@ -333,7 +334,10 @@ function canOpenRealOrder(){
 }
 
 function tryEnterOrderGate(tag){
-    if (!canOpenRealOrder()) return null;
+    if (!canOpenRealOrder()) {
+        console.warn('[ORDER-GATE][BLOCK]', tag || 'real');
+        return null;
+    }
     orderLock = true; orderLockTs = Date.now();
     console.log('[ORDER-GATE][ENTER]', tag, new Date(orderLockTs).toISOString());
     let released = false;
@@ -354,7 +358,7 @@ function isDuplicateSignal(asset, signalId, direction){
 async function openRealOrderSafe(params = {}){
     const tag = params && params.tag ? params.tag : 'real';
     const release = tryEnterOrderGate(tag);
-    if (!release){ console.warn('[ORDER-GATE][BLOCK] duplicate prevented'); return { ok:false, reason:'duplicate' }; }
+    if (!release){ return { ok:false, reason:'duplicate' }; }
     try{
         const ok = await openRealOrderImpl(params);
         release(ok === true); return { ok: !!ok };
@@ -598,6 +602,12 @@ function _virtKey(asset, signalId){
     return asset+'|'+signalId;
 }
 
+function getVirtSignalLabel(trade) {
+    if (!trade) return '';
+    const key = _virtKey(trade.asset, trade.signalId);
+    return virtSignalLabels.get(key) || trade.signalLabel || trade.signalId || '';
+}
+
 function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel }){
     if (!virtualTradingEnabled) return null;
     if (!asset || !signalId || !direction) return null;
@@ -607,21 +617,21 @@ function openVirtualIfFree({ asset, signalId, direction, priceOpen, signalLabel 
 
     const key = _virtKey(asset, signalId);
     if (virtTradesActive.has(key)){
-        console.warn('[VIRT-BLOCK]', 'already active', key);
+        console.warn('[VIRT][BLOCK]', 'already active', key);
         return null;
     }
 
     const openPrice = Number.isFinite(priceOpen) ? priceOpen : currentPrice();
     const tOpen = Date.now();
+    const label = signalLabel || signalId || direction;
+    virtSignalLabels.set(key, label);
     const trade = {
         id: key+'@'+tOpen,
         asset,
         signalId,
-        signalLabel,
         direction: normalizedDirection,
         tOpen,
-        priceOpen: openPrice,
-        signalKey: key
+        priceOpen: openPrice
     };
 
     trade.timeoutId = setTimeout(() => closeVirtual(key), VIRT_TRADE_DURATION);
@@ -653,8 +663,10 @@ function closeVirtual(key){
     trade.tClose = Date.now();
     trade.priceClose = priceClose;
     trade.result = result;
+    trade.signalLabel = getVirtSignalLabel(trade) || trade.signalId;
 
     virtTradesActive.delete(key);
+    delete trade.timeoutId;
     virtTradesHistory.push(trade);
 
     if (typeof onVirtualClosed === 'function') {
@@ -675,24 +687,28 @@ function rebuildVirtStats() {
     const stats = new Map();
 
     virtTradesHistory.forEach(trade => {
-        if (!trade || !trade.signalKey) return;
+        if (!trade) return;
+        const key = _virtKey(trade.asset, trade.signalId);
+        const label = trade.signalLabel || virtSignalLabels.get(key) || trade.signalId;
 
-        const existing = stats.get(trade.signalKey) || {
+        const existing = stats.get(key) || {
             signalId: trade.signalId,
-            signalLabel: trade.signalLabel,
+            signalLabel: label,
             asset: trade.asset,
             wins: 0,
             total: 0,
             winRate: 0
         };
 
+        existing.signalLabel = label;
+        existing.asset = trade.asset;
         existing.total += 1;
         if (trade.result === 'win') {
             existing.wins += 1;
         }
 
         existing.winRate = existing.total > 0 ? existing.wins / existing.total : 0;
-        stats.set(trade.signalKey, existing);
+        stats.set(key, existing);
     });
 
     virtStats = stats;
@@ -704,6 +720,24 @@ function cleanupVirtualHistory(log = true) {
 
     virtTradesHistory = virtTradesHistory.filter(trade => trade.tClose && trade.tClose >= cutoff);
     const removed = before - virtTradesHistory.length;
+
+    const keysToKeep = new Set();
+    virtTradesActive.forEach((_trade, activeKey) => keysToKeep.add(activeKey));
+    virtTradesHistory.forEach(trade => {
+        const key = _virtKey(trade.asset, trade.signalId);
+        if (key) {
+            keysToKeep.add(key);
+            if (trade.signalLabel && !virtSignalLabels.has(key)) {
+                virtSignalLabels.set(key, trade.signalLabel);
+            }
+        }
+    });
+
+    Array.from(virtSignalLabels.keys()).forEach(key => {
+        if (!keysToKeep.has(key)) {
+            virtSignalLabels.delete(key);
+        }
+    });
 
     if (log) {
         console.log(`[VIRT-CLEAN] removed=${removed} kept=${virtTradesHistory.length}`);
@@ -723,10 +757,11 @@ function matchesTradeFilters(trade) {
     const assetFilter = virtFilters.asset;
     const signalFilter = virtFilters.signal;
 
+    const label = getVirtSignalLabel(trade).toLowerCase();
     const assetMatches = !assetFilter || (trade.asset && trade.asset.toLowerCase().includes(assetFilter));
     const signalMatches = !signalFilter ||
         (trade.signalId && trade.signalId.toLowerCase().includes(signalFilter)) ||
-        (trade.signalLabel && trade.signalLabel.toLowerCase().includes(signalFilter)) ||
+        (label && label.includes(signalFilter)) ||
         (trade.direction && trade.direction.toLowerCase().includes(signalFilter));
 
     return assetMatches && signalMatches;
@@ -738,10 +773,11 @@ function matchesStatFilters(stat) {
     const assetFilter = virtFilters.asset;
     const signalFilter = virtFilters.signal;
 
+    const label = (stat.signalLabel || '').toLowerCase();
     const assetMatches = !assetFilter || (stat.asset && stat.asset.toLowerCase().includes(assetFilter));
     const signalMatches = !signalFilter ||
         (stat.signalId && stat.signalId.toLowerCase().includes(signalFilter)) ||
-        (stat.signalLabel && stat.signalLabel.toLowerCase().includes(signalFilter));
+        (label && label.includes(signalFilter));
 
     return assetMatches && signalMatches;
 }
@@ -777,10 +813,12 @@ function renderVirtActiveTable(trades, now) {
             const remainingSec = Math.ceil(remainingMs / 1000);
             const countdownClass = remainingSec <= 10 ? 'virt-countdown-low' : '';
 
+            const label = getVirtSignalLabel(trade) || '—';
+            const asset = trade.asset || '—';
             return `
                 <tr>
-                    <td>${trade.signalLabel}</td>
-                    <td>${trade.asset}</td>
+                    <td>${label}</td>
+                    <td>${asset}</td>
                     <td>${trade.direction}</td>
                     <td>${formatVirtualTime(trade.tOpen)}</td>
                     <td>${formatVirtualPrice(trade.priceOpen)}</td>
@@ -808,10 +846,12 @@ function renderVirtHistoryTable(trades) {
             const resultClass = trade.result === 'win' ? 'virt-result-win' :
                 (trade.result === 'loss' ? 'virt-result-loss' : 'virt-result-return');
 
+            const label = trade.signalLabel || getVirtSignalLabel(trade) || '—';
+            const asset = trade.asset || '—';
             return `
                 <tr>
-                    <td>${trade.signalLabel}</td>
-                    <td>${trade.asset}</td>
+                    <td>${label}</td>
+                    <td>${asset}</td>
                     <td>${trade.direction}</td>
                     <td>${formatVirtualTime(trade.tOpen)} → ${formatVirtualTime(trade.tClose)}</td>
                     <td>${formatVirtualPrice(trade.priceOpen)} → ${formatVirtualPrice(trade.priceClose)}</td>
@@ -844,13 +884,15 @@ function renderVirtStatsTable(stats) {
             return b.winRate - a.winRate;
         })
         .map(stat => {
+            const label = stat.signalLabel || stat.signalId || '—';
+            const asset = stat.asset || '—';
             const winRatio = `${stat.wins}/${stat.total}`;
             const rateDisplay = stat.total > 0 ? `${(stat.winRate * 100).toFixed(1)}%` : '—';
 
             return `
                 <tr>
-                    <td>${stat.signalLabel}</td>
-                    <td>${stat.asset}</td>
+                    <td>${label}</td>
+                    <td>${asset}</td>
                     <td>${winRatio}</td>
                     <td>${rateDisplay}</td>
                 </tr>
@@ -867,6 +909,10 @@ function updateVirtualTradingUI() {
     const panel = document.getElementById('virtual-trading-panel');
     if (panel) {
         panel.classList.toggle('virt-panel-disabled', !virtualTradingEnabled);
+    }
+
+    if (virtToggleInput) {
+        virtToggleInput.checked = virtualTradingEnabled;
     }
 
     if (virtToggleStatus) {
@@ -892,7 +938,7 @@ function initVirtualTrading() {
     if (virtAutoUpdateTimer) {
         clearInterval(virtAutoUpdateTimer);
     }
-    virtAutoUpdateTimer = setInterval(updateVirtualTradingUI, 5000);
+    virtAutoUpdateTimer = setInterval(updateVirtualTradingUI, 1000);
 
     if (virtCleanupTimer) {
         clearInterval(virtCleanupTimer);
@@ -1567,6 +1613,7 @@ function smartBet(step, tradeDirection) {
     return true;
 }
 
+// НЕ вызывать напрямую. Использовать openRealOrderSafe().
 function openRealOrderImpl(params = {}) {
     const { step = 0, tradeDirection } = params;
     if (!tradeDirection) {
@@ -2101,15 +2148,15 @@ function addUI() {
         </div>
         <div class="virt-controls">
             <label for="virt-filter-asset">Актив:
-                <input type="text" id="virt-filter-asset" placeholder="фильтр">
+                <input type="text" id="virt-filter-asset" placeholder="например EUR USD">
             </label>
             <label for="virt-filter-signal">Сигнал:
-                <input type="text" id="virt-filter-signal" placeholder="фильтр">
+                <input type="text" id="virt-filter-signal" placeholder="например Core BUY">
             </label>
             <button type="button" id="virt-filter-reset">Сброс</button>
         </div>
         <div class="virt-section">
-            <h4>Активные сделки</h4>
+            <h4>Активные виртуальные сделки</h4>
             <div class="virt-table-wrapper">
                 <table class="virt-table">
                     <thead>
@@ -2119,7 +2166,7 @@ function addUI() {
                             <th>Направление</th>
                             <th>Открытие</th>
                             <th>Цена</th>
-                            <th>До закрытия</th>
+                            <th>Осталось</th>
                         </tr>
                     </thead>
                     <tbody id="virt-active-body">
@@ -2129,7 +2176,7 @@ function addUI() {
             </div>
         </div>
         <div class="virt-section">
-            <h4>История 60 мин</h4>
+            <h4>История закрытых (60 мин)</h4>
             <div class="virt-table-wrapper">
                 <table class="virt-table">
                     <thead>
@@ -2138,8 +2185,8 @@ function addUI() {
                             <th>Актив</th>
                             <th>Направление</th>
                             <th>Время</th>
-                            <th>Цена</th>
-                            <th>Результат</th>
+                            <th>Цены</th>
+                            <th>Итог</th>
                         </tr>
                     </thead>
                     <tbody id="virt-history-body">
@@ -2149,7 +2196,7 @@ function addUI() {
             </div>
         </div>
         <div class="virt-section">
-            <h4>Эффективность сигналов (60 мин)</h4>
+            <h4>Статистика по сигналам (60 мин)</h4>
             <div class="virt-table-wrapper">
                 <table class="virt-table">
                     <thead>
