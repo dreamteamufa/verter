@@ -15,7 +15,7 @@ fi
 
 VER=${APPV##*ver. }
 APP=${APPV%% ver*}
-LABEL="OrderGate+VirtFix"
+LABEL="OrderGate+VirtFix+VirtUI"
 STAMP=$(date +%Y%m%d-%H%M)
 
 README_SRC="README.md"
