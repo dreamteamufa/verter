@@ -764,50 +764,40 @@ function getMultiTimeframeSignal() {
     return 'flat';
 }
 
-// Modify calculateIndicators to include these new indicators
-function calculateIndicators() {
+function prepareIndicatorData() {
     const currentTime = Date.now();
-    
-    // Add price to buffer with timestamp
+
     if (state.globalPrice && state.globalPrice !== state.priceHistory[state.priceHistory.length - 1]) {
         state.priceBuffer.push({
             time: currentTime,
             price: state.globalPrice
         });
 
-        // Keep buffer at a reasonable size
         if (state.priceBuffer.length > 500) {
             state.priceBuffer.shift();
         }
     }
 
-    // Update multi-timeframe data
     if (state.globalPrice) {
         updateMultiTimeframe(state.globalPrice, currentTime);
     }
 
-    // Check if we need to create a new candle
     if (currentTime - state.lastCandleTime >= state.candleInterval) {
-        // If we have price data since the last candle
         if (state.priceBuffer.length > 0) {
-            // Extract prices that belong to the completed candle
             const candlePricePoints = state.priceBuffer.filter(
                 point => point.time >= state.lastCandleTime && point.time < currentTime
             );
 
             if (candlePricePoints.length > 0) {
-                // Create a new candle using OHLC
                 const open = candlePricePoints[0].price;
                 const high = Math.max(...candlePricePoints.map(p => p.price));
                 const low = Math.min(...candlePricePoints.map(p => p.price));
                 const close = candlePricePoints[candlePricePoints.length - 1].price;
 
-                // Add the close price to our candle prices array
                 state.candlePrices.push(close);
 
                 logDebug(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
 
-                // Keep candlePrices at a reasonable size
                 if (state.candlePrices.length > 50) {
                     state.candlePrices.shift();
                 }
@@ -817,17 +807,23 @@ function calculateIndicators() {
         state.lastCandleTime = currentTime;
     }
 
-    // Use priceHistory for indicators if we don't have enough candles yet
     const dataForIndicators = state.priceHistory.length >= 20 ? state.priceHistory : [];
 
+    return { dataForIndicators, currentTime };
+}
+
+function checkIndicatorDataAvailability(dataForIndicators) {
     if (dataForIndicators.length < 20) {
         window.currentSignal = 'flat';
         updatePanel('signal', 'Insufficient Data');
-        updateIndicatorDisplay(true); // Pass true to indicate insufficient data
-        return;
+        updateIndicatorDisplay(true);
+        return false;
     }
-    
-    // Calculate all indicators
+
+    return true;
+}
+
+function computeIndicators(dataForIndicators) {
     const shortEMA = Indicators.calculateEMA(dataForIndicators, 9);
     const longEMA = Indicators.calculateEMA(dataForIndicators, 21);
     const rsiValue = Indicators.calculateRSI(dataForIndicators, 14);
@@ -837,102 +833,139 @@ function calculateIndicators() {
     const rocValue = Indicators.calculateROC(dataForIndicators, 12);
     const awesomeOsc = calculateAwesomeOscillator(dataForIndicators);
     const parabolicSAR = calculateParabolicSAR(dataForIndicators);
-    
-    // Price action analysis
     const priceAction = analyzePriceAction(dataForIndicators);
     const supportResistance = findSupportResistance(dataForIndicators);
     const trend = detectTrend(dataForIndicators);
     const fractals = findFractals(dataForIndicators);
-    
-    // Multi-timeframe signal
     const mtfSignal = getMultiTimeframeSignal();
-    
-    // Current price
     const currentPrice = dataForIndicators[dataForIndicators.length - 1];
-    
-    // Signal scoring system
+    const emaDifference = shortEMA - longEMA;
+
+    return {
+        shortEMA,
+        longEMA,
+        emaDifference,
+        rsiValue,
+        macdData,
+        bollingerBands,
+        stochastic,
+        rocValue,
+        awesomeOsc,
+        parabolicSAR,
+        priceAction,
+        supportResistance,
+        trend,
+        fractals,
+        mtfSignal,
+        currentPrice
+    };
+}
+
+function scoreIndicators(values) {
+    const {
+        shortEMA,
+        longEMA,
+        emaDifference,
+        rsiValue,
+        macdData,
+        bollingerBands,
+        stochastic,
+        rocValue,
+        awesomeOsc,
+        parabolicSAR,
+        trend,
+        priceAction,
+        supportResistance,
+        mtfSignal,
+        currentPrice
+    } = values;
+
     let bullishScore = 0;
     let bearishScore = 0;
-    
-    // EMA signals (weight: 2)
-    const emaDifference = shortEMA - longEMA;
+
     const emaThreshold = 0.0001;
     if (emaDifference > emaThreshold) bullishScore += 2;
     else if (emaDifference < -emaThreshold) bearishScore += 2;
-    
-    // RSI signals (weight: 2)
+
     if (rsiValue < 30) bullishScore += 2;
     else if (rsiValue > 70) bearishScore += 2;
     else if (rsiValue < 40) bullishScore += 1;
     else if (rsiValue > 60) bearishScore += 1;
-    
-    // MACD signals (weight: 2)
+
     if (macdData.macd > macdData.signal && macdData.histogram > 0) bullishScore += 2;
     else if (macdData.macd < macdData.signal && macdData.histogram < 0) bearishScore += 2;
-    
-    // Bollinger Bands signals (weight: 1)
+
     if (currentPrice < bollingerBands.lower) bullishScore += 1;
     else if (currentPrice > bollingerBands.upper) bearishScore += 1;
-    
-    // Stochastic signals (weight: 1)
+
     if (stochastic.k < 20 && stochastic.d < 20) bullishScore += 1;
     else if (stochastic.k > 80 && stochastic.d > 80) bearishScore += 1;
-    
-    // Rate of Change signals (weight: 1)
+
     if (rocValue > 1) bullishScore += 1;
     else if (rocValue < -1) bearishScore += 1;
-    
-    // Awesome Oscillator signals (weight: 1)
+
     if (awesomeOsc > 0) bullishScore += 1;
     else if (awesomeOsc < 0) bearishScore += 1;
-    
-    // Parabolic SAR signals (weight: 1)
+
     if (parabolicSAR.isUpTrend) bullishScore += 1;
     else if (!parabolicSAR.isUpTrend) bearishScore += 1;
-    
-    // Trend signals (weight: 2)
+
     if (trend === 'strong_up') bullishScore += 2;
     else if (trend === 'up') bullishScore += 1;
     else if (trend === 'strong_down') bearishScore += 2;
     else if (trend === 'down') bearishScore += 1;
-    
-    // Price action signals (weight: 1)
+
     if (priceAction.pattern.includes('bullish')) {
         bullishScore += 1;
     } else if (priceAction.pattern.includes('bearish')) {
         bearishScore += 1;
     }
-    
-    // Support/Resistance signals (weight: 1)
+
     if (supportResistance.nearSupport) bullishScore += 1;
     else if (supportResistance.nearResistance) bearishScore += 1;
-    
-    // Multi-timeframe signals (weight: 3)
+
     if (mtfSignal === 'buy') bullishScore += 3;
     else if (mtfSignal === 'sell') bearishScore += 3;
-    
-    // Determine final signal
+
     let signal = 'flat';
     const scoreDifference = Math.abs(bullishScore - bearishScore);
-    const minScoreThreshold = 5; // Minimum score needed to generate a signal
-    
+    const minScoreThreshold = 5;
+
     if (bullishScore > bearishScore && bullishScore >= minScoreThreshold && scoreDifference >= 3) {
         signal = 'buy';
     } else if (bearishScore > bullishScore && bearishScore >= minScoreThreshold && scoreDifference >= 3) {
         signal = 'sell';
     }
-    
-    // Avoid trading during consolidation
+
     if (priceAction.isConsolidating) {
         signal = 'flat';
     }
-    
-    // Update UI with indicator values
+
+    return { bullishScore, bearishScore, signal, scoreDifference };
+}
+
+function updateIndicatorUI(scores, values, context) {
+    const { bullishScore, bearishScore, signal } = scores;
+    const {
+        shortEMA,
+        longEMA,
+        emaDifference,
+        rsiValue,
+        macdData,
+        bollingerBands,
+        stochastic,
+        rocValue,
+        awesomeOsc,
+        parabolicSAR,
+        trend,
+        priceAction,
+        mtfSignal
+    } = values;
+
     updatePanel('signal', `${signal.toUpperCase()} (B:${bullishScore} vs S:${bearishScore})`, {
         backgroundColor: signal === 'buy' ? greenColor : (signal === 'sell' ? redColor : '#333')
     });
-    
-    // Store the current signal and indicators in global variables for tradeLogic to use
+
     window.currentSignal = signal;
     window.currentShortEMA = shortEMA;
     window.currentLongEMA = longEMA;
@@ -945,8 +978,7 @@ function calculateIndicators() {
     window.currentStoch = stochastic;
     window.currentTrend = trend;
     window.currentPriceAction = priceAction;
-    
-    // Update the indicator display
+
     updateIndicatorDisplay(false, {
         shortEMA,
         longEMA,
@@ -962,10 +994,23 @@ function calculateIndicators() {
         priceAction,
         mtfSignal,
         candlePrices: state.candlePrices,
-        currentTime
+        currentTime: context.currentTime
     });
-    
+
     logDebug(`Signal: ${signal}, Bullish Score: ${bullishScore}, Bearish Score: ${bearishScore}, Trend: ${trend}, Pattern: ${priceAction.pattern}`);
+}
+
+// Modify calculateIndicators to include these new indicators
+function calculateIndicators() {
+    const { dataForIndicators, currentTime } = prepareIndicatorData();
+
+    if (!checkIndicatorDataAvailability(dataForIndicators)) {
+        return;
+    }
+
+    const indicatorValues = computeIndicators(dataForIndicators);
+    const scores = scoreIndicators(indicatorValues);
+    updateIndicatorUI(scores, indicatorValues, { currentTime });
 }
 
 // Add the missing helper functions for price action analysis
@@ -1112,39 +1157,40 @@ function debugTradeStatus() {
     `);
 }
 
-/// Modify the tradeLogic function to use the sensitivity parameter
-function tradeLogic() {
-    let tradeDirection;
-    let currentTrade = {};
+function createTradeContext() {
+    const time = Date.now();
 
-    let time = Date.now();
-    let hTime = humanTime(time);
+    return {
+        time,
+        hTime: humanTime(time),
+        globalTrend: 'flat',
+        priceTrend: 'flat'
+    };
+}
 
-    debugTradeStatus();
-
-    // Initialize default values
+function getPreviousTradeInfo() {
     let prevBetStep = 0;
-    let currentBetStep = 0;
-    let tradeStatus = 'won'; // Default status for first trade
-    
-    // Define these variables that were previously undefined
-    let globalTrend = 'flat';
-    let priceTrend = 'flat';
-    
-    // Only try to access betHistory if it has elements
-    if (state.betHistory.length > 0) {
-        prevBetStep = state.betHistory.slice(-1)[0].step;
+    let tradeStatus = 'won';
 
-        // Check if we have trade status information
-        if (state.betHistory.slice(-1)[0].won) {
-            tradeStatus = state.betHistory.slice(-1)[0].won;
+    if (state.betHistory.length > 0) {
+        const lastBet = state.betHistory.slice(-1)[0];
+        prevBetStep = lastBet.step;
+
+        if (lastBet.won) {
+            tradeStatus = lastBet.won;
         }
     }
+
+    return { prevBetStep, tradeStatus };
+}
+
+function determineBetStep(prevBetStep, tradeStatus) {
+    let currentBetStep = 0;
 
     if (tradeStatus === 'won') {
         currentBetStep = 0;
     } else if (tradeStatus === 'lost') {
-        if (prevBetStep < state.betArray.length-1) {
+        if (prevBetStep < state.betArray.length - 1) {
             currentBetStep = prevBetStep + 1;
         } else {
             currentBetStep = 0;
@@ -1153,55 +1199,73 @@ function tradeLogic() {
         currentBetStep = prevBetStep;
     }
 
-    if (state.betHistory.length < 3){
+    if (state.betHistory.length < 3) {
         currentBetStep = 0;
     }
 
-    // Use the pre-calculated signal from calculateIndicators
-    let signal = window.currentSignal || 'flat';
-    
-    // Get the score difference from the indicators
+    return currentBetStep;
+}
+
+function getIndicatorScores() {
     const bullishScore = window.bullishScore || 0;
     const bearishScore = window.bearishScore || 0;
     const scoreDifference = Math.abs(bullishScore - bearishScore);
-    
-    // Apply sensitivity adjustment - higher sensitivity means we need less score difference to trade
-    const adjustedThreshold = 11 - state.signalSensitivity; // Inverted scale: 1 is most sensitive (threshold=10), 10 is least (threshold=1)
-    
-    // Determine trade direction based on scores and sensitivity
+    const adjustedThreshold = 11 - state.signalSensitivity;
+
+    return {
+        signal: window.currentSignal || 'flat',
+        bullishScore,
+        bearishScore,
+        scoreDifference,
+        adjustedThreshold
+    };
+}
+
+function determineTradeDirection(scores) {
+    const { bullishScore, bearishScore, scoreDifference, adjustedThreshold } = scores;
+    let tradeDirection;
     let tradeDirectionBackground;
+
     if (bullishScore > bearishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'buy' : 'sell';
-        tradeDirectionBackground = greenColor; // Green
+        tradeDirectionBackground = greenColor;
     } else if (bearishScore > bullishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'sell' : 'buy';
-        tradeDirectionBackground = redColor; // Red
+        tradeDirectionBackground = redColor;
     } else {
         tradeDirection = 'flat';
-        tradeDirectionBackground = '#555555'; // Gray
+        tradeDirectionBackground = '#555555';
     }
 
-    updatePanel('tradeDirection', `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`, {
-        background: tradeDirectionBackground
-    });
+    return { tradeDirection, tradeDirectionBackground };
+}
 
-    // Check profit limits
-    if (state.currentProfit > state.limitWin){
+function updateTradeDirectionPanel(tradeDecision, scores) {
+    updatePanel('tradeDirection', `${tradeDecision.tradeDirection} (${scores.scoreDifference}/${scores.adjustedThreshold})`, {
+        background: tradeDecision.tradeDirectionBackground
+    });
+}
+
+function handleProfitLimits() {
+    if (state.currentProfit > state.limitWin) {
         state.limitWin = config.limits.limitWin1;
         state.limitLoss = config.limits.limitLoss1;
         state.betArray = betArray1;
         let newDiv = winCycle.cloneNode();
         newDiv.style.height = '30px';
         newDiv.innerHTML = state.currentProfit;
-        newDiv.innerHTML += '<div class="max-cycle">'+state.maxStepInCycle+'</div>';
+        newDiv.innerHTML += '<div class="max-cycle">' + state.maxStepInCycle + '</div>';
         state.cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('win');
-    } else if (state.currentProfit - state.betValue < state.limitLoss) {
-        if (state.limitWin === config.limits.limitWin1){
+        return true;
+    }
+
+    if (state.currentProfit - state.betValue < state.limitLoss) {
+        if (state.limitWin === config.limits.limitWin1) {
             state.limitWin = config.limits.limitWin2;
             state.limitLoss = config.limits.limitLoss2;
             state.betArray = betArray2;
-        } else if (state.limitWin === config.limits.limitWin2){
+        } else if (state.limitWin === config.limits.limitWin2) {
             state.limitWin = config.limits.limitWin3;
             state.limitLoss = config.limits.limitLoss3;
             state.betArray = betArray3;
@@ -1213,57 +1277,90 @@ function tradeLogic() {
         let newDiv = loseCycle.cloneNode();
         newDiv.style.height = '30px';
         newDiv.innerHTML = state.currentProfit;
-        newDiv.innerHTML += '<div class="max-cycle">'+state.maxStepInCycle+'</div>';
+        newDiv.innerHTML += '<div class="max-cycle">' + state.maxStepInCycle + '</div>';
         state.cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('lose');
-    } else if (state.cyclesToPlay > 0 && tradeDirection !== 'flat' && state.autoTradingEnabled){
-        // Execute trade and update last trade time
-
-        if (!state.isTradeOpen) {
-            smartBet(currentBetStep, tradeDirection);
-            state.isTradeOpen = true;
-        }
-
-        state.lastTradeTime = time;
-
-        currentTrade.time = hTime;
-        currentTrade.betTime = state.betTime;
-        currentTrade.openPrice = state.globalPrice;
-        currentTrade.step = currentBetStep;
-        let betValue = getBetValue(currentTrade.step);
-        currentTrade.betValue = betValue;
-        currentTrade.betDirection = tradeDirection;
-        currentTrade.globalTrend = globalTrend;
-        currentTrade.priceTrend = priceTrend;
-        currentTrade.shortEMA = window.currentShortEMA;
-        currentTrade.longEMA = window.currentLongEMA;
-        currentTrade.emaDiff = window.currentShortEMA - window.currentLongEMA;
-        currentTrade.rsi = window.currentRSI;
-        currentTrade.bullishScore = bullishScore;
-        currentTrade.bearishScore = bearishScore;
-        currentTrade.scoreDiff = scoreDifference;
-        currentTrade.threshold = adjustedThreshold;
-        state.betHistory.push(currentTrade);
-        state.totalWager += betValue;
-        updatePanel('wager', state.totalWager);
-
-        // Update maximum step
-        state.maxStepInCycle = Math.max(state.maxStepInCycle, currentTrade.step);
-        updatePanel('maxStep', state.maxStepInCycle);
-
-        logDebug(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
+        return true;
     }
 
-    // Calculate win percentage
+    return false;
+}
+
+function checkEntryConditions(tradeDirection) {
+    return state.cyclesToPlay > 0 && tradeDirection !== 'flat' && state.autoTradingEnabled;
+}
+
+function executeTrade(tradeDirection, currentBetStep, scores, context) {
+    if (!state.isTradeOpen) {
+        smartBet(currentBetStep, tradeDirection);
+        state.isTradeOpen = true;
+    }
+
+    state.lastTradeTime = context.time;
+
+    const betValue = getBetValue(currentBetStep);
+    const tradeRecord = {
+        time: context.hTime,
+        betTime: state.betTime,
+        openPrice: state.globalPrice,
+        step: currentBetStep,
+        betValue,
+        betDirection: tradeDirection,
+        globalTrend: context.globalTrend,
+        priceTrend: context.priceTrend,
+        shortEMA: window.currentShortEMA,
+        longEMA: window.currentLongEMA,
+        emaDiff: window.currentShortEMA - window.currentLongEMA,
+        rsi: window.currentRSI,
+        bullishScore: scores.bullishScore,
+        bearishScore: scores.bearishScore,
+        scoreDiff: scores.scoreDifference,
+        threshold: scores.adjustedThreshold
+    };
+
+    state.betHistory.push(tradeRecord);
+    state.totalWager += betValue;
+    updatePanel('wager', state.totalWager);
+
+    state.maxStepInCycle = Math.max(state.maxStepInCycle, tradeRecord.step);
+    updatePanel('maxStep', state.maxStepInCycle);
+
+    logDebug(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scores.scoreDifference}/${scores.adjustedThreshold}`);
+}
+
+function updateWinPercentage() {
     let winCounter = 0;
-    for (var i = 0; i < state.betHistory.length; i++) {
-        if (state.betHistory[i].won === 'won'){
-            winCounter++
+    for (let i = 0; i < state.betHistory.length; i++) {
+        if (state.betHistory[i].won === 'won') {
+            winCounter++;
         }
     }
 
-    let winPercent = Math.round(winCounter / state.betHistory.length * 100 * 100 ) / 100;
+    let winPercent = Math.round(winCounter / state.betHistory.length * 100 * 100) / 100;
     updatePanel('won', winPercent);
+}
+
+/// Modify the tradeLogic function to use the sensitivity parameter
+function tradeLogic() {
+    const context = createTradeContext();
+    debugTradeStatus();
+
+    const { prevBetStep, tradeStatus } = getPreviousTradeInfo();
+    const currentBetStep = determineBetStep(prevBetStep, tradeStatus);
+    const scores = getIndicatorScores();
+    const tradeDecision = determineTradeDirection(scores);
+
+    updateTradeDirectionPanel(tradeDecision, scores);
+
+    if (handleProfitLimits()) {
+        return;
+    }
+
+    if (checkEntryConditions(tradeDecision.tradeDirection)) {
+        executeTrade(tradeDecision.tradeDirection, currentBetStep, scores, context);
+    }
+
+    updateWinPercentage();
 }
 
 let smartBet = (step, tradeDirection) => {
