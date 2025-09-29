@@ -1,5 +1,5 @@
 (() => {
-const appversion = "Verter ver. 1";
+const appversion = "Verter ver. 2";
 const reverse = false; // Change to true for reverse mode
 
 const config = {
@@ -23,6 +23,12 @@ const config = {
         enabled: false
     }
 };
+
+function logDebug(...args) {
+    if (config.debug.enabled) {
+        console.log(...args);
+    }
+}
 
 function getFirstElementByClass(className) {
     const elements = document.getElementsByClassName(className);
@@ -341,7 +347,6 @@ function updatePanel(field, value, options = {}) {
 
 // Fix the candle formation and indicator calculation
 
-// const mode = 'REAL';
 const mode = 'DEMO';
 
 const debugEnabled = config.debug.enabled;
@@ -354,7 +359,6 @@ let observer = new MutationObserver(function(mutations) {
 
         let newDeal = mutation.addedNodes[0];
 
-        // console.log('mutation: ',mutation,' NewDeal: ',newDeal);
 
         function hasClass(element, className) {
             return (' ' + element.className + ' ').indexOf(' ' + className+ ' ') > -1;
@@ -412,7 +416,6 @@ let observer = new MutationObserver(function(mutations) {
 
         let totalBalance = state.prevBalance + betProfit;
 
-        // logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit);
         logTradeToGoogleSheets(
             appversion,
             state.symbolName,
@@ -426,7 +429,6 @@ let observer = new MutationObserver(function(mutations) {
             totalBalance
         );
 
-        // console.log('Bet status: ',tradeStatus);
 
     });
 });
@@ -435,7 +437,6 @@ const observerConfig = { attributes: false, childList: true, characterData: fals
 // pass in the target node, as well as the observer options
 observer.observe(targetDiv, observerConfig);
 // later, you can stop observing
-// observer.disconnect();
  
 const betArray1 = [
     {step: 0, value: 1, pressCount: 0},
@@ -517,9 +518,7 @@ state.betTime = getTextContent(betTimeDiv);
 state.startBalance = getBalanceValue(state.balanceDiv);
 state.prevBalance = state.startBalance;
 state.priceString = state.startBalance.toString();
-if (debugEnabled) {
-    console.log('Start Balance: ', state.startBalance);
-}
+logDebug('Start Balance:', state.startBalance);
 
 const redColor = config.colors.red;
 const greenColor = config.colors.green;
@@ -551,9 +550,7 @@ const buyButton = getFirstElementByClass("btn btn-call");
 state.text = state.targetElement2.innerHTML;
 state.startPrice = parseFloat(state.text.match(/\d+.\d+(?=\ a)/g)[0]);
 state.priceHistory.push(state.startPrice);
-if (debugEnabled) {
-    console.log('Start Price: ', state.startPrice);
-}
+logDebug('Start Price:', state.startPrice);
 
 state.lastMin = state.startPrice;
 state.lastMax = state.startPrice;
@@ -829,9 +826,7 @@ function calculateIndicators() {
                 // Add the close price to our candle prices array
                 state.candlePrices.push(close);
 
-                if (debugEnabled) {
-                    console.log(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
-                }
+                logDebug(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
 
                 // Keep candlePrices at a reasonable size
                 if (state.candlePrices.length > 50) {
@@ -991,9 +986,7 @@ function calculateIndicators() {
         currentTime
     });
     
-    if (debugEnabled) {
-        console.log(`Signal: ${signal}, Bullish Score: ${bullishScore}, Bearish Score: ${bearishScore}, Trend: ${trend}, Pattern: ${priceAction.pattern}`);
-    }
+    logDebug(`Signal: ${signal}, Bullish Score: ${bullishScore}, Bearish Score: ${bearishScore}, Trend: ${trend}, Pattern: ${priceAction.pattern}`);
 }
 
 // Add the missing helper functions for price action analysis
@@ -1122,7 +1115,7 @@ function debugTradeStatus() {
     const timeSinceLastTrade = time - state.lastTradeTime;
     const timeSinceLastSignalCheck = time - state.lastSignalCheck;
 
-    console.log(`Debug Trade Status:
+    logDebug(`Debug Trade Status:
     - Current Signal: ${window.currentSignal || 'undefined'}
     - EMA Signal: ${window.emaSignal || 'undefined'}
     - RSI Signal: ${window.rsiSignal || 'undefined'}
@@ -1279,9 +1272,7 @@ function tradeLogic() {
         state.maxStepInCycle = Math.max(state.maxStepInCycle, currentTrade.step);
         updatePanel('maxStep', state.maxStepInCycle);
 
-        if (debugEnabled) {
-            console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
-        }
+        logDebug(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
     }
 
     // Calculate win percentage
@@ -1302,9 +1293,7 @@ let smartBet = (step, tradeDirection) => {
     updatePanel('profitPercent', currentProfitPercent, { resetBackground: true, resetColor: true });
 
     if (currentProfitPercent < 90){
-        if (debugEnabled) {
-            console.log(`%c BET IS NOT RECOMMENDED. Aborting mission! `, `background: ${redColor}; color: #ffffff`);
-        }
+        logDebug(`%c BET IS NOT RECOMMENDED. Aborting mission! `, `background: ${redColor}; color: #ffffff`);
         updatePanel('profitPercent', `win % is low! ABORT!!! => ${currentProfitPercent}`, {
             background: redColor,
             color: '#ffffff'
@@ -1315,9 +1304,7 @@ let smartBet = (step, tradeDirection) => {
     let steps;
 
     if (tradeDirection === 'null'){
-        if (debugEnabled) {
-            console.log('trade dir is NULL');
-        }
+        logDebug('trade dir is NULL');
     }
 
     for (let i = 0; i <state.betArray.length;i++){
@@ -1347,7 +1334,6 @@ let smartBet = (step, tradeDirection) => {
             sell();
         }
         let betValue = getBetValue(step);
-        // console.log('Betting: ' + betValue + ' / Step: ' + step + ' / Direction: ' + tradeDirection);
     }, 100);
 }
 let getBetValue = (betStep) => {
@@ -1372,11 +1358,8 @@ let resetCycle = (winStatus) => {
     let hTime = humanTime(time);
 
     // Пример: логирование сделки
-    // logTradeToGoogleSheets(appversion, winStatus, state.currentProfit, state.maxStepInCycle, state.symbolName);
 
-    if (debugEnabled) {
-        console.log('%c RESET CYCLE! ' + hTime, 'background: #9326FF; color: #ffffff');
-    }
+    logDebug('%c RESET CYCLE! ' + hTime, 'background: #9326FF; color: #ffffff');
 
     updatePanel('profit', undefined, { background: 'inherit' });
 
@@ -1389,7 +1372,6 @@ let resetCycle = (winStatus) => {
         state.cyclesStats.push(state.currentProfit);
         state.startBalance = state.currentBalance;
         state.cyclesToPlay--;
-        // state.cyclesDiv.innerHTML = state.cyclesToPlay;
         let totalProfit = 0;
         for (let i = 0; i < state.cyclesStats.length; i++) {
             totalProfit += state.cyclesStats[i];
@@ -1400,9 +1382,7 @@ let resetCycle = (winStatus) => {
         updatePanel('totalProfit', totalProfit, { background: totalProfitBackground });
         state.firstTradeBlock = false;
     } else {
-        if (debugEnabled) {
-            console.log('%c ----- ALL CYCLES ENDED! ----- ' + hTime + ' ------', 'background: #9326FF; color: #ffffff');
-        }
+        logDebug('%c ----- ALL CYCLES ENDED! ----- ' + hTime + ' ------', 'background: #9326FF; color: #ffffff');
     }
 }
 function updateHeaderPanel() {
@@ -1913,16 +1893,12 @@ function addSensitivityControl() {
     document.getElementById('sensitivity-slider').addEventListener('input', function(e) {
         state.signalSensitivity = parseInt(e.target.value);
         document.getElementById('sensitivity-value').textContent = state.signalSensitivity;
-        if (debugEnabled) {
-            console.log(`Signal sensitivity set to: ${state.signalSensitivity}`);
-        }
+        logDebug(`Signal sensitivity set to: ${state.signalSensitivity}`);
     });
 
     document.getElementById('auto-trading-toggle').addEventListener('change', function(e) {
         state.autoTradingEnabled = e.target.checked;
-        if (debugEnabled) {
-            console.log(`Auto trading ${state.autoTradingEnabled ? 'enabled' : 'disabled'}`);
-        }
+        logDebug(`Auto trading ${state.autoTradingEnabled ? 'enabled' : 'disabled'}`);
     });
 }
 
@@ -2190,7 +2166,6 @@ document.head.appendChild(styleSheet);
 
 function logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit) {
 
-    // logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit);
     const data = { appversion, reverse, symbolName, openTime, betTime, openPrice, closePrice, betAmount, betStatus, betProfit };
   
     fetch(webhookUrl, {
