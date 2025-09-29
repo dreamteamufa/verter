@@ -34,6 +34,33 @@ function logDebug(...args) {
     }
 }
 
+function logBotActivity() {
+    if (typeof state === 'undefined' || !state.activityStats) {
+        return;
+    }
+
+    const now = Date.now();
+    const { lastLogTime } = state.activityStats;
+
+    if (lastLogTime === null) {
+        state.activityStats.lastLogTime = now;
+        return;
+    }
+
+    if (now - lastLogTime < 60000) {
+        return;
+    }
+
+    const { realTrades, virtualTrades, virtualWins, virtualLosses } = state.activityStats;
+    console.log(`[Bot Activity] Real: ${realTrades}, Virtual: ${virtualTrades} (wins: ${virtualWins}, losses: ${virtualLosses})`);
+
+    state.activityStats.realTrades = 0;
+    state.activityStats.virtualTrades = 0;
+    state.activityStats.virtualWins = 0;
+    state.activityStats.virtualLosses = 0;
+    state.activityStats.lastLogTime = now;
+}
+
 function getFirstElementByClass(className) {
     const elements = document.getElementsByClassName(className);
     return elements.length ? elements[0] : null;
@@ -306,8 +333,17 @@ const state = {
     autoTradingEnabled: true,
     virtualTrades: [],
     activeVirtualTrades: {},
-    virtualStatsDiv: null
+    virtualStatsDiv: null,
+    activityStats: {
+        realTrades: 0,
+        virtualTrades: 0,
+        virtualWins: 0,
+        virtualLosses: 0,
+        lastLogTime: null
+    }
 };
+
+setInterval(logBotActivity, 1000);
 
 const panelMap = {
     profit: 'profitDiv',
@@ -370,7 +406,7 @@ function startVirtualTrade(signal, direction, price) {
         return;
     }
 
-    if (Object.keys(state.activeVirtualTrades).length > 0 || state.activeVirtualTrades[signal]) {
+    if (state.activeVirtualTrades[signal]) {
         return;
     }
 
@@ -392,6 +428,10 @@ function startVirtualTrade(signal, direction, price) {
     }, config.virtualTrading.tradeDurationMs);
 
     state.activeVirtualTrades[signal] = trade;
+
+    if (state.activityStats) {
+        state.activityStats.virtualTrades += 1;
+    }
 }
 
 function closeVirtualTrade(signal) {
@@ -417,6 +457,14 @@ function closeVirtualTrade(signal) {
         priceDelta = trade.entryPrice - exitPrice;
         if (priceDelta > 0) outcome = 'win';
         else if (priceDelta < 0) outcome = 'loss';
+    }
+
+    if (state.activityStats) {
+        if (outcome === 'win') {
+            state.activityStats.virtualWins += 1;
+        } else if (outcome === 'loss') {
+            state.activityStats.virtualLosses += 1;
+        }
     }
 
     state.virtualTrades.push({
@@ -1615,6 +1663,9 @@ let smartBet = (step, tradeDirection) => {
             TradeControls.sell();
         }
         let betValue = getBetValue(step);
+        if (state.activityStats) {
+            state.activityStats.realTrades += 1;
+        }
     }, 100);
 }
 let getBetValue = (betStep) => {
