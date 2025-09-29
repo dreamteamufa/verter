@@ -1,8 +1,29 @@
 const appversion = "Verter ver. 1";
 const reverse = false; // Change to true for reverse mode
-// const webhookUrl = 'https://script.google.com/macros/s/AKfycbyz--BcEvGJq05MN5m9a6uGiUUhYe8WrpxOKMWE6qstfj15j9L8ahnK7DaVWaSbPAPG/exec'; //A1
+
+const config = {
+    limits: {
+        limitWin1: 50,
+        limitLoss1: -50,
+        limitWin2: 100,
+        limitLoss2: -100,
+        limitWin3: 150,
+        limitLoss3: -150
+    },
+    timing: {
+        minTimeBetweenTrades: 5000,
+        signalCheckInterval: 1000
+    },
+    colors: {
+        green: '#009500',
+        red: '#B90000'
+    },
+    debug: {
+        enabled: false
+    }
+};
+
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
-// const webhookUrl = 'https://script.google.com/macros/s/AKfycbyg_EJGKWqDAVhQDam8UKOt9wD7T8PXoBevnwcShqMo7cWLysV-tPfPyrchZIm52r-a/exec'; //O3
 
 let humanTime = (time) => {
     let h = (new Date(time).getHours()).toString();
@@ -43,17 +64,10 @@ let cyclesStats = [];
 
 let tradingAllowed = true;
 
-const limitWin1 = 50;
-const limitLoss1 = -50;
- 
-const limitWin2 = 100;
-const limitLoss2 = -100;
- 
-const limitWin3 = 150;
-const limitLoss3 = -150;
- 
-let limitWin = limitWin1;
-let limitLoss = limitLoss1;
+const debugEnabled = config.debug.enabled;
+
+let limitWin = config.limits.limitWin1;
+let limitLoss = config.limits.limitLoss1;
 
 // Add these variables near the top of your file with other global variables
 let isTradeOpen = false; // Track if a trade is currently open
@@ -144,9 +158,9 @@ let observer = new MutationObserver(function(mutations) {
     });
 });
 // configuration of the observer:
-let config = { attributes: false, childList: true, characterData: false };
+const observerConfig = { attributes: false, childList: true, characterData: false };
 // pass in the target node, as well as the observer options
-observer.observe(targetDiv, config);
+observer.observe(targetDiv, observerConfig);
 // later, you can stop observing
 // observer.disconnect();
  
@@ -236,10 +250,12 @@ priceString = priceString.split(',').join('');
 
 let startBalance = parseFloat(priceString);
 let prevBalance = startBalance;
-console.log('Start Balance: ',startBalance);
+if (debugEnabled) {
+    console.log('Start Balance: ', startBalance);
+}
 
-const redColor = '#B90000';
-const greenColor = '#009500';
+const redColor = config.colors.red;
+const greenColor = config.colors.green;
 
 const winCycle = document.createElement("div");
 winCycle.style.backgroundColor = greenColor;
@@ -267,7 +283,9 @@ const buyButton = document.getElementsByClassName("btn btn-call")[0];
 let text = targetElement2.innerHTML;
 let startPrice = parseFloat(text.match(/\d+.\d+(?=\ a)/g)[0]);
 priceHistory.push(startPrice);
-console.log('Start Price: ',startPrice);
+if (debugEnabled) {
+    console.log('Start Price: ', startPrice);
+}
 
 let lastMin = startPrice;
 let lastMax = startPrice;
@@ -296,9 +314,9 @@ let updateMinMax = () => {
 }
 
 let lastTradeTime = 0;
-let minTimeBetweenTrades = 5000; // 5 seconds minimum between trades
+let minTimeBetweenTrades = config.timing.minTimeBetweenTrades; // 5 seconds minimum between trades
 let lastSignalCheck = 0;
-let signalCheckInterval = 1000; // Check for trading signals every 1 second
+let signalCheckInterval = config.timing.signalCheckInterval; // Check for trading signals every 1 second
 
 let queryPrice = () => {
     time = Date.now();
@@ -574,7 +592,9 @@ function calculateIndicators() {
                 // Add the close price to our candle prices array
                 candlePrices.push(close);
                 
-                console.log(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
+                if (debugEnabled) {
+                    console.log(`New 1m candle formed: Open=${open}, High=${high}, Low=${low}, Close=${close}`);
+                }
                 
                 // Keep candlePrices at a reasonable size
                 if (candlePrices.length > 50) {
@@ -733,7 +753,9 @@ function calculateIndicators() {
         currentTime
     });
     
-    console.log(`Signal: ${signal}, Bullish Score: ${bullishScore}, Bearish Score: ${bearishScore}, Trend: ${trend}, Pattern: ${priceAction.pattern}`);
+    if (debugEnabled) {
+        console.log(`Signal: ${signal}, Bullish Score: ${bullishScore}, Bearish Score: ${bearishScore}, Trend: ${trend}, Pattern: ${priceAction.pattern}`);
+    }
 }
 
 // Add the missing helper functions for price action analysis
@@ -812,19 +834,6 @@ function findSupportResistance(prices) {
     return { nearSupport, nearResistance };
 }
 
-// Add the missing EMA calculation function
-function calculateEMA(prices, period) {
-    if (prices.length < period) return prices[prices.length - 1];
-    
-    const multiplier = 2 / (period + 1);
-    let ema = prices.slice(0, period).reduce((sum, price) => sum + price, 0) / period;
-    
-    for (let i = period; i < prices.length; i++) {
-        ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
-    }
-    
-    return ema;
-}
 // Helper function to calculate price momentum
 function calculatePriceMomentum(prices) {
     if (prices.length < 5) {
@@ -937,6 +946,10 @@ function calculateRSI(prices, period = 14) {
 }
 // Update the debug function to include candle information
 function debugTradeStatus() {
+    if (!debugEnabled) {
+        return;
+    }
+
     const time = Date.now();
     const timeSinceLastTrade = time - lastTradeTime;
     const timeSinceLastSignalCheck = time - lastSignalCheck;
@@ -966,6 +979,8 @@ function tradeLogic() {
 
     let time = Date.now();
     let hTime = humanTime(time);
+
+    debugTradeStatus();
 
     // Initialize default values
     let prevBetStep = 0;
@@ -1016,10 +1031,10 @@ function tradeLogic() {
     // Determine trade direction based on scores and sensitivity
     if (bullishScore > bearishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'buy' : 'sell';
-        tradeDirectionDiv.style.background = '#009500'; // Green
+        tradeDirectionDiv.style.background = greenColor; // Green
     } else if (bearishScore > bullishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'sell' : 'buy';
-        tradeDirectionDiv.style.background = '#B90000'; // Red
+        tradeDirectionDiv.style.background = redColor; // Red
     } else {
         tradeDirection = 'flat';
         tradeDirectionDiv.style.background = '#555555'; // Gray
@@ -1029,8 +1044,8 @@ function tradeLogic() {
 
     // Check profit limits
     if (currentProfit > limitWin){
-        limitWin = limitWin1;
-        limitLoss = limitLoss1;
+        limitWin = config.limits.limitWin1;
+        limitLoss = config.limits.limitLoss1;
         betArray = betArray1;
         let newDiv = winCycle.cloneNode();
         newDiv.style.height = '30px';
@@ -1039,17 +1054,17 @@ function tradeLogic() {
         cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('win');
     } else if (currentProfit - betValue < limitLoss) {
-        if (limitWin == limitWin1){
-            limitWin = limitWin2;
-            limitLoss = limitLoss2;
+        if (limitWin === config.limits.limitWin1){
+            limitWin = config.limits.limitWin2;
+            limitLoss = config.limits.limitLoss2;
             betArray = betArray2;
-        } else if (limitWin == limitWin2){
-            limitWin = limitWin3;
-            limitLoss = limitLoss3;
+        } else if (limitWin === config.limits.limitWin2){
+            limitWin = config.limits.limitWin3;
+            limitLoss = config.limits.limitLoss3;
             betArray = betArray3;
         } else {
-            limitWin = limitWin1;
-            limitLoss = limitLoss1;
+            limitWin = config.limits.limitWin1;
+            limitLoss = config.limits.limitLoss1;
             betArray = betArray1;
         }
         let newDiv = loseCycle.cloneNode();
@@ -1093,7 +1108,9 @@ function tradeLogic() {
         maxStepInCycle = Math.max(maxStepInCycle, currentTrade.step);
         maxStepDiv.innerHTML = maxStepInCycle;
         
-        console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
+        if (debugEnabled) {
+            console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
+        }
     }
 
     // Calculate win percentage
@@ -1114,8 +1131,10 @@ let smartBet = (step, tradeDirection) => {
     profitPercentDivAdvisor.innerHTML = currentProfitPercent;
 
     if (currentProfitPercent < 90){
-        console.log('%c BET IS NOT RECOMMENDED. Aborting mission! ', 'background: #B90000; color: #ffffff');
-        profitPercentDivAdvisor.style.background = '#B90000';
+        if (debugEnabled) {
+            console.log(`%c BET IS NOT RECOMMENDED. Aborting mission! `, `background: ${redColor}; color: #ffffff`);
+        }
+        profitPercentDivAdvisor.style.background = redColor;
         profitPercentDivAdvisor.style.color = "#ffffff";
         profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
         return;
@@ -1124,7 +1143,9 @@ let smartBet = (step, tradeDirection) => {
     let steps;
 
     if (tradeDirection === 'null'){
-        console.log('trade dir is NULL');
+        if (debugEnabled) {
+            console.log('trade dir is NULL');
+        }
     }
 
     for (let i = 0; i <betArray.length;i++){
@@ -1181,7 +1202,9 @@ let resetCycle = (winStatus) => {
     // Пример: логирование сделки
     // logTradeToGoogleSheets(appversion, winStatus, currentProfit, maxStepInCycle, symbolName);
 
-    console.log('%c RESET CYCLE! '+hTime, 'background: #9326FF; color: #ffffff');
+    if (debugEnabled) {
+        console.log('%c RESET CYCLE! ' + hTime, 'background: #9326FF; color: #ffffff');
+    }
 
     profitDiv.style.background = 'inherit';
 
@@ -1203,13 +1226,15 @@ let resetCycle = (winStatus) => {
         totalProfit = Math.round(totalProfit * 100) / 100;
         totalProfitDiv.innerHTML = totalProfit;
         if (totalProfit < 0) {
-            totalProfitDiv.style.background = '#B90000';
+            totalProfitDiv.style.background = redColor;
         } else if (totalProfit > 0) {
-            totalProfitDiv.style.background = '#009500';
+            totalProfitDiv.style.background = greenColor;
         }
         firstTradeBlock = false;
     } else {
-        console.log('%c ----- ALL CYCLES ENDED! ----- '+hTime+' ------', 'background: #9326FF; color: #ffffff');
+        if (debugEnabled) {
+            console.log('%c ----- ALL CYCLES ENDED! ----- ' + hTime + ' ------', 'background: #9326FF; color: #ffffff');
+        }
     }
 }
 function updateHeaderPanel() {
@@ -1724,12 +1749,16 @@ function addSensitivityControl() {
     document.getElementById('sensitivity-slider').addEventListener('input', function(e) {
         signalSensitivity = parseInt(e.target.value);
         document.getElementById('sensitivity-value').textContent = signalSensitivity;
-        console.log(`Signal sensitivity set to: ${signalSensitivity}`);
+        if (debugEnabled) {
+            console.log(`Signal sensitivity set to: ${signalSensitivity}`);
+        }
     });
     
     document.getElementById('auto-trading-toggle').addEventListener('change', function(e) {
         autoTradingEnabled = e.target.checked;
-        console.log(`Auto trading ${autoTradingEnabled ? 'enabled' : 'disabled'}`);
+        if (debugEnabled) {
+            console.log(`Auto trading ${autoTradingEnabled ? 'enabled' : 'disabled'}`);
+        }
     });
 }
 
@@ -2010,32 +2039,11 @@ function logTradeToGoogleSheets(appversion, symbolName, openTime, betTime, openP
     })
     .then(res => res.text())
     .then(response => {
-    // console.log('Trade logged:', response);
     })
     .catch(err => {
     console.error('Error logging trade:', err);
     });
   }
-
-// Helper function to calculate EMA
-function calculateEMA(prices, period) {
-    if (prices.length < period) {
-        // Not enough data points, return simple average
-        return prices.reduce((sum, price) => sum + price, 0) / prices.length;
-    }
-    
-    const k = 2 / (period + 1); // Smoothing factor
-    
-    // Calculate initial SMA
-    let ema = prices.slice(0, period).reduce((sum, price) => sum + price, 0) / period;
-    
-    // Calculate EMA for remaining prices
-    for (let i = period; i < prices.length; i++) {
-        ema = prices[i] * k + ema * (1 - k);
-    }
-    
-    return ema;
-}
 
 // Add a function to detect support and resistance levels
 function detectSupportResistance(prices, lookback = 50, threshold = 0.0005) {
@@ -2098,62 +2106,6 @@ function calculateMomentum(prices, period = 10) {
     const pastPrice = prices[prices.length - 1 - period];
     
     return ((currentPrice - pastPrice) / pastPrice) * 100;
-}
-
-// Helper function to calculate RSI
-function calculateRSI(prices, period) {
-    if (prices.length <= period) {
-        return 50; // Default neutral value if not enough data
-    }
-    
-    // Calculate price changes
-    const changes = [];
-    for (let i = 1; i < prices.length; i++) {
-        changes.push(prices[i] - prices[i - 1]);
-    }
-    
-    // Separate gains and losses
-    const gains = changes.map(change => change > 0 ? change : 0);
-    const losses = changes.map(change => change < 0 ? Math.abs(change) : 0);
-    
-    // Calculate average gains and losses
-    let avgGain = gains.slice(0, period).reduce((sum, gain) => sum + gain, 0) / period;
-    let avgLoss = losses.slice(0, period).reduce((sum, loss) => sum + loss, 0) / period;
-    
-    // Calculate RSI for remaining periods using smoothed averages
-    for (let i = period; i < changes.length; i++) {
-        avgGain = ((avgGain * (period - 1)) + gains[i]) / period;
-        avgLoss = ((avgLoss * (period - 1)) + losses[i]) / period;
-    }
-    
-    if (avgLoss === 0) return 100; // Avoid division by zero
-    
-    const rs = avgGain / avgLoss;
-    const rsi = 100 - (100 / (1 + rs));
-    
-    return rsi;
-}
-
-// Add a function to calculate MACD
-function calculateMACD(prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
-    if (prices.length < slowPeriod) {
-        return {
-            macd: 0,
-            signal: 0,
-            histogram: 0
-        };
-    }
-    
-    const fastEMA = calculateEMA(prices, fastPeriod);
-    const slowEMA = calculateEMA(prices, slowPeriod);
-    const macdLine = fastEMA - slowEMA;
-    
-    // For signal line, we need MACD values over time, but for simplicity, return current values
-    return {
-        macd: macdLine,
-        signal: 0, // Simplified - would need historical MACD values for proper signal line
-        histogram: macdLine
-    };
 }
 
 // Add a function to detect divergence between price and RSI
