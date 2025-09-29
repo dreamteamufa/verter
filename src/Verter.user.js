@@ -26,6 +26,115 @@ const config = {
 
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
 
+const Indicators = {
+    calculateEMA(prices, period) {
+        if (!Array.isArray(prices) || prices.length === 0) {
+            return null;
+        }
+
+        if (!period || prices.length < period) {
+            return prices[prices.length - 1] ?? null;
+        }
+
+        const multiplier = 2 / (period + 1);
+        let ema = prices[0];
+
+        for (let i = 1; i < prices.length; i++) {
+            ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
+        }
+
+        return ema;
+    },
+
+    calculateSMA(prices, period) {
+        if (!Array.isArray(prices) || prices.length === 0) {
+            return null;
+        }
+
+        if (!period || prices.length < period) {
+            return prices[prices.length - 1] ?? null;
+        }
+
+        const recentPrices = prices.slice(-period);
+        return recentPrices.reduce((sum, price) => sum + price, 0) / period;
+    },
+
+    calculateRSI(prices, period = 14) {
+        if (!Array.isArray(prices) || prices.length < period + 1) {
+            return 50;
+        }
+
+        let gains = 0;
+        let losses = 0;
+
+        for (let i = 1; i <= period; i++) {
+            const change = prices[i] - prices[i - 1];
+            if (change > 0) {
+                gains += change;
+            } else {
+                losses += Math.abs(change);
+            }
+        }
+
+        let avgGain = gains / period;
+        let avgLoss = losses / period;
+
+        for (let i = period + 1; i < prices.length; i++) {
+            const change = prices[i] - prices[i - 1];
+            const gain = change > 0 ? change : 0;
+            const loss = change < 0 ? Math.abs(change) : 0;
+
+            avgGain = ((avgGain * (period - 1)) + gain) / period;
+            avgLoss = ((avgLoss * (period - 1)) + loss) / period;
+        }
+
+        if (avgLoss === 0) return 100;
+
+        const rs = avgGain / avgLoss;
+        return 100 - (100 / (1 + rs));
+    },
+
+    calculateROC(prices, period = 12) {
+        if (!Array.isArray(prices) || prices.length === 0) {
+            return null;
+        }
+
+        if (prices.length < period + 1) {
+            return 0;
+        }
+
+        const currentPrice = prices[prices.length - 1];
+        const pastPrice = prices[prices.length - 1 - period];
+
+        if (pastPrice === 0) {
+            return 0;
+        }
+
+        return ((currentPrice - pastPrice) / pastPrice) * 100;
+    },
+
+    calculateVolatility(prices, period = 10) {
+        if (!Array.isArray(prices) || prices.length === 0) {
+            return null;
+        }
+
+        if (prices.length < period) {
+            return null;
+        }
+
+        const recent = prices.slice(-period);
+        const mean = recent.reduce((sum, price) => sum + price, 0) / recent.length;
+
+        const variance = recent.reduce((sum, price) => {
+            return sum + Math.pow(price - mean, 2);
+        }, 0) / recent.length;
+
+        const stdDev = Math.sqrt(variance);
+
+        return mean === 0 ? 0 : stdDev / mean;
+    }
+};
+
 let humanTime = (time) => {
     let h = (new Date(time).getHours()).toString();
     if (h < 10){
@@ -480,34 +589,18 @@ function findFractals(prices, period = 5) {
     };
 }
 
-// Add Rate of Change (ROC)
-function calculateROC(prices, period = 12) {
-    if (prices.length < period + 1) return 0;
-    
-    const currentPrice = prices[prices.length - 1];
-    const pastPrice = prices[prices.length - 1 - period];
-    
-    return ((currentPrice - pastPrice) / pastPrice) * 100;
-}
 
 // Add Awesome Oscillator (price-based momentum)
 function calculateAwesomeOscillator(prices) {
     if (prices.length < 34) return 0;
     
     // Calculate 5-period and 34-period simple moving averages
-    const sma5 = calculateSMA(prices, 5);
-    const sma34 = calculateSMA(prices, 34);
+    const sma5 = Indicators.calculateSMA(prices, 5);
+    const sma34 = Indicators.calculateSMA(prices, 34);
     
     return sma5 - sma34;
 }
 
-// Add Simple Moving Average helper
-function calculateSMA(prices, period) {
-    if (prices.length < period) return prices[prices.length - 1];
-    
-    const recentPrices = prices.slice(-period);
-    return recentPrices.reduce((sum, price) => sum + price, 0) / period;
-}
 
 // Add Parabolic SAR
 function calculateParabolicSAR(prices, acceleration = 0.02, maximum = 0.2) {
@@ -660,13 +753,13 @@ function calculateIndicators() {
     }
     
     // Calculate all indicators
-    const shortEMA = calculateEMA(dataForIndicators, 9);
-    const longEMA = calculateEMA(dataForIndicators, 21);
-    const rsiValue = calculateRSI(dataForIndicators, 14);
+    const shortEMA = Indicators.calculateEMA(dataForIndicators, 9);
+    const longEMA = Indicators.calculateEMA(dataForIndicators, 21);
+    const rsiValue = Indicators.calculateRSI(dataForIndicators, 14);
     const macdData = calculateMACD(dataForIndicators);
     const bollingerBands = calculateBollingerBands(dataForIndicators);
     const stochastic = calculateStochastic(dataForIndicators);
-    const rocValue = calculateROC(dataForIndicators, 12);
+    const rocValue = Indicators.calculateROC(dataForIndicators, 12);
     const awesomeOsc = calculateAwesomeOscillator(dataForIndicators);
     const parabolicSAR = calculateParabolicSAR(dataForIndicators);
     
@@ -917,76 +1010,6 @@ function calculatePriceMomentum(prices) {
     };
 }
 
-// Helper function to calculate volatility
-function calculateVolatility(prices) {
-    if (prices.length < 10) return 0;
-    
-    const recent = prices.slice(-10);
-    const mean = recent.reduce((sum, price) => sum + price, 0) / recent.length;
-    
-    // Calculate standard deviation
-    const variance = recent.reduce((sum, price) => {
-        return sum + Math.pow(price - mean, 2);
-    }, 0) / recent.length;
-    
-    const stdDev = Math.sqrt(variance);
-    
-    // Return as percentage of mean price
-    return stdDev / mean;
-}
-
-// Enhanced EMA calculation with validation
-function calculateEMA(prices, period) {
-    if (!prices || prices.length === 0) return 0;
-    if (prices.length < period) return prices[prices.length - 1];
-    
-    const multiplier = 2 / (period + 1);
-    let ema = prices[0];
-    
-    for (let i = 1; i < prices.length; i++) {
-        ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
-    }
-    
-    return ema;
-}
-
-// Enhanced RSI calculation
-function calculateRSI(prices, period = 14) {
-    if (!prices || prices.length < period + 1) return 50;
-    
-    let gains = 0;
-    let losses = 0;
-    
-    // Calculate initial average gain and loss
-    for (let i = 1; i <= period; i++) {
-        const change = prices[i] - prices[i - 1];
-        if (change > 0) {
-            gains += change;
-        } else {
-            losses += Math.abs(change);
-        }
-    }
-    
-    let avgGain = gains / period;
-    let avgLoss = losses / period;
-    
-    // Calculate RSI for remaining periods
-    for (let i = period + 1; i < prices.length; i++) {
-        const change = prices[i] - prices[i - 1];
-        const gain = change > 0 ? change : 0;
-        const loss = change < 0 ? Math.abs(change) : 0;
-        
-        avgGain = ((avgGain * (period - 1)) + gain) / period;
-        avgLoss = ((avgLoss * (period - 1)) + loss) / period;
-    }
-    
-    if (avgLoss === 0) return 100;
-    
-    const rs = avgGain / avgLoss;
-    const rsi = 100 - (100 / (1 + rs));
-    
-    return rsi;
-}
 // Update the debug function to include candle information
 function debugTradeStatus() {
     if (!debugEnabled) {
@@ -2199,8 +2222,8 @@ function calculateMACD(prices, fastPeriod = 12, slowPeriod = 26, signalPeriod = 
     }
     
     // Calculate EMAs
-    const fastEMA = calculateEMA(prices, fastPeriod);
-    const slowEMA = calculateEMA(prices, slowPeriod);
+    const fastEMA = Indicators.calculateEMA(prices, fastPeriod);
+    const slowEMA = Indicators.calculateEMA(prices, slowPeriod);
     
     // Calculate MACD line
     const macdLine = fastEMA - slowEMA;
