@@ -24,6 +24,57 @@ const config = {
     }
 };
 
+function getFirstElementByClass(className) {
+    const elements = document.getElementsByClassName(className);
+    return elements.length ? elements[0] : null;
+}
+
+function getTextContent(element) {
+    return element ? element.textContent.trim() : '';
+}
+
+function extractNumericValue(text) {
+    if (!text) {
+        return 0;
+    }
+
+    const sanitized = text.replace(/[^0-9.,-]/g, '').replace(/,/g, '');
+    const value = parseFloat(sanitized);
+    return Number.isNaN(value) ? 0 : value;
+}
+
+function getSymbolName(element = getFirstElementByClass('current-symbol')) {
+    const text = getTextContent(element);
+    return text ? text.replace('/', ' ') : '';
+}
+
+function getBetTimeElement() {
+    return getFirstElementByClass('value__val');
+}
+
+function getBetInputElement() {
+    const container = getFirstElementByClass('call-put-block__in');
+    return container ? container.querySelector('input') : null;
+}
+
+function getBalanceElement(currentMode) {
+    const targetClass = currentMode === 'REAL' ? 'js-hd js-balance-real-USD' : 'js-hd js-balance-demo';
+    return getFirstElementByClass(targetClass);
+}
+
+function getBalanceValue(element) {
+    if (!element) {
+        return 0;
+    }
+
+    const sourceText = element.textContent || element.innerHTML || '';
+    return extractNumericValue(sourceText);
+}
+
+function getTooltipElements() {
+    return Array.from(document.getElementsByClassName('tooltip-text'));
+}
+
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
 
 const Indicators = {
@@ -33,7 +84,8 @@ const Indicators = {
         }
 
         if (!period || prices.length < period) {
-            return prices[prices.length - 1] ?? null;
+            const lastPrice = prices[prices.length - 1];
+            return lastPrice !== undefined ? lastPrice : null;
         }
 
         const multiplier = 2 / (period + 1);
@@ -52,7 +104,8 @@ const Indicators = {
         }
 
         if (!period || prices.length < period) {
-            return prices[prices.length - 1] ?? null;
+            const lastPrice = prices[prices.length - 1];
+            return lastPrice !== undefined ? lastPrice : null;
         }
 
         const recentPrices = prices.slice(-period);
@@ -230,6 +283,62 @@ const state = {
     autoTradingEnabled: true
 };
 
+const panelMap = {
+    profit: 'profitDiv',
+    signal: 'signalDiv',
+    profitPercent: 'profitPercentDivAdvisor',
+    time: 'timeDiv',
+    won: 'wonDiv',
+    wager: 'wagerDiv',
+    tradingSymbol: 'tradingSymbolDiv',
+    totalProfit: 'totalProfitDiv',
+    tradeDirection: 'tradeDirectionDiv',
+    maxStep: 'maxStepDiv'
+};
+
+function updatePanel(field, value, options = {}) {
+    const elementKey = panelMap[field];
+    if (!elementKey) {
+        return;
+    }
+
+    const element = state[elementKey];
+    if (!element) {
+        return;
+    }
+
+    const { useTextContent = false, color, background, backgroundColor } = options;
+
+    if (value !== undefined) {
+        if (useTextContent) {
+            element.textContent = value;
+        } else {
+            element.innerHTML = value;
+        }
+    }
+
+    if (color !== undefined) {
+        element.style.color = color;
+    }
+
+    if (background !== undefined) {
+        element.style.background = background;
+    }
+
+    if (backgroundColor !== undefined) {
+        element.style.backgroundColor = backgroundColor;
+    }
+
+    if (options.resetColor) {
+        element.style.color = '';
+    }
+
+    if (options.resetBackground) {
+        element.style.background = '';
+        element.style.backgroundColor = '';
+    }
+}
+
 // Fix the candle formation and indicator calculation
 
 // const mode = 'REAL';
@@ -239,7 +348,7 @@ const debugEnabled = config.debug.enabled;
 
 
 // create an observer instance
-const targetDiv = document.getElementsByClassName("scrollbar-container deals-list ps")[0];
+const targetDiv = getFirstElementByClass("scrollbar-container deals-list ps");
 let observer = new MutationObserver(function(mutations) {
     mutations.forEach(function(mutation) {
 
@@ -295,9 +404,9 @@ let observer = new MutationObserver(function(mutations) {
         }
         // For 'returned' status, keep the same bet step
 
-        state.symbolName = symbolDiv.textContent.replace("/", " ");
-        state.tradingSymbolDiv.innerHTML = state.symbolName;
-        state.betTime = betTimeDiv.textContent;
+        state.symbolName = getSymbolName(symbolDiv);
+        updatePanel('tradingSymbol', state.symbolName);
+        state.betTime = getTextContent(betTimeDiv);
         let timeParts = state.betTime.split(':');
         let seconds = parseInt(timeParts[0]) * 3600 + parseInt(timeParts[1]) * 60 + parseInt(timeParts[2]);
 
@@ -396,24 +505,18 @@ state.famaBar = undefined;
 state.balanceDiv = undefined;
 state.lastPrice = undefined;
 
-const percentProfitDiv = document.getElementsByClassName("value__val-start")[0];
-if (mode == 'REAL'){
-    state.balanceDiv = document.getElementsByClassName("js-hd js-balance-real-USD")[0];
-} else {
-    state.balanceDiv = document.getElementsByClassName("js-hd js-balance-demo")[0];
-}
+const percentProfitDiv = getFirstElementByClass("value__val-start");
+state.balanceDiv = getBalanceElement(mode);
 
-const symbolDiv = document.getElementsByClassName("current-symbol")[0];
-state.symbolName = symbolDiv.textContent.replace("/", " ");
+const symbolDiv = getFirstElementByClass("current-symbol");
+state.symbolName = getSymbolName(symbolDiv);
 
-const betTimeDiv = document.getElementsByClassName("value__val")[0];
-state.betTime = betTimeDiv.textContent;
+const betTimeDiv = getBetTimeElement();
+state.betTime = getTextContent(betTimeDiv);
 
-state.priceString = state.balanceDiv.innerHTML;
-state.priceString = state.priceString.split(',').join('');
-
-state.startBalance = parseFloat(state.priceString);
+state.startBalance = getBalanceValue(state.balanceDiv);
 state.prevBalance = state.startBalance;
+state.priceString = state.startBalance.toString();
 if (debugEnabled) {
     console.log('Start Balance: ', state.startBalance);
 }
@@ -435,15 +538,16 @@ loseCycle.style.margin = "15px 10px 0 0";
 loseCycle.style.display = "inline-block";
 loseCycle.style.borderRadius = "3px";
 
-const targetElem = document.getElementsByClassName("tooltip-text");
+const targetElem = getTooltipElements();
 const textToSearch = "Winnings amount you receive";
-for (i = 0; i< targetElem.length;i++){
-    let textContent = targetElem[i].textContent || targetElem[i].innerText;
+for (let i = 0; i < targetElem.length; i++){
+    const tooltip = targetElem[i];
+    const textContent = tooltip.textContent || tooltip.innerText || '';
     if (textContent.includes(textToSearch)){
-        state.targetElement2 = document.getElementsByClassName("tooltip-text")[i];
+        state.targetElement2 = tooltip;
     }
 }
-const buyButton = document.getElementsByClassName("btn btn-call")[0];
+const buyButton = getFirstElementByClass("btn btn-call");
 state.text = state.targetElement2.innerHTML;
 state.startPrice = parseFloat(state.text.match(/\d+.\d+(?=\ a)/g)[0]);
 state.priceHistory.push(state.startPrice);
@@ -456,15 +560,20 @@ state.lastMax = state.startPrice;
 state.multiplyFactorMesa = 100 / state.startPrice;
 state.multiplyFactorSqzMom = 50 / state.startPrice;
 
-state.betInput = document.getElementsByClassName("call-put-block__in")[0].querySelector("input");
-state.betDivContent = document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value;
+state.betInput = getBetInputElement();
+state.betDivContent = state.betInput ? state.betInput.value : '';
 state.betValue = parseFloat(state.betDivContent);
 
 let buy = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 87, shiftKey: true}));
 let sell = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 83, shiftKey: true}));
 let decreaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 65, shiftKey: true}));
 let increaseBet = () => document.dispatchEvent(new KeyboardEvent('keyup', {keyCode: 68, shiftKey: true}));
-let setValue = v => document.getElementsByClassName("call-put-block__in")[0].querySelector("input").value = v; // todo: after that press ENTER event?
+let setValue = v => {
+    const input = getBetInputElement();
+    if (input) {
+        input.value = v;
+    }
+}; // todo: after that press ENTER event?
 
 let updateMinMax = () => {
     if (state.globalPrice > state.lastMax) {
@@ -478,7 +587,7 @@ let updateMinMax = () => {
 let queryPrice = () => {
     state.time = Date.now();
     state.hTime = humanTime(state.time);
-    state.timeDiv.innerHTML = state.hTime;
+    updatePanel('time', state.hTime);
 
     // Get the current price
     state.text = state.targetElement2.innerHTML;
@@ -508,21 +617,13 @@ let queryPrice = () => {
     }
 
     // Update balance and profit
-    state.priceString = state.balanceDiv.innerHTML;
-    state.priceString = state.priceString.split(',').join('');
-    state.currentBalance = parseFloat(state.priceString);
+    state.currentBalance = getBalanceValue(state.balanceDiv);
+    state.priceString = state.currentBalance.toString();
     state.currentProfit = state.currentBalance - state.startBalance;
     state.currentProfit = Math.round(state.currentProfit * 100) / 100;
 
-    state.profitDiv.innerHTML = state.currentProfit;
-
-    if (state.currentProfit < 0) {
-        state.profitDiv.style.background = redColor;
-    } else if (state.currentProfit > 0) {
-        state.profitDiv.style.background = greenColor;
-    } else {
-        state.profitDiv.style.background = 'inherit';
-    }
+    const profitBackground = state.currentProfit < 0 ? redColor : state.currentProfit > 0 ? greenColor : 'inherit';
+    updatePanel('profit', state.currentProfit, { background: profitBackground });
 
     // Only check for trading signals at specified intervals
     // This prevents excessive trading while maintaining up-to-date indicators
@@ -747,7 +848,7 @@ function calculateIndicators() {
 
     if (dataForIndicators.length < 20) {
         window.currentSignal = 'flat';
-        state.signalDiv.innerHTML = 'Insufficient Data';
+        updatePanel('signal', 'Insufficient Data');
         updateIndicatorDisplay(true); // Pass true to indicate insufficient data
         return;
     }
@@ -853,8 +954,9 @@ function calculateIndicators() {
     }
     
     // Update UI with indicator values
-    state.signalDiv.innerHTML = `${signal.toUpperCase()} (B:${bullishScore} vs S:${bearishScore})`;
-    state.signalDiv.style.backgroundColor = signal === 'buy' ? greenColor : (signal === 'sell' ? redColor : '#333');
+    updatePanel('signal', `${signal.toUpperCase()} (B:${bullishScore} vs S:${bearishScore})`, {
+        backgroundColor: signal === 'buy' ? greenColor : (signal === 'sell' ? redColor : '#333')
+    });
     
     // Store the current signal and indicators in global variables for tradeLogic to use
     window.currentSignal = signal;
@@ -1095,18 +1197,21 @@ function tradeLogic() {
     const adjustedThreshold = 11 - state.signalSensitivity; // Inverted scale: 1 is most sensitive (threshold=10), 10 is least (threshold=1)
     
     // Determine trade direction based on scores and sensitivity
+    let tradeDirectionBackground;
     if (bullishScore > bearishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'buy' : 'sell';
-        state.tradeDirectionDiv.style.background = greenColor; // Green
+        tradeDirectionBackground = greenColor; // Green
     } else if (bearishScore > bullishScore && scoreDifference >= adjustedThreshold) {
         tradeDirection = !reverse ? 'sell' : 'buy';
-        state.tradeDirectionDiv.style.background = redColor; // Red
+        tradeDirectionBackground = redColor; // Red
     } else {
         tradeDirection = 'flat';
-        state.tradeDirectionDiv.style.background = '#555555'; // Gray
+        tradeDirectionBackground = '#555555'; // Gray
     }
 
-    state.tradeDirectionDiv.innerHTML = `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`;
+    updatePanel('tradeDirection', `${tradeDirection} (${scoreDifference}/${adjustedThreshold})`, {
+        background: tradeDirectionBackground
+    });
 
     // Check profit limits
     if (state.currentProfit > state.limitWin){
@@ -1168,11 +1273,11 @@ function tradeLogic() {
         currentTrade.threshold = adjustedThreshold;
         state.betHistory.push(currentTrade);
         state.totalWager += betValue;
-        state.wagerDiv.innerHTML = state.totalWager;
+        updatePanel('wager', state.totalWager);
 
         // Update maximum step
         state.maxStepInCycle = Math.max(state.maxStepInCycle, currentTrade.step);
-        state.maxStepDiv.innerHTML = state.maxStepInCycle;
+        updatePanel('maxStep', state.maxStepInCycle);
 
         if (debugEnabled) {
             console.log(`Trade executed: ${tradeDirection} at step ${currentBetStep}, Score diff: ${scoreDifference}/${adjustedThreshold}`);
@@ -1188,21 +1293,22 @@ function tradeLogic() {
     }
 
     let winPercent = Math.round(winCounter / state.betHistory.length * 100 * 100 ) / 100;
-    state.wonDiv.innerHTML = winPercent;
+    updatePanel('won', winPercent);
 }
 
 let smartBet = (step, tradeDirection) => {
 
     const currentProfitPercent = parseInt(percentProfitDiv.innerHTML);
-    state.profitPercentDivAdvisor.innerHTML = currentProfitPercent;
+    updatePanel('profitPercent', currentProfitPercent, { resetBackground: true, resetColor: true });
 
     if (currentProfitPercent < 90){
         if (debugEnabled) {
             console.log(`%c BET IS NOT RECOMMENDED. Aborting mission! `, `background: ${redColor}; color: #ffffff`);
         }
-        state.profitPercentDivAdvisor.style.background = redColor;
-        state.profitPercentDivAdvisor.style.color = "#ffffff";
-        state.profitPercentDivAdvisor.innerHTML = 'win % is low! ABORT!!! => '+currentProfitPercent;
+        updatePanel('profitPercent', `win % is low! ABORT!!! => ${currentProfitPercent}`, {
+            background: redColor,
+            color: '#ffffff'
+        });
         return;
     }
 
@@ -1272,7 +1378,7 @@ let resetCycle = (winStatus) => {
         console.log('%c RESET CYCLE! ' + hTime, 'background: #9326FF; color: #ffffff');
     }
 
-    state.profitDiv.style.background = 'inherit';
+    updatePanel('profit', undefined, { background: 'inherit' });
 
     state.maxStepInCycle = 0;
 
@@ -1290,12 +1396,8 @@ let resetCycle = (winStatus) => {
         }
 
         totalProfit = Math.round(totalProfit * 100) / 100;
-        state.totalProfitDiv.innerHTML = totalProfit;
-        if (totalProfit < 0) {
-            state.totalProfitDiv.style.background = redColor;
-        } else if (totalProfit > 0) {
-            state.totalProfitDiv.style.background = greenColor;
-        }
+        const totalProfitBackground = totalProfit < 0 ? redColor : totalProfit > 0 ? greenColor : 'inherit';
+        updatePanel('totalProfit', totalProfit, { background: totalProfitBackground });
         state.firstTradeBlock = false;
     } else {
         if (debugEnabled) {
