@@ -649,16 +649,6 @@ let observer = new MutationObserver(function(mutations) {
         // Mark that the trade is now closed
         state.isTradeOpen = false;
 
-        // Update bet step based on trade outcome
-        if (tradeStatus === 'won') {
-            // Reset to first step on win
-            state.currentBetStep = 0;
-        } else if (tradeStatus === 'lost') {
-            // Increase bet step on loss, but don't exceed array length
-            state.currentBetStep = Math.min(state.currentBetStep + 1, state.betArray.length - 1);
-        }
-        // For 'returned' status, keep the same bet step
-
         state.symbolName = getSymbolName(symbolDiv);
         updatePanel('tradingSymbol', state.symbolName);
         state.betTime = getTextContent(betTimeDiv);
@@ -1422,13 +1412,11 @@ function createTradeContext() {
 }
 
 function getPreviousTradeInfo() {
-    let prevBetStep = 0;
+    const prevBetStep = state.currentBetStep || 0;
     let tradeStatus = 'won';
 
     if (state.betHistory.length > 0) {
         const lastBet = state.betHistory.slice(-1)[0];
-        prevBetStep = lastBet.step;
-
         if (lastBet.won) {
             tradeStatus = lastBet.won;
         }
@@ -1438,25 +1426,13 @@ function getPreviousTradeInfo() {
 }
 
 function determineBetStep(prevBetStep, tradeStatus) {
-    let currentBetStep = 0;
-
     if (tradeStatus === 'won') {
-        currentBetStep = 0;
+        return 0;
     } else if (tradeStatus === 'lost') {
-        if (prevBetStep < state.betArray.length - 1) {
-            currentBetStep = prevBetStep + 1;
-        } else {
-            currentBetStep = 0;
-        }
-    } else if (tradeStatus === 'returned') {
-        currentBetStep = prevBetStep;
+        return Math.min(prevBetStep + 1, state.betArray.length - 1);
     }
 
-    if (state.betHistory.length < 3) {
-        currentBetStep = 0;
-    }
-
-    return currentBetStep;
+    return prevBetStep;
 }
 
 function getIndicatorScores() {
@@ -1600,6 +1576,7 @@ function tradeLogic() {
 
     const { prevBetStep, tradeStatus } = getPreviousTradeInfo();
     const currentBetStep = determineBetStep(prevBetStep, tradeStatus);
+    state.currentBetStep = currentBetStep;
     const scores = getIndicatorScores();
     const tradeDecision = determineTradeDirection(scores);
 
