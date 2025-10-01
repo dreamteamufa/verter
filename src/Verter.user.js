@@ -51,14 +51,62 @@ function logBotActivity() {
         return;
     }
 
-    const { realTrades, virtualTrades, virtualWins, virtualLosses } = state.activityStats;
-    console.log(`[Bot Activity] Real: ${realTrades}, Virtual: ${virtualTrades} (wins: ${virtualWins}, losses: ${virtualLosses})`);
+    const { realTrades, virtualTrades, virtualWins, virtualLosses, virtualDraws } = state.activityStats;
+    console.log(
+        `[Bot Activity] Real: ${realTrades}, Virtual: ${virtualTrades} (wins: ${virtualWins}, losses: ${virtualLosses}, draws: ${virtualDraws}); Step: ${state.currentBetStep}; Profit: ${state.currentProfit.toFixed(2)}`
+    );
 
     state.activityStats.realTrades = 0;
     state.activityStats.virtualTrades = 0;
     state.activityStats.virtualWins = 0;
     state.activityStats.virtualLosses = 0;
+    state.activityStats.virtualDraws = 0;
     state.activityStats.lastLogTime = now;
+}
+
+function getPriceDecimalPlaces(price, fallback = 5) {
+    if (!Number.isFinite(price)) {
+        return fallback;
+    }
+
+    const decimalPart = price.toString().split('.')[1];
+    if (!decimalPart) {
+        return fallback;
+    }
+
+    return Math.min(fallback, decimalPart.length);
+}
+
+function formatPriceDelta(delta, referencePrice) {
+    if (!Number.isFinite(delta)) {
+        return 'N/A';
+    }
+
+    const decimals = getPriceDecimalPlaces(referencePrice);
+    const formatted = delta.toFixed(decimals);
+    return delta > 0 ? `+${formatted}` : formatted;
+}
+
+function logDetailedStatus() {
+    const lastRealTrade = state.betHistory.length ? state.betHistory[state.betHistory.length - 1] : null;
+    const lastVirtualTrade = state.virtualTrades.length ? state.virtualTrades[state.virtualTrades.length - 1] : null;
+
+    if (!lastRealTrade && !lastVirtualTrade) {
+        console.log('[Detailed] No real trades yet; No virtual trades yet.');
+        return;
+    }
+
+    const realPart = lastRealTrade
+        ? `Last real: step=${lastRealTrade.step}, value=${lastRealTrade.betValue}, result=${lastRealTrade.won || 'pending'}, profit=${
+            typeof lastRealTrade.profit === 'number' ? lastRealTrade.profit.toFixed(2) : 'N/A'
+        }`
+        : 'No real trades yet.';
+
+    const virtualPart = lastVirtualTrade
+        ? `Last virtual: signal=${lastVirtualTrade.signal}, result=${lastVirtualTrade.outcome}, delta=${formatPriceDelta(lastVirtualTrade.priceDelta, lastVirtualTrade.entryPrice)}`
+        : 'No virtual trades yet.';
+
+    console.log(`[Detailed] ${realPart}; ${virtualPart}`);
 }
 
 function getFirstElementByClass(className) {
@@ -339,11 +387,13 @@ const state = {
         virtualTrades: 0,
         virtualWins: 0,
         virtualLosses: 0,
+        virtualDraws: 0,
         lastLogTime: null
     }
 };
 
 setInterval(logBotActivity, 1000);
+setInterval(logDetailedStatus, 60000);
 
 const panelMap = {
     profit: 'profitDiv',
@@ -432,6 +482,8 @@ function startVirtualTrade(signal, direction, price) {
     if (state.activityStats) {
         state.activityStats.virtualTrades += 1;
     }
+
+    console.log("[Virtual Start]", signal, direction, entryPrice, new Date(trade.startTime).toLocaleTimeString());
 }
 
 function closeVirtualTrade(signal) {
@@ -459,11 +511,16 @@ function closeVirtualTrade(signal) {
         else if (priceDelta < 0) outcome = 'loss';
     }
 
+    const deltaLabel = formatPriceDelta(priceDelta, trade.entryPrice);
+    console.log("[Virtual End]", signal, outcome, trade.entryPrice, exitPrice, deltaLabel, new Date(closeTime).toLocaleTimeString());
+
     if (state.activityStats) {
         if (outcome === 'win') {
             state.activityStats.virtualWins += 1;
         } else if (outcome === 'loss') {
             state.activityStats.virtualLosses += 1;
+        } else {
+            state.activityStats.virtualDraws += 1;
         }
     }
 
@@ -485,20 +542,23 @@ function closeVirtualTrade(signal) {
 
 function cleanupOldVirtualTrades() {
     const cutoff = Date.now() - config.virtualTrading.retentionMs;
-    state.virtualTrades = state.virtualTrades.filter(trade => {
+    const filteredTrades = state.virtualTrades.filter(trade => {
         const referenceTime = trade.closeTime || trade.startTime;
         return referenceTime >= cutoff;
     });
+
+    state.virtualTrades = filteredTrades;
+    return filteredTrades;
 }
 
-function getVirtualStats() {
-    if (!Array.isArray(state.virtualTrades) || state.virtualTrades.length === 0) {
+function getVirtualStats(trades = state.virtualTrades) {
+    if (!Array.isArray(trades) || trades.length === 0) {
         return [];
     }
 
     const statsMap = new Map();
 
-    state.virtualTrades.forEach(trade => {
+    trades.forEach(trade => {
         const key = trade.signal || 'unknown';
         if (!statsMap.has(key)) {
             statsMap.set(key, {
@@ -553,11 +613,10 @@ function updateVirtualTradeStats() {
         return;
     }
 
-    cleanupOldVirtualTrades();
-
-    const stats = getVirtualStats();
+    const recentTrades = cleanupOldVirtualTrades();
+    const stats = getVirtualStats(recentTrades);
     if (!stats.length) {
-        state.virtualStatsDiv.innerHTML = '<div style="color: #ccc;">No virtual trades yet.</div>';
+        state.virtualStatsDiv.textContent = 'No virtual trades yet.';
         return;
     }
 
@@ -1209,7 +1268,9 @@ function updateIndicatorUI(scores, values, context) {
     });
 
     window.currentSignal = signal;
-    startVirtualTrade(window.currentSignal, window.currentSignal, state.globalPrice);
+    if (window.currentSignal === 'buy' || window.currentSignal === 'sell') {
+        startVirtualTrade(window.currentSignal, window.currentSignal, state.globalPrice);
+    }
     window.currentShortEMA = shortEMA;
     window.currentLongEMA = longEMA;
     window.currentRSI = rsiValue;
