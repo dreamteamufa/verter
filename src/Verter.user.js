@@ -69,14 +69,12 @@ function logBotActivity() {
     }
 
     const step = MartingaleEngine.getStep(state);
-    const { value, pressCount } = MartingaleEngine.getBetSpec(state.betArray || [], step);
     const arrayLabel = state.betArrayLabel || 'N/A';
     const lastOutcome = state.lastOutcome || 'none';
     const pnl = Number.isFinite(state.currentProfit) ? state.currentProfit.toFixed(2) : '0.00';
+    const mismatchCount = Number.isFinite(state.amountMismatchCount) ? state.amountMismatchCount : 0;
 
-    console.log(
-        `[Bot Activity] Step: ${step} | Value: ${value} | Press: ${pressCount} | Array: ${arrayLabel} | LastOutcome: ${lastOutcome} | CyclePnL: ${pnl}`
-    );
+    console.log(`[Bot Activity] Step=${step} ActiveArray=${arrayLabel} LastOutcome=${lastOutcome} CyclePnL=${pnl} AmountMismatchCount=${mismatchCount}`);
 
     state.activityStats.realTrades = 0;
     state.activityStats.virtualTrades = 0;
@@ -194,14 +192,30 @@ const TradeControls = {
     },
     increaseBet() {
         document.dispatchEvent(new KeyboardEvent('keyup', { keyCode: 68, shiftKey: true }));
-    },
-    setValue(v) {
-        const input = getBetInputElement();
-        if (input) {
-            input.value = v;
-        }
     }
 };
+
+function normalizeToBase() {
+    for (let i = 0; i < 35; i++) {
+        TradeControls.decreaseBet();
+    }
+}
+
+function applyPressCount(n) {
+    for (let i = 0; i < n; i++) {
+        TradeControls.increaseBet();
+    }
+}
+
+function getCurrentBetInputValue() {
+    const el = getBetInputElement();
+    if (!el) {
+        return NaN;
+    }
+
+    const v = parseFloat(String(el.value).replace(/[^0-9.]/g, ''));
+    return Number.isFinite(v) ? v : NaN;
+}
 
 const webhookUrl = 'https://script.google.com/macros/s/AKfycbzNXxnYo6Dg31LIZmo3bqLHIjox-EjIu2M9sX8Lli3-JlHREKGwxwc1ly7EgenJ-Ayw/exec'; //M2
 
@@ -393,6 +407,7 @@ const state = {
     betInput: null,
     betDivContent: '',
     betValue: 0,
+    amountMismatchCount: 0,
     maxStepDiv: null,
     lastTradeTime: 0,
     minTimeBetweenTrades: config.timing.minTimeBetweenTrades,
@@ -761,7 +776,7 @@ let observer = new MutationObserver(function(mutations) {
         const nextStep = MartingaleEngine.nextStep(prevStep, tradeStatus, lastIdx);
 
         if (cycleLimitTriggered) {
-            state.currentBetStep = 0;
+            state.currentBetStep = 0; // переключение массива по текущей логике выполняется внутри evaluateCycleLimits
         } else {
             state.currentBetStep = nextStep;
         }
@@ -1633,7 +1648,10 @@ function executeTrade(tradeDirection, currentBetStep, scores, context) {
 
     state.lastTradeTime = context.time;
 
-    const betValue = getBetValue(currentBetStep);
+    let betValue = getBetValue(currentBetStep);
+    if (Number.isFinite(state.betValue) && state.betValue > 0) {
+        betValue = state.betValue;
+    }
     const tradeRecord = {
         time: context.hTime,
         betTime: state.betTime,
@@ -1715,12 +1733,42 @@ let smartBet = (step, tradeDirection) => {
         logDebug('trade dir is NULL');
     }
 
-    const { value, pressCount } = MartingaleEngine.getBetSpec(state.betArray || [], step);
+    const { pressCount, value } = MartingaleEngine.getBetSpec(state.betArray || [], step);
 
-    TradeControls.setValue(value);
-    for (let i = 0; i < pressCount; i++) {
-        TradeControls.increaseBet();
+    normalizeToBase();
+    applyPressCount(pressCount);
+
+    const initialActual = getCurrentBetInputValue();
+    if (Number.isFinite(initialActual) && initialActual !== value) {
+        if (initialActual > value) {
+            let attempts = 200;
+            while (attempts-- > 0) {
+                const current = getCurrentBetInputValue();
+                if (!Number.isFinite(current) || current <= value) {
+                    break;
+                }
+                TradeControls.decreaseBet();
+            }
+        } else {
+            let attempts = 200;
+            while (attempts-- > 0) {
+                const current = getCurrentBetInputValue();
+                if (!Number.isFinite(current) || current >= value) {
+                    break;
+                }
+                TradeControls.increaseBet();
+            }
+        }
     }
+
+    const finalAmount = getCurrentBetInputValue();
+    if (!Number.isFinite(finalAmount) || finalAmount !== value) {
+        state.amountMismatchCount = (state.amountMismatchCount || 0) + 1;
+    }
+
+    state.betValue = Number.isFinite(finalAmount) ? finalAmount : value;
+
+    console.log(`[Real Open] step=${step} press=${pressCount} amount=${Number.isFinite(finalAmount) ? finalAmount : 'NaN'} dir=${tradeDirection}`);
 
     setTimeout(function() {
         if (tradeDirection == 'buy'){
@@ -1728,11 +1776,9 @@ let smartBet = (step, tradeDirection) => {
         } else {
             TradeControls.sell();
         }
-        state.betValue = value;
         if (state.activityStats) {
             state.activityStats.realTrades += 1;
         }
-        console.log(`[Real Open] step=${step} value=${value} press=${pressCount} dir=${tradeDirection}`);
     }, 100);
 }
 let getBetValue = (betStep) => {
