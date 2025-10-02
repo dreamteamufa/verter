@@ -28,6 +28,23 @@ const config = {
     }
 };
 
+const MartingaleEngine = {
+    getStep(state) {
+        return Number.isInteger(state.currentBetStep) ? state.currentBetStep : 0;
+    },
+    nextStep(prevStep, outcome, lastIndex) {
+        if (outcome === 'won') return 0;
+        if (outcome === 'returned') return prevStep;
+        const s = prevStep + 1;
+        return s > lastIndex ? lastIndex : s;
+    },
+    getBetSpec(betArray, step) {
+        const idx = Math.max(0, Math.min(step, betArray.length - 1));
+        const spec = betArray[idx] || { value: 1, pressCount: 0 };
+        return { step: idx, value: spec.value, pressCount: spec.pressCount };
+    }
+};
+
 function logDebug(...args) {
     if (config.debug.enabled) {
         console.log(...args);
@@ -51,9 +68,14 @@ function logBotActivity() {
         return;
     }
 
-    const { realTrades, virtualTrades, virtualWins, virtualLosses, virtualDraws } = state.activityStats;
+    const step = MartingaleEngine.getStep(state);
+    const { value, pressCount } = MartingaleEngine.getBetSpec(state.betArray || [], step);
+    const arrayLabel = state.betArrayLabel || 'N/A';
+    const lastOutcome = state.lastOutcome || 'none';
+    const pnl = Number.isFinite(state.currentProfit) ? state.currentProfit.toFixed(2) : '0.00';
+
     console.log(
-        `[Bot Activity] Real: ${realTrades}, Virtual: ${virtualTrades} (wins: ${virtualWins}, losses: ${virtualLosses}, draws: ${virtualDraws}); Step: ${state.currentBetStep}; Profit: ${state.currentProfit.toFixed(2)}`
+        `[Bot Activity] Step: ${step} | Value: ${value} | Press: ${pressCount} | Array: ${arrayLabel} | LastOutcome: ${lastOutcome} | CyclePnL: ${pnl}`
     );
 
     state.activityStats.realTrades = 0;
@@ -331,6 +353,9 @@ const state = {
     isTradeOpen: false,
     currentBetStep: 0,
     betArray: null,
+    betArrayLabel: 'A1',
+    lastOutcome: 'none',
+    cycleLimitActive: false,
     betHistory: [],
     priceHistory: [],
     currentBalance: undefined,
@@ -694,7 +719,7 @@ let observer = new MutationObserver(function(mutations) {
 
         let tradeStatus;
         if (centerUp && lastUp){
-            tradeStatus = 'won';            
+            tradeStatus = 'won';
         } else if (centerUp && !lastUp) {
             tradeStatus = 'returned';
         } else if (!centerUp && !lastUp) {
@@ -704,6 +729,10 @@ let observer = new MutationObserver(function(mutations) {
             state.betHistory[state.betHistory.length - 1].won = tradeStatus;
             state.betHistory[state.betHistory.length - 1].profit = betProfit;
         }
+
+        const prevStep = MartingaleEngine.getStep(state);
+        const tradeRecord = state.betHistory.length > 0 ? state.betHistory[state.betHistory.length - 1] : null;
+        const tradeStep = tradeRecord ? tradeRecord.step : prevStep;
 
         // Mark that the trade is now closed
         state.isTradeOpen = false;
@@ -715,6 +744,31 @@ let observer = new MutationObserver(function(mutations) {
         let seconds = parseInt(timeParts[0]) * 3600 + parseInt(timeParts[1]) * 60 + parseInt(timeParts[2]);
 
         let totalBalance = state.prevBalance + betProfit;
+
+        const liveBalance = getBalanceValue(state.balanceDiv);
+        if (Number.isFinite(liveBalance)) {
+            state.currentBalance = liveBalance;
+            state.currentProfit = Math.round((state.currentBalance - state.startBalance) * 100) / 100;
+            totalBalance = state.currentBalance;
+        } else {
+            state.currentBalance = totalBalance;
+            state.currentProfit = Math.round((state.currentBalance - state.startBalance) * 100) / 100;
+        }
+        state.prevBalance = totalBalance;
+
+        const cycleLimitTriggered = evaluateCycleLimits();
+        const lastIdx = Array.isArray(state.betArray) && state.betArray.length > 0 ? state.betArray.length - 1 : 0;
+        const nextStep = MartingaleEngine.nextStep(prevStep, tradeStatus, lastIdx);
+
+        if (cycleLimitTriggered) {
+            state.currentBetStep = 0;
+        } else {
+            state.currentBetStep = nextStep;
+        }
+
+        state.lastOutcome = tradeStatus;
+
+        console.log(`[Real Close] step=${tradeStep} outcome=${tradeStatus} pnl=${betProfit}`);
 
         logTradeToGoogleSheets(
             appversion,
@@ -772,6 +826,7 @@ const betArray3 = [
 ];
 
 state.betArray = betArray1;
+state.betArrayLabel = 'A1';
 state.betHistory = [];
 state.priceHistory = [];
 state.currentBalance = undefined;
@@ -1472,30 +1527,6 @@ function createTradeContext() {
     };
 }
 
-function getPreviousTradeInfo() {
-    const prevBetStep = state.currentBetStep || 0;
-    let tradeStatus = 'won';
-
-    if (state.betHistory.length > 0) {
-        const lastBet = state.betHistory.slice(-1)[0];
-        if (lastBet.won) {
-            tradeStatus = lastBet.won;
-        }
-    }
-
-    return { prevBetStep, tradeStatus };
-}
-
-function determineBetStep(prevBetStep, tradeStatus) {
-    if (tradeStatus === 'won') {
-        return 0;
-    } else if (tradeStatus === 'lost') {
-        return Math.min(prevBetStep + 1, state.betArray.length - 1);
-    }
-
-    return prevBetStep;
-}
-
 function getIndicatorScores() {
     const bullishScore = window.bullishScore || 0;
     const bearishScore = window.bearishScore || 0;
@@ -1536,33 +1567,37 @@ function updateTradeDirectionPanel(tradeDecision, scores) {
     });
 }
 
-function handleProfitLimits() {
+function evaluateCycleLimits() {
+    let triggered = false;
+
     if (state.currentProfit > state.limitWin) {
         state.limitWin = config.limits.limitWin1;
         state.limitLoss = config.limits.limitLoss1;
         state.betArray = betArray1;
+        state.betArrayLabel = 'A1';
         let newDiv = winCycle.cloneNode();
         newDiv.style.height = '30px';
         newDiv.innerHTML = state.currentProfit;
         newDiv.innerHTML += '<div class="max-cycle">' + state.maxStepInCycle + '</div>';
         state.cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('win');
-        return true;
-    }
-
-    if (state.currentProfit - state.betValue < state.limitLoss) {
+        triggered = true;
+    } else if (state.currentProfit - state.betValue < state.limitLoss) {
         if (state.limitWin === config.limits.limitWin1) {
             state.limitWin = config.limits.limitWin2;
             state.limitLoss = config.limits.limitLoss2;
             state.betArray = betArray2;
+            state.betArrayLabel = 'A2';
         } else if (state.limitWin === config.limits.limitWin2) {
             state.limitWin = config.limits.limitWin3;
             state.limitLoss = config.limits.limitLoss3;
             state.betArray = betArray3;
+            state.betArrayLabel = 'A3';
         } else {
             state.limitWin = config.limits.limitWin1;
             state.limitLoss = config.limits.limitLoss1;
             state.betArray = betArray1;
+            state.betArrayLabel = 'A1';
         }
         let newDiv = loseCycle.cloneNode();
         newDiv.style.height = '30px';
@@ -1570,6 +1605,16 @@ function handleProfitLimits() {
         newDiv.innerHTML += '<div class="max-cycle">' + state.maxStepInCycle + '</div>';
         state.cyclesHistoryDiv.appendChild(newDiv);
         resetCycle('lose');
+        triggered = true;
+    }
+
+    state.cycleLimitActive = triggered;
+    return triggered;
+}
+
+function handleProfitLimits() {
+    if (state.cycleLimitActive) {
+        state.cycleLimitActive = false;
         return true;
     }
 
@@ -1635,9 +1680,7 @@ function tradeLogic() {
     const context = createTradeContext();
     debugTradeStatus();
 
-    const { prevBetStep, tradeStatus } = getPreviousTradeInfo();
-    const currentBetStep = determineBetStep(prevBetStep, tradeStatus);
-    state.currentBetStep = currentBetStep;
+    const currentBetStep = MartingaleEngine.getStep(state);
     const scores = getIndicatorScores();
     const tradeDecision = determineTradeDirection(scores);
 
@@ -1668,31 +1711,16 @@ let smartBet = (step, tradeDirection) => {
         return;
     }
 
-    let steps;
-
     if (tradeDirection === 'null'){
         logDebug('trade dir is NULL');
     }
 
-    for (let i = 0; i <state.betArray.length;i++){
-        if (step == state.betArray[i].step){
-            steps = state.betArray[i].pressCount;
-        }
-    }
+    const { value, pressCount } = MartingaleEngine.getBetSpec(state.betArray || [], step);
 
-    for (i=0; i < 30; i++){
-        setTimeout(function() {
-            TradeControls.decreaseBet();
-        }, i);
+    TradeControls.setValue(value);
+    for (let i = 0; i < pressCount; i++) {
+        TradeControls.increaseBet();
     }
-
-    setTimeout(function() {
-        for (i=0; i < steps; i++){
-            setTimeout(function() {
-                TradeControls.increaseBet();
-            }, i);
-        }
-    }, 50);
 
     setTimeout(function() {
         if (tradeDirection == 'buy'){
@@ -1700,20 +1728,16 @@ let smartBet = (step, tradeDirection) => {
         } else {
             TradeControls.sell();
         }
-        let betValue = getBetValue(step);
+        state.betValue = value;
         if (state.activityStats) {
             state.activityStats.realTrades += 1;
         }
+        console.log(`[Real Open] step=${step} value=${value} press=${pressCount} dir=${tradeDirection}`);
     }, 100);
 }
 let getBetValue = (betStep) => {
-    let value;
-    for (let i=0;i<state.betArray.length;i++) {
-        if (betStep == state.betArray[i].step) {
-            value = state.betArray[i].value;
-        }
-    }
-    return value;
+    const spec = MartingaleEngine.getBetSpec(state.betArray || [], betStep);
+    return spec.value;
 }
 let takeRight = (arr, n = 1) => arr.slice(-n);
 Array.prototype.max = function() {
@@ -1734,9 +1758,6 @@ let resetCycle = (winStatus) => {
     updatePanel('profit', undefined, { background: 'inherit' });
 
     state.maxStepInCycle = 0;
-
-    // Reset the current bet step when starting a new cycle
-    state.currentBetStep = 0;
 
     if (state.cyclesToPlay > 0) {
         state.cyclesStats.push(state.currentProfit);
